@@ -8,6 +8,8 @@ class Role(str, Enum):
     MOLIYA = "moliya"
     OMBOR = "ombor"
     SOTUV = "sotuv"
+    HR = "hr"
+    NONE = "none"  # tanib bo'lmagan/kutilmagan holat uchun xavfsiz zaxira — hech qanday tool/model ruxsati yo'q
 
 
 # Role → allowed Odoo tools
@@ -64,6 +66,29 @@ ROLE_TOOLS: dict[Role, list[str]] = {
         "export_excel", "export_word", "export_pdf", "export_csv",
         "generate_html_report",
     ],
+    Role.HR: [
+        "odoo_search_read", "odoo_read_group", "odoo_count",
+        "search_employees_readonly", "get_employees_by_department",
+        "export_excel", "export_word", "export_pdf", "export_csv",
+        "generate_html_report",
+    ],
+    Role.NONE: [],
+}
+
+# Role → qaysi Odoo modellarga odoo_search_read/odoo_read_group/odoo_count
+# orqali murojaat qilish mumkin (P0-3: bu tool'lar BASE_TOOLS sifatida BARCHA
+# rollarga beriladi va model nomini erkin qabul qiladi — shu cheklov bo'lmasa,
+# masalan Sotuv menejeri "model: account.move" deb so'rab Moliya
+# ma'lumotlarini o'qib olishi mumkin edi, garchi role prompt buni "taqiqlagan"
+# bo'lsa ham — prompt LLM uchun ko'rsatma, texnik cheklov emas).
+# None = cheklovsiz (faqat CEO).
+ROLE_ALLOWED_MODELS: dict[Role, set[str] | None] = {
+    Role.CEO: None,
+    Role.MOLIYA: {"account.move", "account.move.line", "account.payment", "res.partner"},
+    Role.OMBOR: {"product.product", "stock.quant", "stock.picking", "stock.move"},
+    Role.SOTUV: {"sale.order", "sale.order.line", "res.partner", "crm.lead", "product.product"},
+    Role.HR: {"hr.employee", "hr.department"},
+    Role.NONE: set(),
 }
 
 # Role → system prompt addition
@@ -83,6 +108,13 @@ Boshqa bo'limlarga kirish huquqingiz yo'q.""",
     Role.SOTUV: """Siz Sotuv menejeri yordamchisiz.
 Faqat sotuv operatsiyalari: mijozlar, CRM lidlar, sotuv buyurtmalari, qarzdorlik.
 Boshqa bo'limlarga kirish huquqingiz yo'q.""",
+
+    Role.HR: """Siz HR menejeri yordamchisiz.
+Faqat xodimlar ma'lumotlari: xodimlar ro'yxati, bo'limlar, lavozimlar.
+Moliya, sotuv, ombor kabi boshqa bo'limlarga kirish huquqingiz yo'q.""",
+
+    Role.NONE: """Sizga hech qanday bo'lim biriktirilmagan — hech qanday ma'lumotga kirish huquqingiz yo'q.
+CEO bilan bog'laning.""",
 }
 
 # Role display name
@@ -91,4 +123,6 @@ ROLE_NAMES: dict[Role, str] = {
     Role.MOLIYA: "💰 Moliya menejeri",
     Role.OMBOR: "📦 Ombor menejeri",
     Role.SOTUV: "🤝 Sotuv menejeri",
+    Role.HR: "🧑‍💼 HR menejeri",
+    Role.NONE: "❓ Noma'lum",
 }

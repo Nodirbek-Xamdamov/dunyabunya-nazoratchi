@@ -615,11 +615,16 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
         "Sotuv": Role.SOTUV,
         "CRM": Role.SOTUV,
         "Marketing": Role.SOTUV,
-        "HR": Role.CEO,
+        "HR": Role.HR,
         "Logistika": Role.OMBOR,
         "Taminot": Role.OMBOR,
     }
-    role = role_map.get(manager.department, Role.CEO)
+    # Tanib bo'lmagan bo'lim (amalda /menejer_biriktir DEPARTMENT_NAMES bo'yicha
+    # oldindan tekshirgani uchun deyarli bo'lmaydi) — xavfsiz tomonga: to'liq
+    # CEO huquqi EMAS, balki hech qanday tool/model ruxsati yo'q Role.NONE.
+    if manager.department not in role_map:
+        log.warning("on_private_dm_message: tanib bo'lmagan bo'lim %r — Role.NONE beriladi", manager.department)
+    role = role_map.get(manager.department, Role.NONE)
 
     await message.answer(replies.assistant_thinking_text())
     try:

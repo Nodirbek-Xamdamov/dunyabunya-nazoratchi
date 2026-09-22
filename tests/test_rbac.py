@@ -2,22 +2,24 @@
 Tests for RBAC (Role-Based Access Control) module.
 """
 import pytest
-from app.rbac import Role, ROLE_TOOLS, ROLE_PROMPTS, ROLE_NAMES
+from app.rbac import Role, ROLE_TOOLS, ROLE_PROMPTS, ROLE_NAMES, ROLE_ALLOWED_MODELS
 
 
 class TestRoles:
     """Test role enum and constants."""
 
     def test_all_roles_exist(self):
-        """All 4 roles must be defined."""
+        """All 6 roles must be defined."""
         assert Role.CEO.value == "ceo"
         assert Role.MOLIYA.value == "moliya"
         assert Role.OMBOR.value == "ombor"
         assert Role.SOTUV.value == "sotuv"
+        assert Role.HR.value == "hr"
+        assert Role.NONE.value == "none"
 
     def test_role_count(self):
-        """Exactly 4 roles."""
-        assert len(Role) == 4
+        """Exactly 6 roles (4 department managers + HR + safe-fallback NONE)."""
+        assert len(Role) == 6
 
 
 class TestRoleTools:
@@ -54,8 +56,12 @@ class TestRoleTools:
                 assert tool in ceo_tools, f"CEO missing tool '{tool}' from {role.value}"
 
     def test_each_role_has_tools(self):
-        """No role should have empty tool list."""
+        """No role should have empty tool list — except Role.NONE, which is the
+        deliberate safe fallback for an unrecognized department (zero access)."""
         for role in Role:
+            if role is Role.NONE:
+                assert ROLE_TOOLS[role] == []
+                continue
             assert len(ROLE_TOOLS[role]) > 0, f"Role {role.value} has no tools"
 
     def test_tool_names_are_strings(self):
@@ -63,6 +69,45 @@ class TestRoleTools:
         for role, tools in ROLE_TOOLS.items():
             for tool in tools:
                 assert isinstance(tool, str), f"Tool in {role.value} is not a string: {tool}"
+
+    def test_hr_has_only_hr_tools(self):
+        """HR should not have finance/sales/warehouse write tools."""
+        hr_tools = set(ROLE_TOOLS[Role.HR])
+        assert "search_kassa_chiqim" not in hr_tools
+        assert "find_partner" not in hr_tools
+        assert "check_stock_quant" not in hr_tools
+        assert "search_employees_readonly" in hr_tools
+
+
+class TestRoleAllowedModels:
+    """P0-3: BASE_TOOLS (odoo_search_read/read_group/count) accept an
+    arbitrary Odoo model — ROLE_ALLOWED_MODELS is the technical enforcement
+    that a role's own ROLE_PROMPTS restriction ("boshqa bo'limga kirish
+    huquqingiz yo'q") can't be talked/prompted around."""
+
+    def test_ceo_is_unrestricted(self):
+        assert ROLE_ALLOWED_MODELS[Role.CEO] is None
+
+    def test_every_non_ceo_role_is_restricted(self):
+        for role in Role:
+            if role is Role.CEO:
+                continue
+            assert ROLE_ALLOWED_MODELS[role] is not None, f"{role.value} must have an explicit model allowlist"
+
+    def test_sotuv_cannot_access_finance_models(self):
+        assert "account.move" not in ROLE_ALLOWED_MODELS[Role.SOTUV]
+        assert "sale.order" in ROLE_ALLOWED_MODELS[Role.SOTUV]
+
+    def test_moliya_cannot_access_sales_or_hr_models(self):
+        assert "sale.order" not in ROLE_ALLOWED_MODELS[Role.MOLIYA]
+        assert "hr.employee" not in ROLE_ALLOWED_MODELS[Role.MOLIYA]
+        assert "account.move" in ROLE_ALLOWED_MODELS[Role.MOLIYA]
+
+    def test_hr_can_only_access_employee_models(self):
+        assert ROLE_ALLOWED_MODELS[Role.HR] == {"hr.employee", "hr.department"}
+
+    def test_none_role_has_zero_model_access(self):
+        assert ROLE_ALLOWED_MODELS[Role.NONE] == set()
 
 
 class TestRolePrompts:

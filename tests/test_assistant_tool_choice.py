@@ -75,7 +75,7 @@ async def test_force_tools_narrows_tools_list_to_requested_names(monkeypatch):
         types.SimpleNamespace(stop_reason="end_turn", content=[_text_block("Hisobot tayyorlandi: http://x/reports/f.xlsx")]),
     ])
 
-    async def fake_exec_tool(name, args):
+    async def fake_exec_tool(name, args, role=None):
         return '"http://x/reports/f.xlsx"'
 
     monkeypatch.setattr(assistant_module, "_exec_tool", fake_exec_tool)
@@ -99,7 +99,7 @@ async def test_tool_choice_only_forced_on_first_iteration(monkeypatch):
         types.SimpleNamespace(stop_reason="end_turn", content=[_text_block("Hisobot tayyorlandi: http://x/reports/g.html")]),
     ])
 
-    async def fake_exec_tool(name, args):
+    async def fake_exec_tool(name, args, role=None):
         return '"http://x/reports/g.html"'
 
     monkeypatch.setattr(assistant_module, "_exec_tool", fake_exec_tool)
@@ -148,7 +148,7 @@ async def test_file_error_captured_when_tool_returns_error_dict(monkeypatch):
         types.SimpleNamespace(stop_reason="end_turn", content=[_text_block("Kechirasiz, hozircha imkoni bo'lmadi.")]),
     ])
 
-    async def fake_exec_tool(name, args):
+    async def fake_exec_tool(name, args, role=None):
         import json
         return json.dumps({"error": "Odoo 30s ichida javob bermadi (timeout)"})
 
@@ -169,7 +169,7 @@ async def test_file_error_captured_when_tool_returns_not_found_string(monkeypatc
         types.SimpleNamespace(stop_reason="end_turn", content=[_text_block("Ma'lumot topilmadi.")]),
     ])
 
-    async def fake_exec_tool(name, args):
+    async def fake_exec_tool(name, args, role=None):
         import json
         return json.dumps("Bu so'rov bo'yicha ma'lumot topilmadi.")
 
@@ -199,7 +199,7 @@ async def test_no_file_error_when_file_successfully_produced(monkeypatch, tmp_pa
         types.SimpleNamespace(stop_reason="end_turn", content=[_text_block(f"Hisobot tayyorlandi: {url}")]),
     ])
 
-    async def fake_exec_tool(name, args):
+    async def fake_exec_tool(name, args, role=None):
         import json
         return json.dumps(url)
 

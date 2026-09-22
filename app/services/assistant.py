@@ -15,7 +15,7 @@ from anthropic import AsyncAnthropic
 from app.config import settings
 from app.db import repo
 from app.db.session import SessionLocal
-from app.rbac import Role, ROLE_TOOLS, ROLE_PROMPTS, ROLE_NAMES
+from app.rbac import Role, ROLE_TOOLS, ROLE_PROMPTS, ROLE_NAMES, ROLE_ALLOWED_MODELS
 from app.services.odoo import OdooClient
 from app.services.odoo_tools import ALL_TOOLS, TOOL_SCHEMAS
 from app.prompt_guard import SECURITY_FRAGMENT, wrap_user_input
@@ -206,9 +206,25 @@ QOIDALAR:
 """
 
 
-async def _exec_tool(name: str, args: dict) -> str:
-    """Tool ni bajarish — asosiy yoki rolga xos."""
+_BASE_MODEL_TOOLS = {"odoo_search_read", "odoo_read_group", "odoo_count"}
+
+
+async def _exec_tool(name: str, args: dict, role: Role) -> str:
+    """Tool ni bajarish — asosiy yoki rolga xos.
+
+    odoo_search_read/odoo_read_group/odoo_count BASE_TOOLS sifatida BARCHA
+    rollarga beriladi va `model` parametrini erkin qabul qiladi — shuning
+    uchun bu yerda ROLE_ALLOWED_MODELS bo'yicha qayta tekshirilmasa, masalan
+    Sotuv menejeri "model: account.move" deb so'rab Moliya ma'lumotlarini
+    o'qib olishi mumkin bo'lardi (role prompt buni "taqiqlaydi", lekin bu
+    LLM uchun ko'rsatma, texnik cheklov emas)."""
     try:
+        if name in _BASE_MODEL_TOOLS:
+            allowed = ROLE_ALLOWED_MODELS.get(role)
+            model = args.get("model", "")
+            if allowed is not None and model not in allowed:
+                log.warning("tool %s: role=%s model=%r ruxsat etilmagan — rad etildi", name, role.value, model)
+                return json.dumps({"error": f"Sizning rolingiz '{model}' modeliga kira olmaydi."})
         if name == "odoo_search_read":
             r = await _odoo.execute_kw(
                 args["model"], "search_read",
@@ -327,7 +343,7 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
         results = []
         if tool_uses:
             executed = await asyncio.gather(
-                *[_exec_tool(b.name, b.input) for b in tool_uses]
+                *[_exec_tool(b.name, b.input, role) for b in tool_uses]
             )
             for b, r in zip(tool_uses, executed):
                 _collect_report_files(r, found_files)
