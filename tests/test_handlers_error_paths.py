@@ -123,20 +123,31 @@ def _analyze_result(**overrides) -> AnalyzeResult:
     return AnalyzeResult(**base)
 
 
-# ── 0) Bo'lim topiklari (on_topic_message) — faqat CEO ──────────────────────
+# ── 0) Bo'lim topiklari (on_topic_message) — HAMMA a'zoga ochiq ─────────────
+# Spec (4-bo'lim): "Bo'lim mavzusi (asosiy guruh): Vazifalar o'sha bo'lim
+# loyihasiga yoziladi. Savollar ham berilsa bo'ladi — AI javob beradi."
+# CEO-only cheklov FAQAT "boshqa guruhlar" uchun (pastda) — bu yerga
+# TEGMASLIK kerak (spec 4-bo'lim, "DIQQAT" eslatmasi).
 
-async def test_topic_message_ignores_non_ceo_sender(monkeypatch):
-    """Bo'lim topikida ham (General kabi) faqat CEO xabari qabul qilinishi
-    kerak — aks holda istalgan guruh a'zosi ism aytib Odoo'da vazifa
-    yaratdira olardi. get_message_text hatto chaqirilmasligi kerak (CEO
-    tekshiruvi eng boshida, Whisper transkripsiyasidan OLDIN turadi)."""
+async def test_topic_message_processes_non_ceo_sender(monkeypatch):
+    """Bo'lim topikida istalgan xodim/menejer yozganda ham xabar odatdagidek
+    qayta ishlanishi kerak (get_message_text chaqiriladi, CEO-filtri YO'Q)."""
     called = {"get_message_text": False}
 
     async def fake_get_message_text(message, bot):
         called["get_message_text"] = True
         return "Omborni tekshiring"
 
+    async def fake_get_topic_by_telegram_id(session, thread_id):
+        return None  # ro'yxatdan o'tmagan mavzu — assistant javobiga tushadi
+
+    async def fake_assistant_reply(bot, text, thread_id=None):
+        pass
+
     monkeypatch.setattr(handlers, "get_message_text", fake_get_message_text)
+    monkeypatch.setattr(handlers.repo, "get_topic_by_telegram_id", fake_get_topic_by_telegram_id)
+    monkeypatch.setattr(handlers, "_assistant_reply", fake_assistant_reply)
+    monkeypatch.setattr(handlers, "SessionLocal", _session_factory())
     monkeypatch.setattr(handlers.settings, "CEO_TELEGRAM_USER_ID", 555)
     monkeypatch.setattr(handlers.settings, "CEO_TELEGRAM_USERNAME", "")
 
@@ -145,9 +156,7 @@ async def test_topic_message_ignores_non_ceo_sender(monkeypatch):
                            user=_FakeUser(uid=111, username="boshqa_xodim"))
     await handlers.on_topic_message(message, bot)
 
-    assert called["get_message_text"] is False
-    assert bot.sent == []
-    assert bot.chat_actions == []
+    assert called["get_message_text"] is True
 
 
 # ── 1) GENERAL topik hech qachon task yozmaydi ──────────────────────────────
