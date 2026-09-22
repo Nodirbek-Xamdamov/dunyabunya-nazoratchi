@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 from app.config import settings
@@ -10,6 +11,13 @@ from app.services.odoo import OdooClient
 
 _odoo = OdooClient()
 REPORTS_DIR = Path(settings.STORAGE_DIR) / "reports"
+
+
+def _unguessable_suffix() -> str:
+    """8 hex-belgili tasodifiy token — hisobot fayl nomlariga qo'shiladi (P0-2:
+    Odoo record ID'sini to'g'ridan-to'g'ri fayl nomiga yozish uni taxmin qilib
+    topib bo'ladigan qiladi, masalan invoice_123.pdf, invoice_124.pdf, ...)."""
+    return uuid.uuid4().hex[:8]
 
 
 # ─── MOLIYA TOOLS ──────────────────────────────────────────────────────────
@@ -92,9 +100,10 @@ async def get_invoice_pdf(invoice_id: int) -> str | None:
         from app.services.pdf_documents import render_invoice_pdf
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         tmp_path = await asyncio.to_thread(render_invoice_pdf, {"invoice": invoices[0], "lines": lines})
-        out_path = REPORTS_DIR / f"invoice_{invoice_id}.pdf"
+        filename = f"invoice_{invoice_id}_{_unguessable_suffix()}.pdf"
+        out_path = REPORTS_DIR / filename
         shutil.move(tmp_path, str(out_path))
-        return f"{settings.PUBLIC_BASE_URL}/reports/invoice_{invoice_id}.pdf"
+        return f"{settings.PUBLIC_BASE_URL}/reports/{filename}"
     except Exception:
         return None
 
@@ -114,9 +123,10 @@ async def get_payment_receipt_pdf(payment_id: int) -> str | None:
         from app.services.pdf_documents import render_payment_receipt_pdf
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         tmp_path = await asyncio.to_thread(render_payment_receipt_pdf, {"payment": payments[0]})
-        out_path = REPORTS_DIR / f"payment_{payment_id}.pdf"
+        filename = f"payment_{payment_id}_{_unguessable_suffix()}.pdf"
+        out_path = REPORTS_DIR / filename
         shutil.move(tmp_path, str(out_path))
-        return f"{settings.PUBLIC_BASE_URL}/reports/payment_{payment_id}.pdf"
+        return f"{settings.PUBLIC_BASE_URL}/reports/{filename}"
     except Exception:
         return None
 
@@ -192,9 +202,10 @@ async def get_delivery_slip_pdf(picking_id: int) -> str | None:
         from app.services.pdf_documents import render_delivery_slip_pdf
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         tmp_path = await asyncio.to_thread(render_delivery_slip_pdf, {"picking": pickings[0], "moves": moves})
-        out_path = REPORTS_DIR / f"delivery_{picking_id}.pdf"
+        filename = f"delivery_{picking_id}_{_unguessable_suffix()}.pdf"
+        out_path = REPORTS_DIR / filename
         shutil.move(tmp_path, str(out_path))
-        return f"{settings.PUBLIC_BASE_URL}/reports/delivery_{picking_id}.pdf"
+        return f"{settings.PUBLIC_BASE_URL}/reports/{filename}"
     except Exception:
         return None
 
@@ -300,9 +311,10 @@ async def get_sale_order_pdf(order_id: int) -> str | None:
         from app.services.pdf_documents import render_sale_order_pdf
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         tmp_path = await asyncio.to_thread(render_sale_order_pdf, {"order": orders[0], "lines": lines})
-        out_path = REPORTS_DIR / f"sale_order_{order_id}.pdf"
+        filename = f"sale_order_{order_id}_{_unguessable_suffix()}.pdf"
+        out_path = REPORTS_DIR / filename
         shutil.move(tmp_path, str(out_path))
-        return f"{settings.PUBLIC_BASE_URL}/reports/sale_order_{order_id}.pdf"
+        return f"{settings.PUBLIC_BASE_URL}/reports/{filename}"
     except Exception:
         return None
 

@@ -45,5 +45,8 @@ class Settings(BaseSettings):
     OTHER_GROUP_MIN_DEPARTMENT_SCORE: float = 0.3
     OTHER_GROUP_MIN_TASK_CONFIDENCE: float = 0.70
 
+    # Hisobot havolalari qancha soatdan keyin muddati o'tgan hisoblanadi (P0-2)
+    REPORT_LINK_TTL_HOURS: int = 48
+
 
 settings = Settings()

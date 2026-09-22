@@ -7,9 +7,15 @@ return URL instead" izohi bilan) — CEO/menejer bu linkni bossa doim "fayl topi
 bo'lardi. Endi haqiqiy PDF (`app/services/pdf_documents.py`dagi reportlab renderlari
 orqali) generatsiya qilinib, REPORTS_DIR'ga saqlanadi. Barcha testlar Odoo'ga mok'langan
 — tarmoqqa chiqilmaydi, reportlab esa haqiqiy fayl yozadi (vaqtinchalik papkaga).
+
+Fayl nomlari record ID'dan TASHQARI tasodifiy 8-hex tokenga ega (P0-2: taxmin
+qilib boshqa hisobotni topib olishning oldini olish uchun) — shuning uchun
+testlar aniq nom o'rniga naqsh (prefix + tasodifiy suffiks + kengaytma)ni
+tekshiradi.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -41,10 +47,30 @@ async def test_get_invoice_pdf_writes_real_file_and_returns_url(monkeypatch):
     url = await odoo_tools.get_invoice_pdf(1)
 
     assert calls == ["account.move", "account.move.line"]
-    assert url == f"{odoo_tools.settings.PUBLIC_BASE_URL}/reports/invoice_1.pdf"
-    out_path = odoo_tools.REPORTS_DIR / "invoice_1.pdf"
+    prefix = f"{odoo_tools.settings.PUBLIC_BASE_URL}/reports/invoice_1_"
+    assert url.startswith(prefix) and url.endswith(".pdf")
+    assert re.fullmatch(r"[0-9a-f]{8}", url[len(prefix):-len(".pdf")])
+    out_path = odoo_tools.REPORTS_DIR / url.rsplit("/", 1)[-1]
     assert out_path.exists()
     assert out_path.stat().st_size > 0
+
+
+async def test_get_invoice_pdf_filename_unguessable_across_calls(monkeypatch):
+    """P0-2 regressiya: bir xil invoice_id uchun ikki marta chaqirilsa ham fayl
+    nomi HAR SAFAR boshqacha bo'lishi kerak (avval faqat invoice_{id}.pdf edi —
+    ichki tarmoqdagi istalgan kishi ID'larni ketma-ket sanab boshqa hisob-fakturalarni
+    ochib ko'ra olardi)."""
+    async def fake_execute_kw(model, method, args, kwargs=None):
+        if model == "account.move":
+            return [{"id": 1, "name": "INV/001", "invoice_date": "2026-09-01",
+                      "partner_id": [5, "Mijoz"], "payment_state": "not_paid",
+                      "amount_total": 1000.0, "amount_tax": 100.0, "amount_residual": 1000.0}]
+        return []
+
+    monkeypatch.setattr(odoo_tools._odoo, "execute_kw", fake_execute_kw)
+    url_1 = await odoo_tools.get_invoice_pdf(1)
+    url_2 = await odoo_tools.get_invoice_pdf(1)
+    assert url_1 != url_2
 
 
 async def test_get_invoice_pdf_returns_none_when_not_found(monkeypatch):
@@ -65,8 +91,9 @@ async def test_get_payment_receipt_pdf_writes_real_file(monkeypatch):
     monkeypatch.setattr(odoo_tools._odoo, "execute_kw", fake_execute_kw)
     url = await odoo_tools.get_payment_receipt_pdf(7)
 
-    assert url == f"{odoo_tools.settings.PUBLIC_BASE_URL}/reports/payment_7.pdf"
-    assert (odoo_tools.REPORTS_DIR / "payment_7.pdf").exists()
+    prefix = f"{odoo_tools.settings.PUBLIC_BASE_URL}/reports/payment_7_"
+    assert url.startswith(prefix) and url.endswith(".pdf")
+    assert (odoo_tools.REPORTS_DIR / url.rsplit("/", 1)[-1]).exists()
 
 
 async def test_get_delivery_slip_pdf_maps_quantity_field_and_writes_file(monkeypatch):
@@ -86,8 +113,9 @@ async def test_get_delivery_slip_pdf_maps_quantity_field_and_writes_file(monkeyp
     monkeypatch.setattr(odoo_tools._odoo, "execute_kw", fake_execute_kw)
     url = await odoo_tools.get_delivery_slip_pdf(3)
 
-    assert url == f"{odoo_tools.settings.PUBLIC_BASE_URL}/reports/delivery_3.pdf"
-    assert (odoo_tools.REPORTS_DIR / "delivery_3.pdf").exists()
+    prefix = f"{odoo_tools.settings.PUBLIC_BASE_URL}/reports/delivery_3_"
+    assert url.startswith(prefix) and url.endswith(".pdf")
+    assert (odoo_tools.REPORTS_DIR / url.rsplit("/", 1)[-1]).exists()
 
 
 async def test_get_sale_order_pdf_writes_real_file(monkeypatch):
@@ -104,5 +132,6 @@ async def test_get_sale_order_pdf_writes_real_file(monkeypatch):
     monkeypatch.setattr(odoo_tools._odoo, "execute_kw", fake_execute_kw)
     url = await odoo_tools.get_sale_order_pdf(9)
 
-    assert url == f"{odoo_tools.settings.PUBLIC_BASE_URL}/reports/sale_order_9.pdf"
-    assert (odoo_tools.REPORTS_DIR / "sale_order_9.pdf").exists()
+    prefix = f"{odoo_tools.settings.PUBLIC_BASE_URL}/reports/sale_order_9_"
+    assert url.startswith(prefix) and url.endswith(".pdf")
+    assert (odoo_tools.REPORTS_DIR / url.rsplit("/", 1)[-1]).exists()
