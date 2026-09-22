@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 # Fuzzy ism solishtirish: RapidFuzz (tez) — mavjud bo'lmasa difflib fallback
 _SIMILARITY_THRESHOLD = 75.0   # score >= 75 bo'lgan nomzodlar qabul qilinadi
 _CLEAR_LEAD_GAP = 10.0         # yetakchi ikkinchidan shuncha ko'p bo'lsa — yagona nomzod
+_LOOSE_SIMILARITY_FLOOR = 40.0  # ro'yxatdan o'tishda "o'xshash nomlar" taklifi uchun (pastroq chegara)
 
 try:
     from rapidfuzz import fuzz as _rapidfuzz_fuzz
@@ -272,14 +273,20 @@ class OdooClient:
         _employees_cache = (now, employees)
         return employees
 
-    def _fuzzy_match_candidates(self, name_query: str, candidates: list[dict]) -> list[dict]:
+    def _fuzzy_match_candidates(self, name_query: str, candidates: list[dict],
+                                 threshold: float = _SIMILARITY_THRESHOLD,
+                                 limit: int | None = None) -> list[dict]:
         """Berilgan nomzodlar ro'yxatini (har biri kamida `id`+`name`) ism bo'yicha
         fuzzy solishtiradi. `find_users_by_name`/`find_employees_by_name` uchun
         umumiy yadro — model (res.users/hr.employee) farqi faqat CHAQIRUVCHIDA.
 
         - RapidFuzz token_set_ratio/partial_ratio (so'z tartibi, kelishik va
           erkalash qo'shimchalariga chidamli);
-        - Faqat score >= 75 bo'lgan nomzodlar qaytadi, ball kamayish tartibida;
+        - Faqat score >= `threshold` bo'lgan nomzodlar qaytadi, ball kamayish
+          tartibida (sukut — qattiq _SIMILARITY_THRESHOLD, lekin chaqiruvchi
+          pastroq chegara bilan "o'xshash nomlar" ro'yxati uchun ham ishlatishi
+          mumkin — `find_employees_by_name_loose`ga qarang);
+        - `limit` berilsa, natija shunga qadar cheklanadi (eng yuqori balldan);
         - Dublikatlar (id va normallashtirilgan ism bo'yicha) olib tashlanadi.
         """
         if not name_query or not name_query.strip():
@@ -301,12 +308,13 @@ class OdooClient:
             if not uname_norm:
                 continue
             score = self._similarity_score(query_norm, uname_norm)
-            if score >= _SIMILARITY_THRESHOLD:
+            if score >= threshold:
                 matched.append({**u, "id": u["id"], "name": u["name"], "score": round(score, 1)})
 
         matched.sort(key=lambda c: c["score"], reverse=True)
         # Dublikatlarni olib tashlaymiz — bir xil xodim ikki marta chiqmasligi uchun
-        return self._dedupe_users(matched)
+        deduped = self._dedupe_users(matched)
+        return deduped[:limit] if limit is not None else deduped
 
     async def find_users_by_name(self, name_query: str) -> list[dict]:
         """Ismni Odoo LOGIN hisobi (res.users) bo'yicha fuzzy qidirish — faqat
@@ -326,6 +334,19 @@ class OdooClient:
         """
         all_employees = await self._get_active_employees()
         return self._fuzzy_match_candidates(name_query, all_employees)
+
+    async def find_employees_by_name_loose(self, name_query: str, limit: int = 5) -> list[dict]:
+        """`find_employees_by_name` qat'iy chegara (score>=75) bilan HECH KIMNI
+        topmasa ishlatiladigan zaxira: xuddi shu hodimlar ro'yxati ustida,
+        lekin ANCHA PASTROQ chegara (_LOOSE_SIMILARITY_FLOOR) bilan eng yaqin
+        `limit` ta nomzodni qaytaradi — ro'yxatdan o'tishda foydalanuvchi to'liq
+        F.I.SH. yozganda-yu, aniq moslik topilmaganda "bunlardan biri sizmi?"
+        deb taklif qilish uchun (aks holda foydalanuvchi "topilmadi" xabari bilan
+        hech qanday chiqish yo'lisiz qolib ketardi)."""
+        all_employees = await self._get_active_employees()
+        return self._fuzzy_match_candidates(
+            name_query, all_employees, threshold=_LOOSE_SIMILARITY_FLOOR, limit=limit,
+        )
 
     async def get_all_employees(self) -> list[dict]:
         """Barcha faol xodimlar ro'yxatini olish (hr.employee yoki res.users)."""

@@ -83,6 +83,40 @@ async def test_find_users_and_find_employees_use_separate_caches(client, monkeyp
     assert r2[0]["id"] == 2
 
 
+async def test_find_employees_by_name_loose_returns_below_threshold_matches(client, monkeypatch):
+    """Qat'iy find_employees_by_name (score>=75) hech kimni topmaydigan holatda
+    ham, _loose (score>=40) yaqin nomzodlarni qaytarishi kerak."""
+    async def fake_execute_kw(model, method, args, kwargs=None):
+        return [{"id": 1, "name": "Karim Yusupov"}, {"id": 2, "name": "Botir Aliyev"}]
+
+    monkeypatch.setattr(client, "execute_kw", fake_execute_kw)
+
+    # To'liq F.I.SH. — familiya+ism+otasining ismi, Odoo'da esa faqat ism+familya bor
+    strict = await client.find_employees_by_name("Karim Yusupov Aliyevich Toshkentovich")
+    loose = await client.find_employees_by_name_loose("Karim Yusupov Aliyevich Toshkentovich")
+    assert len(loose) >= len(strict)
+    assert any(c["id"] == 1 for c in loose)
+
+
+async def test_find_employees_by_name_loose_respects_limit(client, monkeypatch):
+    async def fake_execute_kw(model, method, args, kwargs=None):
+        return [{"id": i, "name": f"Test Ism {i}"} for i in range(10)]
+
+    monkeypatch.setattr(client, "execute_kw", fake_execute_kw)
+    result = await client.find_employees_by_name_loose("Test Ism", limit=3)
+    assert len(result) <= 3
+
+
+async def test_find_employees_by_name_loose_still_excludes_unrelated_names(client, monkeypatch):
+    """Pastroq chegara ham CHEKSIZ emas — umuman aloqasi yo'q ismlar hali ham chiqmasligi kerak."""
+    async def fake_execute_kw(model, method, args, kwargs=None):
+        return [{"id": 1, "name": "Zzzz Qqqqq"}]
+
+    monkeypatch.setattr(client, "execute_kw", fake_execute_kw)
+    result = await client.find_employees_by_name_loose("Nodir Xamdamov")
+    assert result == []
+
+
 # ── _find_registration_candidates: res.users -> hr.employee zanjiri ─────────
 
 async def test_registration_prefers_res_users_when_found(monkeypatch):
@@ -95,8 +129,9 @@ async def test_registration_prefers_res_users_when_found(monkeypatch):
     monkeypatch.setattr(handlers_manager._odoo, "find_users_by_name", fake_find_users)
     monkeypatch.setattr(handlers_manager._odoo, "find_employees_by_name", fake_find_employees)
 
-    candidates, used_fallback = await handlers_manager._find_registration_candidates("Sardor")
+    candidates, used_fallback, is_loose = await handlers_manager._find_registration_candidates("Sardor")
     assert used_fallback is False
+    assert is_loose is False
     assert candidates[0]["source"] == "res.users"
     assert candidates[0]["id"] == 10
 
@@ -113,25 +148,58 @@ async def test_registration_falls_back_to_hr_employee_when_res_users_empty(monke
     monkeypatch.setattr(handlers_manager._odoo, "find_users_by_name", fake_find_users)
     monkeypatch.setattr(handlers_manager._odoo, "find_employees_by_name", fake_find_employees)
 
-    candidates, used_fallback = await handlers_manager._find_registration_candidates("Karim")
+    candidates, used_fallback, is_loose = await handlers_manager._find_registration_candidates("Karim")
     assert used_fallback is True
+    assert is_loose is False
     assert len(candidates) == 1
     assert candidates[0]["source"] == "hr.employee"
     assert candidates[0]["id"] == 999
 
 
-async def test_registration_empty_when_neither_finds_anything(monkeypatch):
+async def test_registration_uses_loose_suggestions_when_strict_search_empty(monkeypatch):
+    """Yangi xatti-harakat: res.users VA qat'iy hr.employee ikkalasi ham hech
+    narsa topmasa (masalan foydalanuvchi to'liq F.I.SH. yozgan-u, Odoo'da faqat
+    ism-familya saqlangan bo'lsa), pastroq chegara bilan 'o'xshash' nomzodlar
+    taklif qilinishi kerak — foydalanuvchi tugab qolmasligi uchun."""
     async def fake_find_users(name):
         return []
 
     async def fake_find_employees(name):
         return []
 
+    async def fake_find_loose(name, limit=5):
+        assert name == "Karim Yusupov Aliyevich"
+        return [{"id": 999, "name": "Karim Yusupov", "score": 55.0}]
+
     monkeypatch.setattr(handlers_manager._odoo, "find_users_by_name", fake_find_users)
     monkeypatch.setattr(handlers_manager._odoo, "find_employees_by_name", fake_find_employees)
+    monkeypatch.setattr(handlers_manager._odoo, "find_employees_by_name_loose", fake_find_loose)
 
-    candidates, used_fallback = await handlers_manager._find_registration_candidates("Notanish")
+    candidates, used_fallback, is_loose = await handlers_manager._find_registration_candidates("Karim Yusupov Aliyevich")
+    assert is_loose is True
+    assert used_fallback is True
+    assert len(candidates) == 1
+    assert candidates[0]["source"] == "hr.employee"
+    assert candidates[0]["id"] == 999
+
+
+async def test_registration_empty_when_nothing_found_even_loosely(monkeypatch):
+    async def fake_find_users(name):
+        return []
+
+    async def fake_find_employees(name):
+        return []
+
+    async def fake_find_loose(name, limit=5):
+        return []
+
+    monkeypatch.setattr(handlers_manager._odoo, "find_users_by_name", fake_find_users)
+    monkeypatch.setattr(handlers_manager._odoo, "find_employees_by_name", fake_find_employees)
+    monkeypatch.setattr(handlers_manager._odoo, "find_employees_by_name_loose", fake_find_loose)
+
+    candidates, used_fallback, is_loose = await handlers_manager._find_registration_candidates("Notanish")
     assert candidates == []
+    assert is_loose is True
     assert used_fallback is False
 
 

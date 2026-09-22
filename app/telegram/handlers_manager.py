@@ -145,8 +145,7 @@ async def on_start(message: Message) -> None:
         return
     _waiting_name.add(user_id)
     await message.answer(
-        "👋 Assalomu alaykum! Botga xush kelibsiz!\n\n"
-        "Iltimos, ismingizni yozing."
+        "👋 Assalomu alaykum! Iltimos, o'zingizning to'liq F.I.SH. ni kiriting."
     )
 
 
@@ -167,7 +166,7 @@ async def on_change_name(message: Message) -> None:
         )
         return
     _waiting_name.add(user_id)
-    await message.answer("📝 Ismingizni yozing:")
+    await message.answer("📝 To'liq F.I.SH. ni kiriting:")
 
 
 @router.message(Command("unlink"), F.chat.type == "private")
@@ -313,7 +312,7 @@ async def on_confirm(callback: CallbackQuery, bot: Bot) -> None:
     else:
         try:
             await callback.message.edit_text(
-                "🔄 Qaytadan ismingizni yozing:", reply_markup=None
+                "🔄 Qaytadan to'liq F.I.SH. ni kiriting:", reply_markup=None
             )
         except Exception:
             pass
@@ -375,26 +374,38 @@ _NO_LOGIN_NOTE = (
 )
 
 
-async def _find_registration_candidates(name: str) -> tuple[list[dict], bool]:
+async def _find_registration_candidates(name: str) -> tuple[list[dict], bool, bool]:
     """Ism bo'yicha ro'yxatdan o'tish nomzodlarini qidiradi: avval Odoo LOGIN
     hisobi (res.users) bo'yicha, TOPILMASA — butun hodimlar ro'yxati (hr.employee)
-    bo'yicha ham. Ikkinchi holat uchun `used_employee_fallback=True` qaytadi
-    (chaqiruvchi shu asosida login yo'qligi haqida ogohlantirish ko'rsatadi).
+    bo'yicha ham (qat'iy chegara bilan), TOPILMASA — xuddi shu ro'yxat ustida
+    PASTROQ chegara bilan "o'xshash nomlar" taklifi (masalan foydalanuvchi
+    to'liq F.I.SH. yozganda, Odoo'da esa faqat ism-familya saqlangan bo'lsa,
+    qat'iy moslik score'ni pasaytirib yuborishi mumkin — shunday holatda ham
+    foydalanuvchi tugab qolmasligi uchun).
 
-    SABAB: jonli Odoo'da tekshirilgan — 180 ta faol hodimdan atigi 54 tasi
-    res.users (login) hisobiga ega. Faqat res.users bo'yicha qidirilsa, qolgan
-    ~126 nafar xodim ISMI QANCHALIK ANIQ YOZILISHIDAN QAT'IY NAZAR hech qachon
-    topilmas va /start orqali ro'yxatdan o'ta olmas edi ("ismlarni yaxshi
-    ajratmayapti" shikoyatining asosiy sababi shu edi — muammo fuzzy-moslashtirish
-    sifatida emas, qidiruv doirasi res.users bilan cheklanganida edi).
+    Qaytadi: (nomzodlar, used_employee_fallback, is_loose_suggestion).
+    `used_employee_fallback`/`is_loose_suggestion` — ikkalasi ham chaqiruvchiga
+    tegishli ogohlantirish/matn ko'rsatish uchun.
+
+    SABAB (qat'iy→hr.employee bosqichi): jonli Odoo'da tekshirilgan — 180 ta
+    faol hodimdan atigi 54 tasi res.users (login) hisobiga ega. Faqat res.users
+    bo'yicha qidirilsa, qolgan ~126 nafar xodim ISMI QANCHALIK ANIQ YOZILISHIDAN
+    QAT'IY NAZAR hech qachon topilmas va /start orqali ro'yxatdan o'ta olmas
+    edi ("ismlarni yaxshi ajratmayapti" shikoyatining asosiy sababi shu edi —
+    muammo fuzzy-moslashtirish sifatida emas, qidiruv doirasi res.users bilan
+    cheklanganida edi).
     """
     users = await _odoo.find_users_by_name(name)
     candidates = [{**u, "source": "res.users"} for u in users]
     if candidates:
-        return candidates, False
+        return candidates, False, False
 
     employees = await _odoo.find_employees_by_name(name)
-    return [{**e, "source": "hr.employee"} for e in employees], bool(employees)
+    if employees:
+        return [{**e, "source": "hr.employee"} for e in employees], True, False
+
+    loose = await _odoo.find_employees_by_name_loose(name)
+    return [{**e, "source": "hr.employee"} for e in loose], bool(loose), True
 
 
 async def _register_employee_by_name(message: Message, user_id: int) -> None:
@@ -406,22 +417,22 @@ async def _register_employee_by_name(message: Message, user_id: int) -> None:
     _waiting_name.discard(user_id)
 
     try:
-        candidates, used_fallback = await _find_registration_candidates(name)
+        candidates, used_fallback, is_loose = await _find_registration_candidates(name)
     except Exception as e:
         log.exception("_register_employee_by_name: Odoo qidiruvida xatolik")
         _waiting_name.add(user_id)  # qayta urinib ko'rish uchun holatni saqlaymiz
-        await message.answer(f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {str(e)[:200]}\nQaytadan ismingizni yozing.")
+        await message.answer(f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {str(e)[:200]}\nQaytadan to'liq F.I.SH. ni kiriting.")
         return
 
-    log.info("_register_employee_by_name: name=%r -> %d nomzod (fallback=%s)",
-              name, len(candidates), used_fallback)
+    log.info("_register_employee_by_name: name=%r -> %d nomzod (fallback=%s, loose=%s)",
+              name, len(candidates), used_fallback, is_loose)
     note = _NO_LOGIN_NOTE if used_fallback else ""
 
-    # Hech narsa topilmasa — ro'yxatdan o'tish mumkin emas
+    # Hech narsa topilmasa (aniq HAM, o'xshash HAM) — ro'yxatdan o'tish mumkin emas
     if not candidates:
         await message.answer(
-            f"⚠️ \"{name}\" bo'yicha Odoo'da hech qanday mos hodim topilmadi.\n"
-            f"Faqat Odoo'dagi hodimlar ro'yxatdan o'ta oladi."
+            f"⚠️ \"{name}\" bo'yicha Odoo'da hech qanday mos yoki o'xshash hodim topilmadi.\n"
+            f"Faqat Odoo'dagi hodimlar ro'yxatdan o'ta oladi. F.I.SH.ni tekshirib, qayta yozing."
         )
         return
 
@@ -438,8 +449,9 @@ async def _register_employee_by_name(message: Message, user_id: int) -> None:
                 InlineKeyboardButton(text="❌ Yo'q", callback_data=f"confirm:no:{user_id}"),
             ]
         ])
+        header = "🔍 Aniq mos kelmadi, lekin bunga o'xshash topildi" if is_loose else "🔍 Odoo'da topildi"
         await message.answer(
-            f"🔍 Odoo'da topildi:\n\n"
+            f"{header}:\n\n"
             f"<b>{chosen['name']}</b>\n\n"
             f"Bu sizmisiz? Tasdiqlaysizmi?{note}",
             reply_markup=buttons, parse_mode="HTML",
@@ -453,8 +465,13 @@ async def _register_employee_by_name(message: Message, user_id: int) -> None:
         for u in candidates[:10]
     ]
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    header = (
+        f"⚠️ \"{name}\" bo'yicha aniq moslik topilmadi, lekin {len(candidates)} ta o'xshash hodim bor"
+        if is_loose else
+        f"⚠️ \"{name}\" bo'yicha {len(candidates)} ta hodim topildi"
+    )
     await message.answer(
-        f"⚠️ \"{name}\" bo'yicha {len(candidates)} ta hodim topildi.\n"
+        f"{header}.\n"
         f"O'zingizni tanlang:{note}",
         reply_markup=keyboard,
     )
