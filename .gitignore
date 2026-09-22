@@ -11,3 +11,5 @@ run.out.log
 run.err.log
 run.pid.txt
 _deprecated_unused/
+tools/cloudflared.exe
+tools/cloudflared.log
