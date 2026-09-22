@@ -10,9 +10,10 @@ from __future__ import annotations
 import asyncio
 import time
 
-from aiogram.types import Update
+from aiogram.types import Chat, Message, Update, User
 
 import app.main as main_module
+import app.rate_limiter as rate_limiter
 
 
 async def test_updates_dispatched_in_parallel(monkeypatch):
@@ -59,3 +60,51 @@ async def test_spawn_returns_immediately(monkeypatch):
     for task in list(main_module._ACTIVE_UPDATES):
         task.cancel()
     await asyncio.gather(*main_module._ACTIVE_UPDATES, return_exceptions=True)
+
+
+# ── P1-5: throttling _run_update darajasida ─────────────────────────────
+
+def _make_message_update(update_id: int, user_id: int) -> Update:
+    user = User(id=user_id, is_bot=False, first_name="Test")
+    chat = Chat(id=user_id, type="private")
+    msg = Message(message_id=1, date=int(time.time()), chat=chat, from_user=user, text="salom")
+    return Update(update_id=update_id, message=msg)
+
+
+def test_update_sender_id_extracts_from_message():
+    update = _make_message_update(1, 555)
+    assert main_module._update_sender_id(update) == 555
+
+
+def test_update_sender_id_none_for_update_without_user():
+    assert main_module._update_sender_id(Update(update_id=1)) is None
+
+
+async def test_run_update_skips_dispatch_when_rate_limited(monkeypatch):
+    rate_limiter._history.clear()
+    called = {"n": 0}
+
+    async def fake_feed_update(bot, update):
+        called["n"] += 1
+
+    monkeypatch.setattr(main_module.dp, "feed_update", fake_feed_update)
+    monkeypatch.setattr(main_module, "is_rate_limited", lambda uid: True)
+
+    await main_module._run_update(_make_message_update(1, 777))
+
+    assert called["n"] == 0
+
+
+async def test_run_update_dispatches_when_not_rate_limited(monkeypatch):
+    rate_limiter._history.clear()
+    called = {"n": 0}
+
+    async def fake_feed_update(bot, update):
+        called["n"] += 1
+
+    monkeypatch.setattr(main_module.dp, "feed_update", fake_feed_update)
+    monkeypatch.setattr(main_module, "is_rate_limited", lambda uid: False)
+
+    await main_module._run_update(_make_message_update(1, 777))
+
+    assert called["n"] == 1

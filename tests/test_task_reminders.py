@@ -1,6 +1,7 @@
-"""P1-6: app/services/task_reminders.py — muddati o'tgan/eskirgan vazifalar
-haqida CEOga kunlik ertalabki eslatma. Barcha testlar mok'langan Odoo/DB/Bot
-bilan ishlaydi — tarmoqqa chiqilmaydi."""
+"""P1-6 + P1-4: app/services/task_reminders.py — muddati o'tgan/eskirgan
+vazifalar haqida CEOga (P1-6) va mas'ulsiz qolgan vazifalar haqida General
+mavzuga (P1-4) kunlik ertalabki eslatma. Barcha testlar mok'langan
+Odoo/DB/Bot bilan ishlaydi — tarmoqqa chiqilmaydi."""
 from __future__ import annotations
 
 import types
@@ -262,6 +263,99 @@ async def test_overdue_tasks_with_known_ceo_id_sends_message(monkeypatch):
     assert "Omborni tekshirish" in result
     assert len(bot.sent) == 1
     assert bot.sent[0]["chat_id"] == 999
+
+
+# ─── _find_unassigned_tasks (P1-4) ───────────────────────────────────────
+
+async def test_unassigned_open_task_is_included(monkeypatch):
+    async def fake_get_recent(session, **kw):
+        return [_FakeTaskLog(1)]
+
+    async def fake_execute_kw(model, method, args, kwargs=None):
+        if model == "project.task":
+            return [{"id": 1, "name": "Mas'ulsiz vazifa", "date_deadline": False,
+                      "create_date": _today_str(-1), "stage_id": [10, "Jarayonda"],
+                      "user_ids": [], "project_id": [5, "Sotuv"]}]
+        return []
+
+    monkeypatch.setattr(task_reminders, "get_recent_task_logs", fake_get_recent)
+    monkeypatch.setattr(task_reminders._odoo, "execute_kw", fake_execute_kw)
+
+    result = await task_reminders._find_unassigned_tasks()
+    assert result == [{"task_id": 1, "title": "Mas'ulsiz vazifa", "department": "Sotuv"}]
+
+
+async def test_assigned_open_task_is_excluded(monkeypatch):
+    async def fake_get_recent(session, **kw):
+        return [_FakeTaskLog(1)]
+
+    async def fake_execute_kw(model, method, args, kwargs=None):
+        if model == "project.task":
+            return [{"id": 1, "name": "Biriktirilgan", "date_deadline": False,
+                      "create_date": _today_str(-1), "stage_id": [10, "Jarayonda"],
+                      "user_ids": [7], "project_id": [5, "Sotuv"]}]
+        return []
+
+    monkeypatch.setattr(task_reminders, "get_recent_task_logs", fake_get_recent)
+    monkeypatch.setattr(task_reminders._odoo, "execute_kw", fake_execute_kw)
+
+    assert await task_reminders._find_unassigned_tasks() == []
+
+
+async def test_done_unassigned_task_is_excluded(monkeypatch):
+    """Mas'ulsiz bo'lsa ham, allaqachon 'Bajarildi' bosqichida bo'lsa endi ahamiyatsiz."""
+    async def fake_get_recent(session, **kw):
+        return [_FakeTaskLog(1)]
+
+    async def fake_execute_kw(model, method, args, kwargs=None):
+        if model == "project.task":
+            return [{"id": 1, "name": "X", "date_deadline": False,
+                      "create_date": _today_str(-1), "stage_id": [20, "Bajarildi"],
+                      "user_ids": [], "project_id": [5, "Sotuv"]}]
+        return []
+
+    monkeypatch.setattr(task_reminders, "get_recent_task_logs", fake_get_recent)
+    monkeypatch.setattr(task_reminders._odoo, "execute_kw", fake_execute_kw)
+
+    assert await task_reminders._find_unassigned_tasks() == []
+
+
+def test_format_unassigned_message_lists_all_tasks():
+    tasks = [
+        {"task_id": 1, "title": "A", "department": "Sotuv"},
+        {"task_id": 2, "title": "B", "department": ""},
+    ]
+    msg = task_reminders._format_unassigned_message(tasks)
+    assert "2 ta" in msg
+    assert "A" in msg and "Sotuv" in msg
+    assert "B" in msg
+
+
+async def test_run_unassigned_task_digest_sends_to_general_topic(monkeypatch):
+    async def fake_find(*a, **kw):
+        return [{"task_id": 1, "title": "Mas'ulsiz", "department": "Sotuv"}]
+
+    monkeypatch.setattr(task_reminders, "_find_unassigned_tasks", fake_find)
+    bot = _FakeBot()
+
+    result = await task_reminders.run_unassigned_task_digest(bot)
+
+    assert result is not None
+    assert len(bot.sent) == 1
+    assert bot.sent[0]["chat_id"] == task_reminders.settings.TELEGRAM_GROUP_ID
+    assert bot.sent[0]["message_thread_id"] is None
+
+
+async def test_run_unassigned_task_digest_sends_nothing_when_empty(monkeypatch):
+    async def fake_find(*a, **kw):
+        return []
+
+    monkeypatch.setattr(task_reminders, "_find_unassigned_tasks", fake_find)
+    bot = _FakeBot()
+
+    result = await task_reminders.run_unassigned_task_digest(bot)
+    assert result is None
+    assert bot.sent == []
 
 
 # ─── _next_run ───────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.db.session import init_db
+from app.rate_limiter import is_rate_limited
 from app.services.claude_report import REPORTS_DIR
 from app.services.memory_digest import start_memory_scheduler
 from app.services.reports_cleanup import start_reports_cleanup_scheduler
@@ -35,7 +36,23 @@ dp.include_router(group_router)
 _ACTIVE_UPDATES: set[asyncio.Task] = set()
 
 
+def _update_sender_id(update: Update) -> int | None:
+    for attr in ("message", "edited_message", "callback_query", "my_chat_member"):
+        obj = getattr(update, attr, None)
+        if obj is not None and getattr(obj, "from_user", None) is not None:
+            return obj.from_user.id
+    return None
+
+
 async def _run_update(update: Update) -> None:
+    # P1-5: oddiy throttling — bitta foydalanuvchidan 1 daqiqada 10+ update
+    # kelsa, ortiqchasi jimgina tashlab yuboriladi (tasodifiy/buzilgan klient
+    # toshqinidan himoya — CEO/menejerlarning odatiy ishlatishiga ta'sir qilmaydi).
+    sender_id = _update_sender_id(update)
+    if sender_id is not None and is_rate_limited(sender_id):
+        log.warning("update %s: foydalanuvchi %s uchun rate limit — e'tiborsiz qoldirildi",
+                    update.update_id, sender_id)
+        return
     try:
         await dp.feed_update(bot, update)
     except Exception as e:  # noqa: BLE001

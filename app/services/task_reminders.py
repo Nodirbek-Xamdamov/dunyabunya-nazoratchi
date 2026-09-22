@@ -1,16 +1,25 @@
-"""P1-6: muddati o'tgan/juda uzoq ochiq qolgan vazifalar haqida CEOga
-har kuni ertalab (09:00, Asia/Tashkent) yagona (ro'yxat) eslatma xabari.
+"""P1-6 + P1-4: har kuni ertalab (09:00, Asia/Tashkent) ikkita tekshiruv,
+BITTA Odoo so'rovi (`_fetch_bot_task_rows`) asosida:
 
-Ikki holat eslatiladi (ikkalasi ham hali "Bajarildi"/"Bekor qilindi"
-bosqichiga o'tmagan bo'lishi shart):
-1. Aniq muddatli vazifa — muddat kuni allaqachon o'tgan;
-2. Muddatsiz vazifa — berilganiga TASK_REMINDER_STALE_DAYS (sukut 3) kundan
-   ortiq vaqt o'tgan.
+- P1-6: muddati o'tgan/juda uzoq ochiq qolgan vazifalar — CEOning shaxsiy
+  chatiga yagona (ro'yxat) eslatma xabari.
+- P1-4: hech kimga biriktirilmagan (mas'ulsiz) ochiq vazifalar — asosiy
+  guruhning General mavzusiga qisqa eslatma (boshqa "vazifa yaratildi"
+  bildirishnomalari bilan bir xil naqshda — `_notify_general`).
 
-Alohida "allaqachon eslatildi" xotirasi YO'Q — har kuni qayta so'raladi:
-vazifa hali ochiq bo'lsa qayta ko'rinadi (talab: "yakunlanmaguncha HAR KUNI
-takrorlanadi"), "Bajarildi" bosilgach esa navbatdagi tekshiruvda o'zi
-tushib qoladi (Odoo'dagi bosqichi endi "Bajarildi" bo'lgani uchun)."""
+Ikkalasida ham hali "Bajarildi"/"Bekor qilindi" bosqichiga o'tmagan
+vazifalar ko'rib chiqiladi. Alohida "allaqachon eslatildi" xotirasi YO'Q —
+har kuni qayta so'raladi: vazifa hali ochiq bo'lsa qayta ko'rinadi (talab:
+"yakunlanmaguncha HAR KUNI takrorlanadi"), "Bajarildi"/mas'ul biriktirilgach
+esa navbatdagi tekshiruvda o'zi tushib qoladi.
+
+DIQQAT (P1-4 qamrovi haqida eslatma): task_log jurnali vazifa ASLIDA "ism
+aytilib topilmadi" sababli mas'ulsiz qolganmi yoki CEO ATAYLAB mas'ulsiz
+yaratganmi — buni FARQLAMAYDI (bunday ma'lumot hech qayerda saqlanmaydi).
+Shuning uchun bu yerda oddiyroq, lekin baribir foydali mezon ishlatiladi:
+Odoo'da HALI HAM hech kimga biriktirilmagan, ochiq turgan har qanday bot
+yaratgan vazifa haqida xabar beriladi — sababidan qat'iy nazar CEO uchun
+diqqat talab qiladigan holat."""
 
 from __future__ import annotations
 
@@ -53,14 +62,19 @@ def _parse_odoo_date(value: str | None) -> date | None:
         return None
 
 
-async def _find_overdue_tasks() -> list[dict]:
-    """Bot yaratgan, hali ochiq (Bajarildi/Bekor qilindi emas) va muddati
-    o'tgan/eskirgan vazifalarni topadi. Har biri: {task_id, title, department,
-    assignee_names, deadline (date|None), days_since_created}."""
+def _department_name(row: dict) -> str:
+    project = row.get("project_id")
+    return project[1] if isinstance(project, (list, tuple)) and len(project) > 1 else ""
+
+
+async def _fetch_bot_task_rows() -> tuple[list[dict], dict[int, str]]:
+    """Bot yaratgan (task_log jurnalidagi), hali OCHIQ (Bajarildi/Bekor
+    qilindi emas) barcha vazifalarning xom Odoo qatorlarini va mas'ullar
+    ismlari lug'atini qaytaradi — P1-6/P1-4 shu ustida alohida filtrlaydi."""
     async with SessionLocal() as session:
         logs = await get_recent_task_logs(session)
     if not logs:
-        return []
+        return [], {}
     task_ids = list(dict.fromkeys(l.odoo_task_id for l in logs))
 
     rows = await _odoo.execute_kw(
@@ -68,8 +82,9 @@ async def _find_overdue_tasks() -> list[dict]:
         [[["id", "in", task_ids]]],
         {"fields": ["id", "name", "date_deadline", "create_date", "stage_id", "user_ids", "project_id"]},
     )
+    rows = [r for r in rows if _stage_name(r).casefold() not in _DONE_OR_CANCELLED]
     if not rows:
-        return []
+        return [], {}
 
     # Bir so'rovda barcha mas'ullar ismini olish (har vazifa uchun alohida
     # res.users so'rovi o'rniga)
@@ -81,13 +96,18 @@ async def _find_overdue_tasks() -> list[dict]:
         )
         user_names = {u["id"]: u["name"] for u in users}
 
+    return rows, user_names
+
+
+async def _find_overdue_tasks() -> list[dict]:
+    """P1-6: hali ochiq va muddati o'tgan/eskirgan vazifalar. Har biri:
+    {task_id, title, department, assignee_names, deadline (date|None),
+    days_since_created}."""
+    rows, user_names = await _fetch_bot_task_rows()
     today = datetime.now(_TZ).date()
 
     overdue = []
     for r in rows:
-        if _stage_name(r).casefold() in _DONE_OR_CANCELLED:
-            continue
-
         deadline = _parse_odoo_date(r.get("date_deadline"))
         created = _parse_odoo_date(r.get("create_date"))
         is_overdue = False
@@ -102,21 +122,29 @@ async def _find_overdue_tasks() -> list[dict]:
         if not is_overdue:
             continue
 
-        project = r.get("project_id")
-        department = project[1] if isinstance(project, (list, tuple)) and len(project) > 1 else ""
         assignee_ids = r.get("user_ids") or []
         assignee_names = [user_names[uid] for uid in assignee_ids if uid in user_names]
 
         overdue.append({
             "task_id": r["id"],
             "title": r.get("name") or f"#{r['id']}",
-            "department": department,
+            "department": _department_name(r),
             "assignee_names": assignee_names,
             "deadline": deadline,
             "days_since_created": days_since_created,
         })
 
     return overdue
+
+
+async def _find_unassigned_tasks() -> list[dict]:
+    """P1-4: hali ochiq va hech kimga biriktirilmagan (user_ids bo'sh)
+    vazifalar. Har biri: {task_id, title, department}."""
+    rows, _user_names = await _fetch_bot_task_rows()
+    return [
+        {"task_id": r["id"], "title": r.get("name") or f"#{r['id']}", "department": _department_name(r)}
+        for r in rows if not r.get("user_ids")
+    ]
 
 
 def _format_reminder_message(tasks: list[dict]) -> str:
@@ -132,10 +160,18 @@ def _format_reminder_message(tasks: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_unassigned_message(tasks: list[dict]) -> str:
+    lines = [f"ℹ️ {len(tasks)} ta vazifa hali hech kimga biriktirilmagan:", ""]
+    for t in tasks:
+        dept = f" ({t['department']})" if t["department"] else ""
+        lines.append(f"📌 «{t['title']}»{dept}")
+    return "\n".join(lines)
+
+
 async def run_task_reminder_check(bot) -> str | None:
-    """Bir marta tekshiruv ishga tushiradi — topilgan eslatmalarni CEOning
-    shaxsiy chatiga yuboradi. Hech narsa topilmasa yoki CEO chat_id hali
-    ma'lum bo'lmasa — hech narsa yubormaydi (None qaytaradi)."""
+    """P1-6: bir marta tekshiruv ishga tushiradi — topilgan eslatmalarni
+    CEOning shaxsiy chatiga yuboradi. Hech narsa topilmasa yoki CEO chat_id
+    hali ma'lum bo'lmasa — hech narsa yubormaydi (None qaytaradi)."""
     tasks = await _find_overdue_tasks()
     if not tasks:
         return None
@@ -157,6 +193,25 @@ async def run_task_reminder_check(bot) -> str | None:
     return message
 
 
+async def run_unassigned_task_digest(bot) -> str | None:
+    """P1-4: bir marta tekshiruv ishga tushiradi — hali mas'ulsiz qolgan
+    ochiq vazifalarni asosiy guruhning General mavzusiga xabar qiladi.
+    Hech narsa topilmasa — hech narsa yubormaydi (None qaytaradi)."""
+    tasks = await _find_unassigned_tasks()
+    if not tasks:
+        return None
+
+    message = _format_unassigned_message(tasks)
+    try:
+        await bot.send_message(chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=None, text=message)
+    except Exception:
+        log.exception("task_reminders: General mavzuga mas'ulsiz vazifalar xabarini yuborishda xato")
+        return None
+
+    log.info("task_reminders: General mavzuga %d ta mas'ulsiz vazifa haqida xabar yuborildi", len(tasks))
+    return message
+
+
 # ─── Rejalashtiruvchi (memory_digest.py bilan bir xil naqsh) ───────────────
 
 def _next_run(target_time: time) -> datetime:
@@ -173,7 +228,13 @@ async def _reminder_loop(bot) -> None:
         target = _next_run(_REMINDER_TIME)
         try:
             await asyncio.sleep(max(0.0, (target - datetime.now(_TZ)).total_seconds()))
-            await run_task_reminder_check(bot)
+            # P1-6 (CEO DM) va P1-4 (General mavzu) bir-biriga bog'liq EMAS —
+            # biri xato bersa ham ikkinchisi ishlayveradi.
+            await asyncio.gather(
+                run_task_reminder_check(bot),
+                run_unassigned_task_digest(bot),
+                return_exceptions=True,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
