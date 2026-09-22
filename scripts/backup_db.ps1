@@ -8,14 +8,14 @@
 # Qo'lda ishga tushirish: powershell -ExecutionPolicy Bypass -File backup_db.ps1
 
 param(
-    [string]$BackupDir = "D:\Backups\dunyabunya_db",
+    [string]$BackupDir = "E:\Backups\dunyabunya_db",
     [int]$RetentionDays = 14
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 $EnvPath = Join-Path $ProjectDir ".env"
-$PgDump = "C:\Program Files\PostgreSQL\16\bin\pg_dump.exe"
+$PgDump = "C:\Program Files\PostgreSQL\17\bin\pg_dump.exe"
 
 if (-not (Test-Path $EnvPath)) {
     throw ".env topilmadi: $EnvPath"

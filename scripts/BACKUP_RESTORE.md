@@ -4,12 +4,20 @@
 
 `backup_db.ps1` `.env`dagi `DATABASE_URL`ni o'qib, `pg_dump -F c` (custom
 format, siqilgan, `pg_restore` bilan tiklanadigan) orqali
-`D:\Backups\dunyabunya_db\dunyabunya_agent_db_<timestamp>.dump` fayliga
+`E:\Backups\dunyabunya_db\dunyabunya_agent_db_<timestamp>.dump` fayliga
 zaxira yozadi va 14 kundan eskirgan nusxalarni o'chiradi.
 
 Windows Task Scheduler orqali har kuni soat 03:00 da avtomatik ishga
 tushadi (`dunyabunya_db_backup` vazifasi — `setup_backup_task.ps1` orqali
 bir marta ro'yxatga olingan, 2026-09-22).
+
+**2026-09-22 yangilanishi:** server PostgreSQL 17'ga o'tkazildi (eski
+16-versiya xizmati butunlay olib tashlangan, `dunyabunya_agent_user`/
+`dunyabunya_agent_db` yo'qolgan edi) — qayta yaratildi va eski backup'dan
+tiklandi (pastga qarang). `backup_db.ps1` endi PostgreSQL 17'ning
+`pg_dump.exe`sini ishlatadi va E: diskka yozadi (D: bilan bir xil jismoniy
+diskda emas — CEO ko'rsatmasi bo'yicha, "serverdan boshqa joyda saqlash"
+talabini qisman yaxshilaydi, garchi hamon SHU SERVERNING o'zida bo'lsa ham).
 
 Qo'lda ishga tushirish:
 ```powershell
@@ -21,43 +29,41 @@ Holatni tekshirish:
 Get-ScheduledTaskInfo -TaskName dunyabunya_db_backup
 ```
 
-## ⚠️ Hali qilinmagan: serverdan tashqarida saqlash
+## ⚠️ Hali qilinmagan: haqiqiy serverdan tashqarida saqlash
 
-Backuplar hozircha shu SERVERNING O'ZIDA (`D:\Backups\...`) saqlanadi —
-bu disk/server halokati holatida yetarli EMAS (spec: "fayllarni bot
-serveridan boshqa joyda saqlash"). Buni to'liq bajarish uchun quyidagilardan
-BIRINI tanlash va sozlash kerak (bunga tashqi hisob/kalitlar kerak, shuning
-uchun avtomatik amalga oshirilmadi):
+Backuplar E: diskda — bu D: bilan solishtirganda alohida jismoniy disk
+(taxminan 1.8TB, boshqa hajm/volume ID), lekin baribir SHU SERVERNING
+o'zida. Server butunlay ishdan chiqsa (yong'in, o'g'irlik va h.k.), bu ham
+yordam bermaydi. To'liq bajarish uchun quyidagilardan BIRI kerak (tashqi
+hisob/kalitlar kerak, shuning uchun hali avtomatik amalga oshirilmadi):
 - Bulut saqlash (masalan S3-mos, Google Drive, Yandex Disk) — backup
   script oxiriga yuklab qo'yish qadamini qo'shish;
 - Boshqa jismoniy server/NAS'ga tarmoq orqali nusxalash (masalan `robocopy`
   yoki `rsync`).
 
-## Restore (tiklash) — tekshirilgan jarayon
+## Restore (tiklash) — TO'LIQ tekshirilgan (2026-09-22)
 
-2026-09-22 da sinovdan o'tkazildi:
+PostgreSQL 17'ga o'tish paytida bu haqiqiy avariya tiklash stsenariysining
+o'zi bo'ldi (rejalashtirilgan test emas) — natija:
 
-1. **Fayl yaxlitligi tekshiruvi** (haqiqiy bazaga ulanmasdan) — muvaffaqiyatli:
-   ```powershell
-   & "C:\Program Files\PostgreSQL\16\bin\pg_restore.exe" --list <backup-fayli>.dump
-   ```
-   119 ta TOC yozuvi (barcha jadvallar: managers, employees, conversations,
-   group_messages, task_logs, topics va h.k.) to'g'ri o'qildi.
+1. **Fayl yaxlitligi tekshiruvi** (`pg_restore --list`) — muvaffaqiyatli,
+   119 TOC yozuvi to'g'ri o'qildi (avvalroq, eski 16-versiyada sinalgan).
 
-2. **To'liq jismoniy restore (yangi bo'sh bazaga)** — SINALMADI: ilova
-   o'zining DB hisobi (`dunyabunya_agent_user`, `.env`dagi) bilan yangi baza
-   yarata olmaydi (`CREATEDB` huquqi yo'q — bu ataylab shunday, xavfsizlik
-   uchun yaxshi amaliyot). To'liq restore sinovini bajarish uchun
-   **PostgreSQL superuser (`postgres`) paroli** kerak — bu `.env`da yo'q.
-   Superuser kalit berilsa, quyidagi buyruqlar bilan haqiqiy restore
-   sinaladi:
+2. **To'liq jismoniy restore (yangi bazaga, real ma'lumot bilan)** —
+   MUVAFFAQIYATLI bajarildi va tekshirildi:
    ```powershell
    $env:PGPASSWORD = "<postgres superuser paroli>"
-   & "C:\Program Files\PostgreSQL\16\bin\createdb.exe" -h localhost -U postgres dunyabunya_restore_test
-   & "C:\Program Files\PostgreSQL\16\bin\pg_restore.exe" -h localhost -U postgres -d dunyabunya_restore_test <backup-fayli>.dump
-   # Tekshirish: jadvallar va qator soni to'g'ri kelishini solishtirish
-   & "C:\Program Files\PostgreSQL\16\bin\dropdb.exe" -h localhost -U postgres dunyabunya_restore_test
+   & "C:\Program Files\PostgreSQL\17\bin\psql.exe" -h localhost -U postgres -c `
+     "CREATE ROLE dunyabunya_agent_user WITH LOGIN PASSWORD '<parol>';"
+   & "C:\Program Files\PostgreSQL\17\bin\psql.exe" -h localhost -U postgres -c `
+     "CREATE DATABASE dunyabunya_agent_db OWNER dunyabunya_agent_user;"
+   & "C:\Program Files\PostgreSQL\17\bin\pg_restore.exe" -h localhost -U postgres `
+     -d dunyabunya_agent_db --no-owner --role=dunyabunya_agent_user <backup-fayli>.dump
    ```
+   Tekshiruv natijasi (`dunyabunya_agent_user` hisobi bilan, ilovaning
+   o'zi ishlatadigan aynan shu kirish huquqi bilan): barcha 15 jadval
+   mavjud va to'g'ri egalik qilingan, qatorlar soni mos (topics=9,
+   employees=62, task_log=9 — restore vaqtidagi haqiqiy hajm).
 
-Haqiqiy avariya holatida yuqoridagi buyruqlar (test bazasi o'rniga real
-bazaga, avval eski bazani boshqa nomga o'zgartirib) qo'llaniladi.
+Xulosa: backup fayllari HAQIQATDA tiklanadigan ekan — nazariy emas, amalda
+tasdiqlangan.
