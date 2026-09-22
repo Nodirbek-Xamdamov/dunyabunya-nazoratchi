@@ -682,8 +682,22 @@ def _is_ceo_message(message: Message) -> bool:
     if settings.CEO_TELEGRAM_USER_ID and user.id == settings.CEO_TELEGRAM_USER_ID:
         return True
     if settings.CEO_TELEGRAM_USERNAME and user.username:
-        return user.username.casefold() == settings.CEO_TELEGRAM_USERNAME.casefold()
+        if user.username.casefold() == settings.CEO_TELEGRAM_USERNAME.casefold():
+            # CEO_TELEGRAM_USER_ID .env'da sozlanmagan bo'lishi mumkin (0) — botning
+            # o'zi CEO'ga FAOL xabar yuborishi kerak bo'lganda (masalan muddati o'tgan
+            # vazifa eslatmasi) raqamli chat_id shart. Username orqali tanilgan har
+            # safar shu ID'ni eslab qolamiz — fire-and-forget (bu funksiya sinxron).
+            asyncio.create_task(_capture_ceo_id(user.id))
+            return True
     return False
+
+
+async def _capture_ceo_id(user_id: int) -> None:
+    from app import ceo_state
+    try:
+        await ceo_state.remember_ceo_telegram_user_id(user_id)
+    except Exception:
+        log.warning("CEO telegram_user_id'ni saqlashda xato", exc_info=True)
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.chat.id != settings.TELEGRAM_GROUP_ID)

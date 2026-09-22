@@ -15,6 +15,7 @@ from app.db.session import init_db
 from app.services.claude_report import REPORTS_DIR
 from app.services.memory_digest import start_memory_scheduler
 from app.services.reports_cleanup import start_reports_cleanup_scheduler
+from app.services.task_reminders import start_task_reminder_scheduler
 from app.telegram.delivery import router as delivery_router
 from app.telegram.handlers import router as group_router
 from app.telegram.handlers_manager import router as manager_router
@@ -80,10 +81,12 @@ async def lifespan(app: FastAPI):
     polling_task = asyncio.create_task(_parallel_polling())
     memory_tasks = start_memory_scheduler(settings.TELEGRAM_GROUP_ID)
     reports_cleanup_task = start_reports_cleanup_scheduler()
+    task_reminder_task = start_task_reminder_scheduler(bot)
     log.info("app.started port=%s", settings.APP_PORT)
     yield
     polling_task.cancel()
     reports_cleanup_task.cancel()
+    task_reminder_task.cancel()
     for t in memory_tasks:
         t.cancel()
     # Faol update tasklarini kutib olamiz (yopilayotganda qolib ketmasin)

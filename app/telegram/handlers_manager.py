@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from difflib import SequenceMatcher
 
@@ -51,8 +52,19 @@ def _is_ceo(user_id: int, username: str | None = None) -> bool:
         return True
     if settings.CEO_TELEGRAM_USERNAME and username:
         if username.casefold() == settings.CEO_TELEGRAM_USERNAME.casefold():
+            # Xuddi handlers.py::_is_ceo_message kabi — raqamli CEO chat_id'ni
+            # botning proaktiv xabarlari (masalan P1-6 eslatmasi) uchun eslab qolamiz.
+            asyncio.create_task(_capture_ceo_id(user_id))
             return True
     return False
+
+
+async def _capture_ceo_id(user_id: int) -> None:
+    from app import ceo_state
+    try:
+        await ceo_state.remember_ceo_telegram_user_id(user_id)
+    except Exception:
+        log.warning("CEO telegram_user_id'ni saqlashda xato", exc_info=True)
 
 
 def _find_department(name_query: str) -> str | None:

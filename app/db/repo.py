@@ -136,6 +136,21 @@ async def get_task_log_by_odoo_task_id(session: AsyncSession, odoo_task_id: int)
     return result.scalar_one_or_none()
 
 
+async def get_recent_task_logs(session: AsyncSession, *, days: int = 90, limit: int = 1000) -> list[TaskLog]:
+    """Bot orqali yaratilgan (task_log jurnalidagi) so'nggi vazifalar — P1-6
+    (muddati o'tgan vazifa eslatmasi) shular orasidan Odoo'da hali ham
+    "ochiq" bo'lganlarini filtrlaydi. `days` bilan chegaralanadi — jurnal
+    cheksiz o'smasin va so'rov tez bo'lsin (juda eski, allaqachon unutilgan
+    vazifalar uchun eslatma keraksiz)."""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    result = await session.execute(
+        select(TaskLog).where(TaskLog.created_at >= cutoff).order_by(TaskLog.id.desc()).limit(limit)
+    )
+    return list(result.scalars().all())
+
+
 # ─── Employee funksiyalari `app/employee_store.py`ga ko'chirildi ───────────
 # (fayl-asosli katalog — Postgres emas, tezroq va yengilroq qidiruv uchun)
 

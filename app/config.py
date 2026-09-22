@@ -48,5 +48,8 @@ class Settings(BaseSettings):
     # Hisobot havolalari qancha soatdan keyin muddati o'tgan hisoblanadi (P0-2)
     REPORT_LINK_TTL_HOURS: int = 48
 
+    # Muddatsiz vazifa nechchi kundan keyin "eskirgan" deb CEOga eslatiladi (P1-6)
+    TASK_REMINDER_STALE_DAYS: int = 3
+
 
 settings = Settings()
