@@ -198,6 +198,19 @@ MAVJUD MODELLAR VA FIELDLAR:
 - crm.lead: id, name, partner_name, stage_id, create_date, user_id
 - hr.employee: id, name, job_id, department_id, work_email
 
+HOLAT (state) QIYMATLARI — domain'da FAQAT shulardan foydalan, boshqa field o'ylab topma:
+- project.task.state: '01_in_progress', '02_changes_requested', '03_approved',
+  '04_waiting_normal', '1_done' (bajarilgan), '1_canceled' (bekor qilingan).
+  OCHIQ vazifa = [["state","not in",["1_done","1_canceled"]]]. `is_closed`, `stage_id.is_closed`,
+  `stage_id.fold` kabi fieldlar YO'Q — ishlatma.
+- sale.order.state: 'draft' (taklif), 'sent', 'sale' (tasdiqlangan), 'cancel'.
+- account.move.state: 'draft', 'posted', 'cancel'; move_type: 'out_invoice' (mijozga hisob),
+  'in_invoice' (ta'minotchi hisobi), 'out_refund', 'in_refund', 'entry'.
+- account.payment.payment_type: 'inbound' (kirim), 'outbound' (chiqim).
+- stock.picking.state: 'draft', 'waiting', 'confirmed', 'assigned', 'done', 'cancel'.
+Tool xato qaytarsa (masalan "Invalid field") — xato natijani javob sifatida ishlatma,
+domain'ni tuzatib qayta chaqir.
+
 QOIDALAR:
 1. Har doim avval tegishli toolni chaqir, ma'lumotni olgach javob yoz.
 2. Tool natijasini qayta sanab o'tmang — qisqa xulosa bering.
@@ -313,10 +326,10 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
     answer = ""
     file_tool_results: list[tuple[str, str]] = []  # (tool_name, raw_result) — xato diagnostikasi uchun
 
-    for i in range(5):
+    for i in range(8):
         create_kwargs = dict(
             model=settings.ANTHROPIC_MODEL,
-            max_tokens=800,
+            max_tokens=4096,
             system=system,
             tools=tools,
             messages=messages,
@@ -334,12 +347,16 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
         if text_parts:
             answer = "".join(text_parts)
 
-        if resp.stop_reason == "end_turn":
+        # Claude bir nechta tool so'rasa ularni PARALLEL bajarish — javob tezlashadi
+        tool_uses = [b for b in resp.content if b.type == "tool_use"]
+        # tool so'ralmagan har qanday to'xtash (end_turn, max_tokens, refusal...) — yakun.
+        # Aks holda bo'sh tool_result ro'yxati bilan user xabari yuborilib, API 400 qaytarardi.
+        if resp.stop_reason != "tool_use" or not tool_uses:
+            if resp.stop_reason == "max_tokens":
+                log.warning("ask_with_files: javob max_tokens chegarasida kesildi")
             break
 
         messages.append({"role": "assistant", "content": resp.content})
-        # Claude bir nechta tool so'rasa ularni PARALLEL bajarish — javob tezlashadi
-        tool_uses = [b for b in resp.content if b.type == "tool_use"]
         results = []
         if tool_uses:
             executed = await asyncio.gather(
