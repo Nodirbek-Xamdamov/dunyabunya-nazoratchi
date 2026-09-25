@@ -28,6 +28,7 @@ from aiogram.types import (
 
 from app.rbac import Role
 from app.services.assistant import AssistantResult, ask_with_files
+from app.telegram.tg_format import TG_LIMIT, split_message, to_telegram_html
 
 log = logging.getLogger(__name__)
 
@@ -154,28 +155,35 @@ def _strip_html(text: str) -> str:
 
 async def send_assistant_text(bot: Bot, chat_id: int, thread_id: int | None,
                               text: str, reply_markup=None) -> None:
-    """Assistant matnini yuborish. Model hisobotlarda <b>/<a href> kabi HTML taglarni
-    ishlatishi mumkin — shuning uchun avval parse_mode=HTML bilan yuboriladi, xato
-    bo'lsa oddiy matn (tagsiz) sifatida qayta yuboriladi."""
+    """Assistant matnini yuborish. Model Markdown yoki <b>/<a href> kabi HTML yozishi
+    mumkin — avval Telegram HTML'ga o'giriladi (tg_format), parse_mode=HTML bilan
+    yuboriladi, xato bo'lsa oddiy matn (tagsiz) sifatida qayta yuboriladi. Uzun javob
+    kesilmaydi — bir nechta xabarga bo'linadi (tugmalar oxirgisiga qo'shiladi)."""
     if not text:
         return
-    if len(text) > 4000:
-        text = text[:3997] + "..."
     try:
-        await bot.send_message(
-            chat_id=chat_id, message_thread_id=thread_id,
-            text=text, reply_markup=reply_markup, parse_mode="HTML",
-        )
-        return
+        formatted = to_telegram_html(text)
     except Exception:
-        pass
-    try:
-        await bot.send_message(
-            chat_id=chat_id, message_thread_id=thread_id,
-            text=_strip_html(text), reply_markup=reply_markup,
-        )
-    except Exception as e:
-        log.warning("send_assistant_text failed: %s", e)
+        log.exception("to_telegram_html failed — xom matn yuboriladi")
+        formatted = text
+    parts = split_message(formatted)
+    for idx, part in enumerate(parts):
+        markup = reply_markup if idx == len(parts) - 1 else None
+        try:
+            await bot.send_message(
+                chat_id=chat_id, message_thread_id=thread_id,
+                text=part, reply_markup=markup, parse_mode="HTML",
+            )
+            continue
+        except Exception as e:
+            log.warning("send_assistant_text HTML rad etildi (%s) — oddiy matn yuboriladi", e)
+        try:
+            await bot.send_message(
+                chat_id=chat_id, message_thread_id=thread_id,
+                text=_strip_html(part)[:TG_LIMIT], reply_markup=markup,
+            )
+        except Exception as e:
+            log.warning("send_assistant_text failed: %s", e)
 
 
 async def send_result(bot: Bot, chat_id: int, thread_id: int | None,
