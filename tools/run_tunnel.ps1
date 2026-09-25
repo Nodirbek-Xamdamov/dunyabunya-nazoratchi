@@ -39,10 +39,24 @@ if (-not $publicUrl) {
 Write-Output "Tunnel manzili: $publicUrl"
 
 # .env'dagi PUBLIC_BASE_URL'ni yangilaymiz
-$envLines = Get-Content $EnvPath
+$envLines = Get-Content $EnvPath -Encoding UTF8
+$oldLine = $envLines | Where-Object { $_ -match '^PUBLIC_BASE_URL=' } | Select-Object -First 1
+if ($oldLine -eq "PUBLIC_BASE_URL=$publicUrl") {
+    Write-Output "Manzil o'zgarmagan — .env va bot tegilmadi."
+    exit 0
+}
 $newLines = $envLines | ForEach-Object {
     if ($_ -match '^PUBLIC_BASE_URL=') { "PUBLIC_BASE_URL=$publicUrl" } else { $_ }
 }
-Set-Content -Path $EnvPath -Value $newLines -Encoding utf8
+# PS 5.1'da "-Encoding utf8" BOM qo'shadi — .env'ning birinchi kaliti buzilmasligi uchun BOM'siz yozamiz
+[System.IO.File]::WriteAllLines($EnvPath, [string[]]$newLines, (New-Object System.Text.UTF8Encoding($false)))
+Write-Output ".env yangilandi."
 
-Write-Output ".env yangilandi. Botni qayta ishga tushirish uchun app/main.py qayta start qilinishi kerak."
+# Quick Tunnel har qayta ishga tushganda (masalan server reboot) YANGI manzil oladi — bot
+# PUBLIC_BASE_URL'ni faqat startda o'qiydi, shuning uchun eski (o'lik) havolalarni yubormasligi
+# uchun uni to'xtatamiz; bot_watchdog (har daqiqa) uni yangi .env bilan qayta ishga tushiradi.
+# Filtr ataylab "-m app.main" bilan tugaydigan qatorga — db_web_chatbot (app.main:app) tegilmaydi.
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+    Where-Object { $_.CommandLine -match '-m\s+app\.main\s*$' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Write-Output "Bot to'xtatildi — watchdog 1 daqiqa ichida yangi manzil bilan qayta ishga tushiradi."

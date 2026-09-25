@@ -27,8 +27,11 @@ try {
 
 # Eski/osilib qolgan jarayon bo'lsa tozalaymiz (masalan port band, lekin
 # /health javob bermayapti)
+# DIQQAT: faqat "-m app.main" bilan TUGAYDIGAN buyruq qatori — "*app.main*" ishlatilmaydi,
+# chunki u db_web_chatbot'ning "uvicorn app.main:app" jarayoniga ham mos kelib, uni ham
+# o'ldirib qo'yardi (2026-09-25 da aniqlandi).
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-    Where-Object { $_.CommandLine -like "*app.main*" } |
+    Where-Object { $_.CommandLine -match '-m\s+app\.main\s*$' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 2
 
