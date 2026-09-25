@@ -1,3 +1,4 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,7 +14,8 @@ class Settings(BaseSettings):
     # Odoo
     ODOO_URL: str
     ODOO_DB: str
-    ODOO_LOGIN: str
+    # .env'da ODOO_USERNAME deb ham yozilishi mumkin (telegram-odoo-bot bilan bir xil nom)
+    ODOO_LOGIN: str = Field(validation_alias=AliasChoices("ODOO_LOGIN", "ODOO_USERNAME"))
     ODOO_API_KEY: str
     ODOO_TIMEOUT_SECONDS: int = 30
 
