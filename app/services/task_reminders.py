@@ -176,20 +176,25 @@ async def run_task_reminder_check(bot) -> str | None:
     if not tasks:
         return None
 
-    ceo_id = await ceo_state.get_ceo_telegram_user_id()
-    if not ceo_id:
+    ceo_ids = await ceo_state.get_ceo_telegram_user_ids()
+    if not ceo_ids:
         log.warning("task_reminders: %d ta muddati o'tgan vazifa bor, lekin CEO "
                      "telegram_user_id hali aniqlanmagan — eslatma yuborilmadi", len(tasks))
         return None
 
     message = _format_reminder_message(tasks)
-    try:
-        await bot.send_message(chat_id=ceo_id, text=message)
-    except Exception:
-        log.exception("task_reminders: CEOga eslatma yuborishda xato")
+    sent = 0
+    for ceo_id in ceo_ids:  # bir nechta CEO bo'lishi mumkin — har biriga alohida
+        try:
+            await bot.send_message(chat_id=ceo_id, text=message)
+            sent += 1
+        except Exception:
+            log.exception("task_reminders: CEO %s ga eslatma yuborishda xato", ceo_id)
+    if not sent:
         return None
 
-    log.info("task_reminders: CEOga %d ta muddati o'tgan vazifa haqida eslatma yuborildi", len(tasks))
+    log.info("task_reminders: %d ta CEOga %d ta muddati o'tgan vazifa haqida eslatma yuborildi",
+             sent, len(tasks))
     return message
 
 

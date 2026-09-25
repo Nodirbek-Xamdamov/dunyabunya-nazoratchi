@@ -48,23 +48,10 @@ _odoo = OdooClient()
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 def _is_ceo(user_id: int, username: str | None = None) -> bool:
-    if settings.CEO_TELEGRAM_USER_ID and user_id == settings.CEO_TELEGRAM_USER_ID:
-        return True
-    if settings.CEO_TELEGRAM_USERNAME and username:
-        if username.casefold() == settings.CEO_TELEGRAM_USERNAME.casefold():
-            # Xuddi handlers.py::_is_ceo_message kabi — raqamli CEO chat_id'ni
-            # botning proaktiv xabarlari (masalan P1-6 eslatmasi) uchun eslab qolamiz.
-            asyncio.create_task(_capture_ceo_id(user_id))
-            return True
-    return False
-
-
-async def _capture_ceo_id(user_id: int) -> None:
+    # Bir nechta CEO (CEO_TELEGRAM_USERNAME vergul bilan) — raqamli ID'ni botning
+    # proaktiv xabarlari (masalan P1-6 eslatmasi) uchun ceo_state eslab qoladi.
     from app import ceo_state
-    try:
-        await ceo_state.remember_ceo_telegram_user_id(user_id)
-    except Exception:
-        log.warning("CEO telegram_user_id'ni saqlashda xato", exc_info=True)
+    return ceo_state.is_ceo(user_id, username)
 
 
 def _find_department(name_query: str) -> str | None:

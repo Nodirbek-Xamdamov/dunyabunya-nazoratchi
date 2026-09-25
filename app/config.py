@@ -52,4 +52,12 @@ class Settings(BaseSettings):
     TASK_REMINDER_STALE_DAYS: int = 3
 
 
+    @property
+    def ceo_usernames(self) -> set[str]:
+        """CEO_TELEGRAM_USERNAME vergul bilan bir nechta bo'lishi mumkin (2026-09-25:
+        ikki CEO) — "@"siz, kichik harfda."""
+        return {u.strip().lstrip("@").casefold()
+                for u in self.CEO_TELEGRAM_USERNAME.split(",") if u.strip().lstrip("@")}
+
+
 settings = Settings()
