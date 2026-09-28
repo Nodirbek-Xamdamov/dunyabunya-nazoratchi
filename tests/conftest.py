@@ -28,3 +28,14 @@ def mock_odoo_response():
     def _make(records=None, count=0):
         return records or []
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _isolated_ceo_state(tmp_path, monkeypatch):
+    """ceo_state.is_ceo() CEO tanilganda ID'ni fonda faylga yozadi — testlar
+    haqiqiy storage/ceo_state.json'ni ifloslantirmasligi uchun (ilgari
+    "real_ceo": 555 shunday yozilib qolgan edi) har test o'z vaqtinchalik faylini oladi."""
+    from app import ceo_state
+    monkeypatch.setattr(ceo_state, "_PATH", tmp_path / "ceo_state.json")
+    monkeypatch.setattr(ceo_state, "_ids", {})
+    monkeypatch.setattr(ceo_state, "_loaded", False)

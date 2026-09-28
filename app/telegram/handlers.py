@@ -262,6 +262,11 @@ async def _notify_assignee_or_warn(bot: Bot, *, task_id: int, title: str, descri
 @router.message(F.chat.id == settings.TELEGRAM_GROUP_ID, F.message_thread_id.is_not(None))
 async def on_topic_message(message: Message, bot: Bot) -> None:
     log.info("on_topic_message: chat=%s thread=%s from=%s text=%s", message.chat.id, message.message_thread_id, message.from_user.id if message.from_user else '?', (message.text or '')[:60])
+    # 2026-09-28 (CEO buyrug'i): asosiy guruhda bot FAQAT CEO'larga (.env'dagi
+    # CEO_TELEGRAM_USERNAME ro'yxati) javob beradi — bo'lim topiklarida ham.
+    # Boshqa a'zo xabari STT/LLM'ga yuborilmay jimgina tashlab yuboriladi.
+    if not _is_ceo_message(message):
+        return
     text = await get_message_text(message, bot)
     if not text:
         if message.voice:
@@ -407,6 +412,8 @@ async def on_topic_message(message: Message, bot: Bot) -> None:
 
 @router.callback_query(F.data.startswith("task_assign:"))
 async def on_task_assign(callback: CallbackQuery, bot: Bot) -> None:
+    if not await _is_ceo_callback(callback):
+        return
     await callback.answer()
     _, thread_id_str, user_id_str = callback.data.split(":")
     thread_id = int(thread_id_str)
@@ -511,6 +518,8 @@ async def on_task_assign(callback: CallbackQuery, bot: Bot) -> None:
 
 @router.callback_query(F.data.startswith("task_skip:"))
 async def on_task_skip(callback: CallbackQuery) -> None:
+    if not await _is_ceo_callback(callback):
+        return
     await callback.answer()
     _, thread_id_str = callback.data.split(":")
     thread_id = int(thread_id_str)
@@ -675,7 +684,7 @@ async def on_general_message(message: Message, bot: Bot) -> None:
 # ─── Boshqa guruhlar ──────────────────────────────────────────────────────
 
 def _is_ceo_message(message: Message) -> bool:
-    """Xabar CEO'danmi? (faqat boshqa guruhlarda CEO filtri uchun)"""
+    """Xabar CEO'danmi? (asosiy guruhning barcha topiklari va boshqa guruhlar uchun CEO filtri)"""
     user = message.from_user
     if user is None:
         return False
@@ -683,6 +692,20 @@ def _is_ceo_message(message: Message) -> bool:
     # raqamli ID proaktiv xabarlar (muddati o'tgan vazifa eslatmasi) uchun eslab qolinadi.
     from app import ceo_state
     return ceo_state.is_ceo(user.id, user.username)
+
+
+async def _is_ceo_callback(callback: CallbackQuery) -> bool:
+    """Guruhdagi "topshirish/bekor qilish" tugmalarini faqat CEO bosa oladi —
+    aks holda istalgan a'zo CEO so'ragan vazifani Odoo'ga yozdirib yuborishi mumkin edi."""
+    from app import ceo_state
+    user = callback.from_user
+    if user is not None and ceo_state.is_ceo(user.id, user.username):
+        return True
+    try:
+        await callback.answer("Bu tugma faqat CEO uchun.", show_alert=True)
+    except Exception:
+        pass
+    return False
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.chat.id != settings.TELEGRAM_GROUP_ID)

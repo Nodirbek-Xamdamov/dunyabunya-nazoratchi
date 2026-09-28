@@ -64,8 +64,8 @@ async def test_spawn_returns_immediately(monkeypatch):
 
 # ── P1-5: throttling _run_update darajasida ─────────────────────────────
 
-def _make_message_update(update_id: int, user_id: int) -> Update:
-    user = User(id=user_id, is_bot=False, first_name="Test")
+def _make_message_update(update_id: int, user_id: int, username: str | None = None) -> Update:
+    user = User(id=user_id, is_bot=False, first_name="Test", username=username)
     chat = Chat(id=user_id, type="private")
     msg = Message(message_id=1, date=int(time.time()), chat=chat, from_user=user, text="salom")
     return Update(update_id=update_id, message=msg)
@@ -108,3 +108,25 @@ async def test_run_update_dispatches_when_not_rate_limited(monkeypatch):
     await main_module._run_update(_make_message_update(1, 777))
 
     assert called["n"] == 1
+
+
+async def test_run_update_remembers_ceo_chat_id_on_first_message(monkeypatch):
+    """Ikkinchi CEO botga (qayerda bo'lsa ham) birinchi marta yozishi bilan
+    uning raqamli chat_id'si ceo_state'ga saqlanadi — handler'ga bog'liq emas."""
+    from app import ceo_state
+
+    async def fake_feed_update(bot, update):
+        pass
+
+    monkeypatch.setattr(main_module.dp, "feed_update", fake_feed_update)
+    monkeypatch.setattr(main_module, "is_rate_limited", lambda uid: False)
+    monkeypatch.setattr(ceo_state.settings, "CEO_TELEGRAM_USER_ID", 0)
+    monkeypatch.setattr(ceo_state.settings, "CEO_TELEGRAM_USERNAME", "AbdurRohman_Zafar,hasanxojayev_sardor")
+
+    await main_module._run_update(_make_message_update(1, 7001, username="HasanXojayev_Sardor"))
+    await main_module._run_update(_make_message_update(2, 8002, username="oddiy_xodim"))
+    for _ in range(20):  # fon _capture vazifasi tugashini kutamiz
+        await asyncio.sleep(0)
+
+    assert await ceo_state.get_ceo_telegram_user_ids() == [7001]
+    assert '"hasanxojayev_sardor": 7001' in ceo_state._PATH.read_text(encoding="utf-8")

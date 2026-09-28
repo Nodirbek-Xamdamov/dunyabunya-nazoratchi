@@ -6,10 +6,11 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from aiogram import Bot, Dispatcher
-from aiogram.types import Update
+from aiogram.types import Update, User
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app import ceo_state
 from app.config import settings
 from app.db.session import init_db
 from app.rate_limiter import is_rate_limited
@@ -36,19 +37,30 @@ dp.include_router(group_router)
 _ACTIVE_UPDATES: set[asyncio.Task] = set()
 
 
-def _update_sender_id(update: Update) -> int | None:
+def _update_sender(update: Update) -> User | None:
     for attr in ("message", "edited_message", "callback_query", "my_chat_member"):
         obj = getattr(update, attr, None)
         if obj is not None and getattr(obj, "from_user", None) is not None:
-            return obj.from_user.id
+            return obj.from_user
     return None
+
+
+def _update_sender_id(update: Update) -> int | None:
+    sender = _update_sender(update)
+    return sender.id if sender is not None else None
 
 
 async def _run_update(update: Update) -> None:
     # P1-5: oddiy throttling — bitta foydalanuvchidan 1 daqiqada 10+ update
     # kelsa, ortiqchasi jimgina tashlab yuboriladi (tasodifiy/buzilgan klient
     # toshqinidan himoya — CEO/menejerlarning odatiy ishlatishiga ta'sir qilmaydi).
-    sender_id = _update_sender_id(update)
+    sender = _update_sender(update)
+    sender_id = sender.id if sender is not None else None
+    # CEO (CEO_TELEGRAM_USERNAME ro'yxatidagi har biri) QAYERDA yozmasin — shaxsiy
+    # chat, istalgan topik yoki tugma — birinchi update'dayoq raqamli chat_id'si
+    # storage/ceo_state.json'ga saqlanadi (proaktiv eslatmalar shunga yuboriladi).
+    if sender is not None:
+        ceo_state.is_ceo(sender.id, sender.username)
     if sender_id is not None and is_rate_limited(sender_id):
         log.warning("update %s: foydalanuvchi %s uchun rate limit — e'tiborsiz qoldirildi",
                     update.update_id, sender_id)

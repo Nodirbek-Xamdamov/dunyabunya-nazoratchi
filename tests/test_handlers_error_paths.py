@@ -123,17 +123,12 @@ def _analyze_result(**overrides) -> AnalyzeResult:
     return AnalyzeResult(**base)
 
 
-# ── 0) Bo'lim topiklari (on_topic_message) — HAMMA a'zoga ochiq ─────────────
-# Spec (4-bo'lim): "Bo'lim mavzusi (asosiy guruh): Vazifalar o'sha bo'lim
-# loyihasiga yoziladi. Savollar ham berilsa bo'ladi — AI javob beradi."
-# CEO-only cheklov FAQAT "boshqa guruhlar" uchun (pastda) — bu yerga
-# TEGMASLIK kerak (spec 4-bo'lim, "DIQQAT" eslatmasi).
+# ── 0) Bo'lim topiklari (on_topic_message) — FAQAT CEO'lar ──────────────────
+# 2026-09-28 CEO buyrug'i: asosiy (topiklarga ajratilgan) guruhda bot faqat
+# CEO_TELEGRAM_USERNAME'dagi ikki CEO'ga javob beradi (ilgari spec 4-bo'limga
+# ko'ra bo'lim topiklari hamma a'zoga ochiq edi — endi bu bekor qilindi).
 
-async def test_topic_message_processes_non_ceo_sender(monkeypatch):
-    """Bo'lim topikida istalgan xodim/menejer yozganda ham xabar odatdagidek
-    qayta ishlanishi kerak (get_message_text chaqiriladi, CEO-filtri YO'Q)."""
-    called = {"get_message_text": False}
-
+def _patch_topic_flow(monkeypatch, called):
     async def fake_get_message_text(message, bot):
         called["get_message_text"] = True
         return "Omborni tekshiring"
@@ -142,21 +137,42 @@ async def test_topic_message_processes_non_ceo_sender(monkeypatch):
         return None  # ro'yxatdan o'tmagan mavzu — assistant javobiga tushadi
 
     async def fake_assistant_reply(bot, text, thread_id=None):
-        pass
+        called["assistant"] = True
 
     monkeypatch.setattr(handlers, "get_message_text", fake_get_message_text)
     monkeypatch.setattr(handlers.repo, "get_topic_by_telegram_id", fake_get_topic_by_telegram_id)
     monkeypatch.setattr(handlers, "_assistant_reply", fake_assistant_reply)
     monkeypatch.setattr(handlers, "SessionLocal", _session_factory())
-    monkeypatch.setattr(handlers.settings, "CEO_TELEGRAM_USER_ID", 555)
-    monkeypatch.setattr(handlers.settings, "CEO_TELEGRAM_USERNAME", "")
+    monkeypatch.setattr(handlers.settings, "CEO_TELEGRAM_USER_ID", 0)
+    monkeypatch.setattr(handlers.settings, "CEO_TELEGRAM_USERNAME", "AbdurRohman_Zafar,hasanxojayev_sardor")
+
+
+async def test_topic_message_ignores_non_ceo_sender(monkeypatch):
+    """Bo'lim topikida CEO bo'lmagan a'zo yozsa — bot jim (STT/LLM ham chaqirilmaydi)."""
+    called = {"get_message_text": False, "assistant": False}
+    _patch_topic_flow(monkeypatch, called)
 
     bot = _FakeBot()
     message = _FakeMessage(text="Omborni tekshiring", thread_id=12, chat_id=handlers.settings.TELEGRAM_GROUP_ID,
                            user=_FakeUser(uid=111, username="boshqa_xodim"))
     await handlers.on_topic_message(message, bot)
 
-    assert called["get_message_text"] is True
+    assert called == {"get_message_text": False, "assistant": False}
+    assert bot.sent == [] and bot.chat_actions == []
+
+
+@pytest.mark.parametrize("username", ["AbdurRohman_Zafar", "hasanxojayev_sardor"])
+async def test_topic_message_processes_both_ceos(monkeypatch, username):
+    """Ikkala CEO ham bo'lim topikida javob oladi."""
+    called = {"get_message_text": False, "assistant": False}
+    _patch_topic_flow(monkeypatch, called)
+
+    bot = _FakeBot()
+    message = _FakeMessage(text="Omborni tekshiring", thread_id=12, chat_id=handlers.settings.TELEGRAM_GROUP_ID,
+                           user=_FakeUser(uid=222, username=username))
+    await handlers.on_topic_message(message, bot)
+
+    assert called == {"get_message_text": True, "assistant": True}
 
 
 # ── 1) GENERAL topik hech qachon task yozmaydi ──────────────────────────────

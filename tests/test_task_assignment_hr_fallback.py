@@ -297,9 +297,38 @@ class _FakeCallback:
         self.data = data
         self.from_user = _FakeUser(uid)
         self.message = _FakeMsg()
+        self.answers = []
 
     async def answer(self, *a, **kw):
-        pass
+        self.answers.append((a, kw))
+
+
+@pytest.fixture(autouse=True)
+def _ceo_is_user_1(monkeypatch):
+    # task_assign/task_skip tugmalari faqat CEO uchun — bu testlarda bosuvchi (uid=1) CEO.
+    monkeypatch.setattr(handlers.settings, "CEO_TELEGRAM_USER_ID", 1)
+
+
+async def test_on_task_assign_rejects_non_ceo_click(monkeypatch):
+    """CEO bo'lmagan guruh a'zosi "Ha, topshirish"ni bossa — Odoo'ga hech narsa
+    yozilmaydi, kutilayotgan tanlov saqlanib qoladi, ogohlantirish chiqadi."""
+    monkeypatch.setattr(handlers.settings, "CEO_TELEGRAM_USERNAME", "")
+    thread_id = 91
+    handlers._pending_task_selections[thread_id] = {"sentinel": True}
+
+    async def fail_create_task(**kw):
+        raise AssertionError("CEO bo'lmagan bosuvchi uchun vazifa yaratilmasligi kerak")
+
+    monkeypatch.setattr(handlers.odoo, "create_task", fail_create_task)
+
+    callback = _FakeCallback(f"task_assign:{thread_id}:10", uid=2)
+    try:
+        await handlers.on_task_assign(callback, _FakeBot())
+        assert handlers._pending_task_selections[thread_id] == {"sentinel": True}
+        assert callback.message.edited == []
+        assert callback.answers and callback.answers[0][1].get("show_alert") is True
+    finally:
+        handlers._pending_task_selections.pop(thread_id, None)
 
 
 async def test_on_task_assign_hr_employee_source_no_user_ids_and_warns(monkeypatch):

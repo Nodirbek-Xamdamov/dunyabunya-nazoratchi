@@ -150,3 +150,24 @@ async def test_c_ceo_low_confidence_sends_nothing(ceo_settings, monkeypatch):
     await dp.feed_update(bot, update)
 
     assert session.calls == []
+
+
+async def test_d_main_group_topic_ignores_non_ceo_via_real_dispatcher(ceo_settings, monkeypatch):
+    """(d) 2026-09-28: asosiy guruhning bo'lim topikida ham CEO bo'lmagan a'zo
+    yozsa — haqiqiy Dispatcher orqali ham bot jim (STT/LLM chaqirilmaydi)."""
+    async def _fail_text(message, bot):
+        raise AssertionError("get_message_text chaqirilmasligi kerak edi — topik CEO filtri ishlamayapti")
+
+    monkeypatch.setattr(handlers, "get_message_text", _fail_text)
+
+    session = _RecordingSession()
+    bot = Bot(token="123456:test-fake-token-not-real", session=session)
+    dp = _build_dispatcher()
+
+    user = User(id=111222, is_bot=False, first_name="Test", username="oddiy_xodim")
+    chat = Chat(id=handlers.settings.TELEGRAM_GROUP_ID, type="supergroup", title="dunyabunya agent", is_forum=True)
+    msg = Message(message_id=1, date=int(time.time()), chat=chat, from_user=user,
+                  text="Omborni tekshiring", message_thread_id=12, is_topic_message=True)
+    await dp.feed_update(bot, Update(update_id=1, message=msg))
+
+    assert session.calls == []
