@@ -165,6 +165,7 @@ async def _parallel_polling() -> None:
                 me = await bot.get_me()
                 log.info("Parallel polling started for bot @%s", me.username)
                 announced = True
+                _polling["last_ok"] = time.monotonic()  # Telegram bilan aloqa tasdiqlandi
             updates = await bot.get_updates(
                 offset=offset,
                 timeout=30,
@@ -200,7 +201,9 @@ def _polling_health() -> tuple[bool, dict]:
     if now - _polling["last_attempt"] > _POLLING_STALL_SECONDS:
         info["polling"] = "stalled"
         return False, info
-    if not _polling["last_ok"] or now - _polling["last_ok"] > _POLLING_STALL_SECONDS:
+    if not _polling["last_ok"]:
+        info["polling"] = "starting"  # birinchi so'rov hali javob olmadi
+    elif now - _polling["last_ok"] > _POLLING_STALL_SECONDS:
         # Urinishlar davom etyapti, lekin Telegram'ga yetib bo'lmayapti (tarmoq) —
         # qayta ishga tushirish yordam bermaydi, shuning uchun bu "nosog'lom" emas
         info["polling"] = "telegram unreachable"
