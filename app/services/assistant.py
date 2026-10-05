@@ -217,12 +217,14 @@ MAVJUD MODELLAR VA FIELDLAR:
 - res.partner: id, name, email, phone, category_id
 - res.users: id, name, login, email, groups_id
 - account.move: id, name, invoice_date, amount_total, partner_id, move_type, state, amount_residual
-- account.payment: id, name, date, amount, partner_id, payment_type, state
-- product.product: id, name, list_price, qty_available, categ_id, type
+- account.payment: id, name, date, amount, currency_id, partner_id, payment_type, state
+- product.product: id, name, default_code, list_price, qty_available, categ_id, type, is_storable
 - stock.quant: id, product_id, location_id, quantity, reserved_quantity
 - stock.picking: id, name, location_id, location_dest_id, state
-- crm.lead: id, name, partner_name, stage_id, create_date, user_id
-- hr.employee: id, name, job_id, department_id, work_email
+- crm.lead: id, name, partner_name, stage_id, expected_revenue, create_date, user_id
+- hr.employee: id, name, job_id, department_id, work_email, work_phone, mobile_phone
+- account.currency.exchange (valyuta ayirboshlash): id, date, partner_id, payment_type ('receive' — kirim, 'send' — chiqim), to_currency_id, amount, manual_rate, system_rate, state ('draft', 'posted')
+- Kassa chiqimlari alohida hujjat — ular uchun search_kassa_chiqim toolidan foydalaning (account.move'dan qidirmang).
 
 HOLAT (state) QIYMATLARI — domain'da FAQAT shulardan foydalan, boshqa field o'ylab topma:
 - project.task.state: '01_in_progress', '02_changes_requested', '03_approved',
@@ -233,20 +235,89 @@ HOLAT (state) QIYMATLARI — domain'da FAQAT shulardan foydalan, boshqa field o'
 - account.move.state: 'draft', 'posted', 'cancel'; move_type: 'out_invoice' (mijozga hisob),
   'in_invoice' (ta'minotchi hisobi), 'out_refund', 'in_refund', 'entry'.
 - account.payment.payment_type: 'inbound' (kirim), 'outbound' (chiqim).
+- account.payment.state: 'draft', 'in_process' (jarayonda), 'paid' (to'langan), 'canceled',
+  'rejected'. 'posted' qiymati YO'Q — o'tkazilgan to'lovlar = [["state","in",["in_process","paid"]]].
+- product.product.type: 'consu' (tovar), 'service' (xizmat), 'combo'. 'product' qiymati YO'Q —
+  omborda hisobga olinadigan tovar = [["is_storable","=",true]].
 - stock.picking.state: 'draft', 'waiting', 'confirmed', 'assigned', 'done', 'cancel'.
 Tool xato qaytarsa (masalan "Invalid field") — xato natijani javob sifatida ishlatma,
 domain'ni tuzatib qayta chaqir.
 
+VALYUTA VA SANA:
+- Hujjatlar so'm (UZS) va dollar (USD) da yuritiladi. Summani har doim valyutasi bilan yozing;
+  turli valyutadagi summalarni bir-biriga QO'SHMANG — currency_id bo'yicha alohida ko'rsating.
+- account.move: amount_total/amount_residual — hujjat valyutasida; amount_total_signed va
+  amount_residual_signed — kompaniya valyutasida (USD). Bularni aralashtirmang.
+- Sana-vaqt maydonlari (date_order, create_date) bazada UTC'da; Toshkent vaqti = UTC+5.
+
 QOIDALAR:
 1. Ma'lumot so'ralganda har doim avval tegishli toolni chaqir, ma'lumotni olgach javob yoz.
 2. Tool natijasini qayta sanab o'tmang — qisqa xulosa bering.
-3. Sizning rolingiz: {role_name}
+3. Tool natijasida "ogohlantirish" bo'lsa (natija qisqartirilgan yoki limitga yetgan) — ko'rsatilgan
+   qatorlar sonini JAMI son deb aytmang; jami sonni odoo_count, yig'indini odoo_read_group bilan oling.
+4. Sizning rolingiz: {role_name}
 {role_prompt}
 """
 
 
-# export_text ham `model`ni erkin qabul qiladi — rol cheklovi unga ham qo'llanadi
-_BASE_MODEL_TOOLS = {"odoo_search_read", "odoo_read_group", "odoo_count", "export_text"}
+# Barcha rollarga beriladigan asosiy tool'lar (ROLE_TOOLS ro'yxatidan qat'iy nazar)
+_BASE_TOOL_NAMES = {t["name"] for t in BASE_TOOLS}
+
+# Model javobiga sig'adigan tool natijasi hajmi (belgilar)
+_TOOL_RESULT_MAX_CHARS = 8000
+_SEARCH_READ_MAX_LIMIT = 500
+
+
+def _role_denial(name: str, args: dict, role: Role) -> str | None:
+    """Tool chaqiruvi rolga ruxsat etilmagan bo'lsa — rad etish sababi, aks holda None.
+
+    Ikki tekshiruv (ikkalasi ham texnik nazorat, promptdagi ko'rsatma emas):
+    - tool rolning ro'yxatida bo'lishi shart (model ro'yxatda yo'q tool nomini "o'ylab
+      topsa" ham bajarilmaydi);
+    - `model` parametrini erkin qabul qiladigan HAR QANDAY tool (odoo_search_read,
+      export_excel, generate_html_report...) uchun model rolga ruxsat etilgan bo'lishi
+      shart. Ilgari faqat 4 ta tool tekshirilardi — HR menejeri
+      export_excel(model="account.move") orqali Moliya ma'lumotini olib chiqa olardi."""
+    if name not in _BASE_TOOL_NAMES and name not in ROLE_TOOLS.get(role, []):
+        log.warning("tool %s: role=%s uchun ruxsat etilmagan — rad etildi", name, role.value)
+        return f"'{name}' amali sizning rolingizga ruxsat etilmagan."
+    allowed = ROLE_ALLOWED_MODELS.get(role, set())
+    if allowed is not None and "model" in args:
+        model = args.get("model") or ""
+        if model not in allowed:
+            log.warning("tool %s: role=%s model=%r ruxsat etilmagan — rad etildi", name, role.value, model)
+            return f"Sizning rolingiz '{model}' modeliga kira olmaydi."
+    return None
+
+
+def _serialize_tool_result(result) -> str:
+    """Tool natijasini model uchun JSON qiladi; sig'masa — BUTUN qatorlar bilan qisqartiradi.
+
+    Ilgari matn 8000-belgida shunchaki kesilardi: model yarmi yo'q ro'yxatni ko'rib, bundan
+    bexabar holda sanab/jamlab noto'g'ri javob berishi mumkin edi. Endi nechta qator
+    ko'rsatilgani va qolganini qanday olish aniq aytiladi."""
+    raw = json.dumps(result, ensure_ascii=False, default=str)
+    if len(raw) <= _TOOL_RESULT_MAX_CHARS:
+        return raw
+    if isinstance(result, list):
+        kept, size = [], 0
+        for row in result:
+            piece = json.dumps(row, ensure_ascii=False, default=str)
+            if size + len(piece) + 2 > _TOOL_RESULT_MAX_CHARS - 600:
+                break
+            kept.append(row)
+            size += len(piece) + 2
+        return json.dumps({
+            "qatorlar": kept,
+            "korsatilgan": len(kept),
+            "jami_qaytgan": len(result),
+            "ogohlantirish": (
+                f"Natija uzun bo'lgani uchun {len(result)} ta qatordan faqat dastlabki {len(kept)} tasi "
+                "ko'rsatildi. Ko'rinmagan qatorlar haqida taxmin qilmang: sanash uchun odoo_count, "
+                "jamlash uchun odoo_read_group, to'liq ro'yxat uchun export_excel yoki export_text ishlating."
+            ),
+        }, ensure_ascii=False, default=str)
+    return raw[:_TOOL_RESULT_MAX_CHARS] + "\n... [natija juda uzun — shu yerda kesildi, qolgani ko'rinmaydi]"
 
 
 def _odoo_connection_failure(raw: str) -> dict | None:
@@ -290,29 +361,31 @@ def _collect_text_exports(raw: str, found: list[str]) -> None:
 async def _exec_tool(name: str, args: dict, role: Role) -> str:
     """Tool ni bajarish — asosiy yoki rolga xos.
 
-    odoo_search_read/odoo_read_group/odoo_count BASE_TOOLS sifatida BARCHA
-    rollarga beriladi va `model` parametrini erkin qabul qiladi — shuning
-    uchun bu yerda ROLE_ALLOWED_MODELS bo'yicha qayta tekshirilmasa, masalan
-    Sotuv menejeri "model: account.move" deb so'rab Moliya ma'lumotlarini
-    o'qib olishi mumkin bo'lardi (role prompt buni "taqiqlaydi", lekin bu
-    LLM uchun ko'rsatma, texnik cheklov emas)."""
+    Bajarishdan oldin `_role_denial` rol ruxsatini tekshiradi: role prompt boshqa
+    bo'lim ma'lumotini "taqiqlaydi", lekin bu LLM uchun ko'rsatma, texnik cheklov emas."""
     try:
-        if name in _BASE_MODEL_TOOLS:
-            allowed = ROLE_ALLOWED_MODELS.get(role)
-            model = args.get("model", "")
-            if allowed is not None and model not in allowed:
-                log.warning("tool %s: role=%s model=%r ruxsat etilmagan — rad etildi", name, role.value, model)
-                return json.dumps({"error": f"Sizning rolingiz '{model}' modeliga kira olmaydi."})
+        denial = _role_denial(name, args, role)
+        if denial:
+            return json.dumps({"error": denial}, ensure_ascii=False)
         if name == "odoo_search_read":
+            limit = max(1, min(int(args.get("limit") or 50), _SEARCH_READ_MAX_LIMIT))
             r = await _odoo.execute_kw(
                 args["model"], "search_read",
                 [args["domain"]],
-                {"fields": args["fields"], "limit": args.get("limit", 50)},
+                {"fields": args["fields"], "limit": limit},
             )
+            if isinstance(r, list) and len(r) >= limit:
+                # Limitga yetgan natija — JAMI son emas: model buni bilmasa "50 ta xodim bor" deb yuboradi
+                r = {"qatorlar": r, "korsatilgan": len(r),
+                     "ogohlantirish": f"Limit ({limit}) to'ldi — bazada bundan ko'p yozuv bo'lishi mumkin. "
+                                      "Jami sonni odoo_count bilan aniqlang."}
         elif name == "odoo_read_group":
+            group_by = args["group_by"]
             r = await _odoo.execute_kw(
                 args["model"], "read_group",
-                [args["domain"], args["fields"], args["group_by"]],
+                [args["domain"], args["fields"], group_by],
+                # Bir nechta guruh so'ralsa lazy=False shart — aks holda Odoo faqat birinchisi bo'yicha guruhlaydi
+                {"lazy": False} if isinstance(group_by, list) and len(group_by) > 1 else {},
             )
         elif name == "odoo_count":
             r = await _odoo.execute_kw(args["model"], "search_count", [args["domain"]])
@@ -325,7 +398,7 @@ async def _exec_tool(name: str, args: dict, role: Role) -> str:
             r = "Noma'lum tool"
 
         log.info("tool %s ok: %s", name, str(r)[:100])
-        return json.dumps(r, ensure_ascii=False, default=str)[:8000]
+        return _serialize_tool_result(r)
     except OdooError as e:
         if not e.kind:
             # Odoo so'rovni qabul qilib rad etgan (noto'g'ri field/domain...) — model tuzatib qayta chaqiradi
@@ -375,7 +448,11 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
     async with SessionLocal() as session:
         history = await repo.get_recent_conversation(session, telegram_user_id)
 
-    messages = [{"role": m.role, "content": m.content} for m in history[-6:]]
+    messages = [{"role": m.role, "content": m.content} for m in history[-6:] if m.content]
+    # Anthropic API suhbat "user" xabaridan boshlanishini talab qiladi — tarix kesimi
+    # "assistant"dan boshlanib qolsa (juftlik buzilgan bo'lsa) butun so'rov 400 bilan yiqilardi
+    while messages and messages[0]["role"] != "user":
+        messages.pop(0)
 
     if group_chat_id:
         try:

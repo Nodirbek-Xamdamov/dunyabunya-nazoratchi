@@ -84,7 +84,8 @@ ROLE_TOOLS: dict[Role, list[str]] = {
 # None = cheklovsiz (faqat CEO).
 ROLE_ALLOWED_MODELS: dict[Role, set[str] | None] = {
     Role.CEO: None,
-    Role.MOLIYA: {"account.move", "account.move.line", "account.payment", "res.partner"},
+    Role.MOLIYA: {"account.move", "account.move.line", "account.payment", "res.partner",
+                  "account.currency.exchange", "account.currency.exchange.line"},
     Role.OMBOR: {"product.product", "stock.quant", "stock.picking", "stock.move"},
     Role.SOTUV: {"sale.order", "sale.order.line", "res.partner", "crm.lead", "product.product"},
     Role.HR: {"hr.employee", "hr.department"},
