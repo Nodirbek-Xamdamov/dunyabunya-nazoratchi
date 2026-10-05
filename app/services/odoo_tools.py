@@ -664,6 +664,105 @@ async def export_csv(model: str = "", domain: list | None = None,
     return f"{base}/reports/{filename}"
 
 
+# ─── MATN (TELEGRAM CHATIGA) EKSPORT ────────────────────────────────────────
+
+TEXT_EXPORT_MAX_ROWS = 300  # bundan ko'pi chatda o'qib bo'lmaydi — Excel tavsiya qilinadi
+
+# token -> tayyor Telegram-HTML matn. export_text shu yerga yozadi, assistant.ask_with_files
+# olib ketadi: ro'yxatni model qayta yozmaydi (qisqartirmaydi, xato qilmaydi) — bot
+# o'zi to'liq yuboradi.
+_text_exports: dict[str, str] = {}
+
+
+def pop_text_export(token: str) -> str | None:
+    return _text_exports.pop(token, None)
+
+
+def _text_value(val) -> str:
+    """Matn eksportidagi qiymat: bo'sh/False — "", son — minglik ajratgich bilan."""
+    if val is None or val is False or val == "":
+        return ""
+    if val is True:
+        return "Ha"
+    if isinstance(val, float):
+        return f"{val:,.2f}".rstrip("0").rstrip(".")
+    if isinstance(val, int):
+        return f"{val:,}"
+    return str(val).strip()
+
+
+async def export_text(model: str = "", domain: list | None = None,
+                      fields: list | None = None, title: str = "Ro'yxat",
+                      group_by: str = "", limit: int = TEXT_EXPORT_MAX_ROWS) -> dict | str:
+    """Odoo yozuvlari ro'yxatini FAYLSIZ — Telegram chatining o'ziga matn ko'rinishida
+    tayyorlaydi (foydalanuvchi "matn", "shu yerga yoz" desa). Birinchi field — asosiy
+    (qalin) ustun, qolganlari "Nomi: qiymat" ko'rinishida; group_by berilsa yozuvlar
+    shu field bo'yicha guruhlab chiqariladi."""
+    import asyncio
+    import html
+
+    if not model:
+        return "Matn uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
+    limit = max(1, min(int(limit or TEXT_EXPORT_MAX_ROWS), TEXT_EXPORT_MAX_ROWS))
+    flds = [f for f in (fields or []) if f != "id"] or ["display_name"]
+    if group_by and group_by not in flds:
+        flds.append(group_by)
+
+    rows, total = await asyncio.gather(
+        _search_read_clean(model, domain, flds, limit=limit),
+        _odoo.execute_kw(model, "search_count", [domain or []]),
+    )
+    if not rows:
+        return "Bu so'rov bo'yicha ma'lumot topilmadi."
+
+    try:
+        meta = await _odoo.execute_kw(model, "fields_get", [flds], {"attributes": ["string"]})
+    except Exception:
+        meta = {}  # nomlarsiz ham chiqaveradi — texnik field nomi ishlatiladi
+    labels = {f: (meta.get(f) or {}).get("string") or f for f in flds}
+
+    main, *rest = [f for f in flds if f != group_by] or flds
+
+    def _line(n: int, row: dict) -> str:
+        head = html.escape(_text_value(row.get(main)) or "—", quote=False)
+        details = [
+            f"{html.escape(str(labels[f]), quote=False)}: {html.escape(v, quote=False)}"
+            for f in rest if (v := _text_value(row.get(f)))
+        ]
+        return f"{n}. <b>{head}</b>" + (" — " + "; ".join(details) if details else "")
+
+    shown = len(rows)
+    safe_title = html.escape(str(title or "Ro'yxat"), quote=False)
+    header = f"<b>{safe_title}</b> — {shown:,} ta yozuv"
+    if total > shown:
+        header += (f"\nJami {total:,} ta yozuvdan dastlabki {shown:,} tasi ko'rsatildi — "
+                   f"to'liq ro'yxat uchun Excel faylni tanlang.")
+    out = [header, ""]
+    if group_by:
+        groups: dict[str, list[dict]] = {}
+        for row in rows:
+            groups.setdefault(_text_value(row.get(group_by)), []).append(row)
+        # Guruhsiz ("") yozuvlar oxirida
+        for name in sorted(groups, key=lambda g: (g == "", g.casefold())):
+            members = groups[name]
+            group_title = html.escape(name or "Ko'rsatilmagan", quote=False)
+            out.append(f"<b>{group_title}</b> ({len(members)} ta)")
+            out.extend(_line(n, row) for n, row in enumerate(members, start=1))
+            out.append("")
+    else:
+        out.extend(_line(n, row) for n, row in enumerate(rows, start=1))
+
+    token = uuid.uuid4().hex[:12]
+    _text_exports[token] = "\n".join(out).strip()
+    return {
+        "text_export": token,
+        "rows_shown": shown,
+        "rows_total": total,
+        "note": "To'liq ro'yxat foydalanuvchiga alohida xabar bilan yuboriladi. Javobingizda "
+                "ro'yxatni QAYTA YOZMANG — faqat bir jumla yozing (masalan: jami nechta yozuv).",
+    }
+
+
 # ─── CEO EXTRA ANALYTICS ───────────────────────────────────────────────────
 
 async def get_top_debtors(limit: int = 10) -> list[dict]:
@@ -1540,6 +1639,7 @@ ALL_TOOLS: dict[str, callable] = {
     "export_word": export_word,
     "export_pdf": export_pdf,
     "export_csv": export_csv,
+    "export_text": export_text,
     # CEO
     "export_excel": export_excel,
     "generate_html_report": generate_html_report,
@@ -1888,6 +1988,22 @@ TOOL_SCHEMAS: dict[str, dict] = {
                 "limit": {"type": "integer", "default": 10000},
             },
             "required": ["model"],
+        },
+    },
+    "export_text": {
+        "name": "export_text",
+        "description": "Odoo yozuvlari ro'yxatini FAYLSIZ, shu Telegram chatining o'ziga MATN ko'rinishida chiqaradi. Foydalanuvchi 'matn', 'text', 'matn ko'rinishida', 'shu yerga yoz', 'chatga tashla' desa shu toolni ishlating. To'liq ro'yxatni bot o'zi yuboradi — javobingizda ro'yxatni qayta yozmang. 300 tadan ko'p yozuv bo'lsa dastlabki 300 tasi chiqadi.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "model": {"type": "string", "description": "Odoo model, masalan hr.employee, sale.order"},
+                "domain": {"type": "array", "description": "Odoo domain filtrlari (ixtiyoriy)"},
+                "fields": {"type": "array", "items": {"type": "string"}, "description": "Ko'rsatiladigan maydonlar; BIRINCHISI asosiy ustun (masalan [\"name\", \"job_id\", \"work_phone\"]). 2-5 ta maydon yetarli."},
+                "title": {"type": "string", "default": "Ro'yxat", "description": "Ro'yxat sarlavhasi"},
+                "group_by": {"type": "string", "description": "Shu maydon bo'yicha guruhlab chiqarish (ixtiyoriy), masalan department_id"},
+                "limit": {"type": "integer", "default": 300},
+            },
+            "required": ["model", "fields"],
         },
     },
     "get_top_debtors": {

@@ -1,9 +1,10 @@
-"""Report/format yetkazib berish: Excel/HTML tugmalari va fayllarni yuborish.
+"""Report/format yetkazib berish: Excel/HTML/Matn tugmalari va fayllarni yuborish.
 
 Assistant javob bergan har bir ma'lumotli so'rovdan so'ng chaqiruvchi
-`remember()` bilan kontekstni saqlaydi va `format_keyboard()` orqali 2 ta
-tugma (Excel / HTML) qo'shadi. Tugma bosilganda callback so'rovni shu
-formatda qayta ishlaydi.
+`offer_formats()` orqali kontekstni saqlaydi va tugmalarni oladi: ro'yxat/jadval
+so'rovida 3 ta (Excel / HTML / Matn), fayl allaqachon yuborilgan bo'lsa — shu
+ma'lumotni chatning o'zida matn qilib olish uchun "Matn" tugmasi. Tugma
+bosilganda callback so'rovni shu formatda qayta ishlaydi.
 
 Natijada: barcha turdagi fayllar (Excel, HTML, PDF) haqiqiy hujjat sifatida
 Telegram orqali yuboriladi — server manzili (PUBLIC_BASE_URL, odatda lokal
@@ -27,7 +28,7 @@ from aiogram.types import (
 )
 
 from app.rbac import Role
-from app.services.assistant import AssistantResult, ask_with_files
+from app.services.assistant import FILE_TOOLS, AssistantResult, ask_with_files
 from app.telegram.tg_format import TG_LIMIT, split_message, to_telegram_html
 
 log = logging.getLogger(__name__)
@@ -90,14 +91,47 @@ def remember(scope: str, *, chat_id: int, thread_id: int | None,
     }
 
 
+def _text_button(scope: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text="📝 Matn (shu chatda)", callback_data=f"fmt:text:{scope}")
+
+
 def format_keyboard(scope: str) -> InlineKeyboardMarkup:
-    """Excel / HTML tanlash tugmalari."""
+    """Excel / HTML / Matn tanlash tugmalari."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📊 Excel fayl", callback_data=f"fmt:excel:{scope}"),
             InlineKeyboardButton(text="📈 HTML hisobot", callback_data=f"fmt:html:{scope}"),
-        ]
+        ],
+        [_text_button(scope)],
     ])
+
+
+def text_keyboard(scope: str) -> InlineKeyboardMarkup:
+    """Fayl yuborilgandan keyin — shu ma'lumotni chatda matn qilib olish tugmasi."""
+    return InlineKeyboardMarkup(inline_keyboard=[[_text_button(scope)]])
+
+
+def offer_formats(scope: str, question: str, result: AssistantResult, *,
+                  chat_id: int, thread_id: int | None, user_key: int,
+                  role: Role = Role.CEO,
+                  group_chat_id: int | None = None) -> InlineKeyboardMarkup | None:
+    """Javob ostiga qo'yiladigan format tugmalari (kerak bo'lmasa None) — tugma
+    bosilganda qayta ishlatish uchun savol kontekstini ham eslab qoladi.
+
+    - Odoo bilan aloqa yo'q bo'lsa — tugma yo'q (qaysi format tanlanmasin, natija bir xil xato);
+    - ro'yxat/jadval so'rovi — Excel / HTML / Matn;
+    - boshqa so'rov, lekin fayl yuborilgan (masalan avtomatik HTML hisobot) — faqat "Matn"."""
+    if result.odoo_error:
+        return None
+    if wants_format_buttons(question) or wants_format_buttons(result.text):
+        keyboard = format_keyboard(scope)
+    elif result.files:
+        keyboard = text_keyboard(scope)
+    else:
+        return None
+    remember(scope, chat_id=chat_id, thread_id=thread_id, question=question,
+             user_key=user_key, role=role, group_chat_id=group_chat_id)
+    return keyboard
 
 
 def _clean_stem(filename: str) -> str:
@@ -122,7 +156,7 @@ def _clean_telegram_filename(filename: str) -> str:
 
 
 async def send_files(bot: Bot, chat_id: int, thread_id: int | None,
-                     files: list, text: str = "") -> None:
+                     files: list, text: str = "", reply_markup=None) -> None:
     """Yaratilgan fayllarni Telegram hujjati sifatida yuboradi (xlsx/pdf/html — barchasi).
 
     HTML hisobotlar ham hujjat sifatida yuboriladi (link emas) — ular to'liq mustaqil
@@ -130,10 +164,11 @@ async def send_files(bot: Bot, chat_id: int, thread_id: int | None,
     PUBLIC_BASE_URL server manzili (odatda LOKAL tarmoq IP'si) qanchalik erishib
     bo'lmasligidan qat'iy nazar, foydalanuvchi faylni yuklab olib istalgan joydan
     brauzerda ochishi mumkin — link ATAYLAB ko'rsatilmaydi (baribir ishlamaydi).
+    `reply_markup` berilsa — oxirgi hujjat ostiga qo'yiladi.
     """
     if not files:
         return
-    for f in files:
+    for idx, f in enumerate(files):
         try:
             display = _clean_telegram_filename(f.filename)
             # LINK/CAPTION KERAK EMAS — fayl nomining o'zi Telegram'da ko'rinadi,
@@ -142,6 +177,7 @@ async def send_files(bot: Bot, chat_id: int, thread_id: int | None,
                 chat_id=chat_id,
                 message_thread_id=thread_id,
                 document=FSInputFile(f.path, filename=display),
+                reply_markup=reply_markup if idx == len(files) - 1 else None,
             )
         except Exception as e:
             log.warning("send_files document %s failed: %s", f.filename, e)
@@ -166,6 +202,12 @@ async def send_assistant_text(bot: Bot, chat_id: int, thread_id: int | None,
     except Exception:
         log.exception("to_telegram_html failed — xom matn yuboriladi")
         formatted = text
+    await _send_html_parts(bot, chat_id, thread_id, formatted, reply_markup)
+
+
+async def _send_html_parts(bot: Bot, chat_id: int, thread_id: int | None,
+                           formatted: str, reply_markup=None) -> None:
+    """Tayyor Telegram-HTML matnni (kerak bo'lsa bir nechta xabarga bo'lib) yuboradi."""
     parts = split_message(formatted)
     for idx, part in enumerate(parts):
         markup = reply_markup if idx == len(parts) - 1 else None
@@ -187,8 +229,10 @@ async def send_assistant_text(bot: Bot, chat_id: int, thread_id: int | None,
 
 
 async def send_result(bot: Bot, chat_id: int, thread_id: int | None,
-                      result: AssistantResult) -> None:
-    """Assistant natijasini yuborish: matn + fayllar (barchasi hujjat sifatida)."""
+                      result: AssistantResult, reply_markup=None) -> None:
+    """Assistant natijasini yuborish: matn, so'ng matn-ro'yxatlar (export_text), so'ng
+    fayllar (barchasi hujjat sifatida). `reply_markup` (format tugmalari) eng oxirgi
+    yuborilgan xabar ostiga qo'yiladi."""
     text = result.text
     # Fayl sifatida yuboriladigan hisobotlarda (xlsx/pdf/html/csv) matndagi havola kerak emas
     for f in result.files:
@@ -196,8 +240,18 @@ async def send_result(bot: Bot, chat_id: int, thread_id: int | None,
             text = text.replace(f.url, "")
     if text != result.text:
         text = re.sub(r"(Hisobot tayyorlandi:?\s*|Hisobot tayyor:?\s*)+$", "", text).strip(" \n\u2060")
-    await send_assistant_text(bot, chat_id, thread_id, text)
-    await send_files(bot, chat_id, thread_id, result.files, text=text)
+
+    markup_on_files = reply_markup if result.files else None
+    markup_on_texts = reply_markup if result.texts and not result.files else None
+    markup_on_answer = reply_markup if not result.files and not result.texts else None
+
+    await send_assistant_text(bot, chat_id, thread_id, text, reply_markup=markup_on_answer)
+    # export_text ro'yxatlari tayyor HTML — Markdown o'girishidan o'tkazilmaydi
+    # (mahsulot nomlaridagi "*", "_" kabi belgilar buzilmasligi uchun)
+    for idx, block in enumerate(result.texts):
+        last = idx == len(result.texts) - 1
+        await _send_html_parts(bot, chat_id, thread_id, block, markup_on_texts if last else None)
+    await send_files(bot, chat_id, thread_id, result.files, text=text, reply_markup=markup_on_files)
 
 
 async def _safe_edit_markup(message: Message | None, markup=None) -> None:
@@ -211,7 +265,7 @@ async def _safe_edit_markup(message: Message | None, markup=None) -> None:
 
 @router.callback_query(F.data.startswith("fmt:"))
 async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
-    """Excel yoki HTML tugmasi bosilganda — so'rovni shu formatda qayta bajarish."""
+    """Excel, HTML yoki Matn tugmasi bosilganda — so'rovni shu formatda qayta bajarish."""
     await callback.answer()
     parts = callback.data.split(":", 2)
     if len(parts) != 3:
@@ -236,7 +290,23 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
     user_key = entry["user_key"]
     group_chat_id = entry["group_chat_id"]
 
-    if fmt == "excel":
+    exclude_tools = None
+    if fmt == "text":
+        instruction = (
+            "\n\n📝 Yuqoridagi savol bo'yicha ma'lumotni FAYLSIZ — shu chatning o'zida MATN "
+            "ko'rinishida bering. Yozuvlar ro'yxati/jadvali bo'lsa 'export_text' toolini "
+            "chaqiring (model, domain, fields; guruhlash kerak bo'lsa group_by) — to'liq "
+            "ro'yxatni bot o'zi chatga yuboradi, siz uni qayta yozmang. Statistika yoki "
+            "hisoblangan ko'rsatkichlar bo'lsa — raqamlarni tegishli tool'lar orqali olib, "
+            "barcha ko'rsatkichlarni qisqartirmasdan matn bilan yozing. Format so'ramang, "
+            "fayl yoki havola bermang."
+        )
+        # Ro'yxatmi yoki hisoblangan ko'rsatkichmi — model o'zi hal qiladi (majburlanmaydi),
+        # lekin fayl yaratuvchi tool'lar unga umuman berilmaydi.
+        force_tools = None
+        forced_choice = None
+        exclude_tools = FILE_TOOLS
+    elif fmt == "excel":
         instruction = (
             "\n\n📊 Iltimos, yuqoridagi savol bo'yicha ma'lumotni EXCEL (.xlsx) fayl "
             "ko'rinishida tayyorlang — 'export_excel' toolini chaqiring (model, domain, "
@@ -280,6 +350,7 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
             role=role, group_chat_id=group_chat_id,
             instruction=instruction,
             force_tools=force_tools, tool_choice=forced_choice,
+            exclude_tools=exclude_tools,
         )
     except Exception as e:
         log.exception("fmt regeneration failed")
@@ -299,9 +370,16 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
         except Exception:
             pass
 
-    await send_result(bot, chat_id, thread_id, result)
+    # Fayl yuborilgach — shu ma'lumotni chatda matn qilib olish taklifi ham beriladi
+    follow_up = None
+    if fmt != "text" and result.files:
+        remember(scope, chat_id=chat_id, thread_id=thread_id, question=question,
+                 user_key=user_key, role=role, group_chat_id=group_chat_id)
+        follow_up = text_keyboard(scope)
+    await send_result(bot, chat_id, thread_id, result, reply_markup=follow_up)
 
-    if not result.files:
+    # Matn tanlanganda fayl kutilmaydi; Odoo bilan aloqa yo'q bo'lsa sababi javobning o'zida
+    if fmt != "text" and not result.files and not result.odoo_error:
         # Sababini log qilamiz (avval bu holat sukut saqlab, aniqlash imkonsiz edi)
         log.warning(
             "fmt callback: fayl yaratilmadi — fmt=%s scope=%s reason=%r answer=%r",

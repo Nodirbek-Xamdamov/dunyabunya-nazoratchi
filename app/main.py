@@ -22,7 +22,9 @@ from app.telegram.delivery import router as delivery_router
 from app.telegram.handlers import router as group_router
 from app.telegram.handlers_manager import router as manager_router
 
-logging.basicConfig(level=settings.LOG_LEVEL)
+# Vaqt belgisi bilan — so'rovlar ketma-ketligi va uzilish qachon boshlanganini logdan ko'rish uchun
+logging.basicConfig(level=settings.LOG_LEVEL,
+                    format="%(asctime)s %(levelname)s:%(name)s:%(message)s")
 log = logging.getLogger(__name__)
 
 bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)

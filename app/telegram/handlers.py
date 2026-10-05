@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
@@ -283,6 +284,8 @@ async def on_topic_message(message: Message, bot: Bot) -> None:
     async with SessionLocal() as session:
         topic = await repo.get_topic_by_telegram_id(session, message.message_thread_id)
     if not topic:
+        if await _is_for_another_user(text, bot):
+            return
         log.info("on_topic: no topic for thread_id=%s, falling back to assistant", message.message_thread_id)
         # Ro'yxatdan o'tmagan mavzu — faqat AI javob (Odoo'ga vazifa YOZILMAYDI)
         await _assistant_reply(bot, text, thread_id=message.message_thread_id)
@@ -309,6 +312,10 @@ async def on_topic_message(message: Message, bot: Bot) -> None:
     _, result = await asyncio.gather(_save_context(), analyze_message(text))
     log.info("on_topic: is_task=%s scores=%s", result.is_task, result.department_scores)
     if not result.is_task:
+        # Vazifa emas va boshqa odamga qaratilgan ("@kimdir ...") — bot aralashmaydi.
+        # (Vazifa bo'lsa "@kimdir shuni qilsin" ham odatdagidek Odoo'ga yoziladi.)
+        if await _is_for_another_user(text, bot):
+            return
         await _assistant_reply(bot, text, thread_id=message.message_thread_id)
         return
 
@@ -651,7 +658,11 @@ async def on_general_message(message: Message, bot: Bot) -> None:
     """General topik — faqat CEO bilan AI muloqot. Odoga vazifa YAZILMAYDI."""
     if not _is_ceo_message(message):
         return
-    await bot.send_chat_action(chat_id=settings.TELEGRAM_GROUP_ID, action="typing", message_thread_id=message.message_thread_id)
+    # "@kimdir ..." — CEO boshqa odamga yozyapti: bot javob bermaydi, lekin xabar
+    # guruh konteksti sifatida pastda saqlanadi
+    for_another_user = await _is_for_another_user(message.text or message.caption, bot)
+    if not for_another_user:
+        await bot.send_chat_action(chat_id=settings.TELEGRAM_GROUP_ID, action="typing", message_thread_id=message.message_thread_id)
     text = await get_message_text(message, bot)
     if not text:
         if message.voice:
@@ -676,6 +687,9 @@ async def on_general_message(message: Message, bot: Bot) -> None:
         except Exception:
             pass
 
+    if for_another_user:
+        await _save_context()
+        return
     # Kontekst saqlash (DB) va assistant javobi bir-biriga bog'liq EMAS — PARALLEL.
     # General topikda faqat assistant javob beradi — task yaratilmaydi.
     await asyncio.gather(_save_context(), _assistant_reply(bot, text, thread_id=None))
@@ -754,33 +768,47 @@ async def on_other_group(message: Message, bot: Bot) -> None:
 
 # ─── Yordamchi funksiyalar ────────────────────────────────────────────────
 
+_LEADING_MENTION_RE = re.compile(r"^\s*@([A-Za-z0-9_]{4,32})\b")
+
+
+async def _is_for_another_user(text: str | None, bot: Bot) -> bool:
+    """Xabar "@kimdir ..." deb boshlansa va u bot emas bo'lsa — CEO botga emas, o'sha
+    odamga yozyapti (ilgari bot bunday xabarlarga ham "Buni qila olmayman" deb javob berardi)."""
+    m = _LEADING_MENTION_RE.match(text or "")
+    if not m:
+        return False
+    try:
+        bot_username = ((await bot.me()).username or "").casefold()
+    except Exception:
+        bot_username = ""
+    return m.group(1).casefold() != bot_username
+
+
 async def _assistant_reply(bot: Bot, text: str, thread_id: int | None = None) -> None:
     await bot.send_chat_action(chat_id=settings.TELEGRAM_GROUP_ID, action="typing", message_thread_id=thread_id)
-    await bot.send_message(chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=thread_id,
-                           text=replies.assistant_thinking_text())
+
+    async def _notify_working() -> None:
+        # Faqat model haqiqatan Odoo'ga murojaat qilganda chiqadi — oddiy suhbatda
+        # (salom, savol-javob) "tayyorlanmoqda" xabari yuborilmaydi.
+        await bot.send_message(chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=thread_id,
+                               text=replies.assistant_thinking_text())
+
     try:
-        result = await ask_with_files(_GENERAL_CHAT_KEY, text, group_chat_id=_GENERAL_CHAT_KEY)
+        result = await ask_with_files(_GENERAL_CHAT_KEY, text, group_chat_id=_GENERAL_CHAT_KEY,
+                                      on_tool_start=_notify_working)
     except Exception as e:
-        # Ilgari bu yerda xato bo'lsa foydalanuvchi "kuting" xabaridan keyin
-        # hech qanday javob olmasdan abadiy kutib qolardi.
+        # Ilgari bu yerda xato bo'lsa foydalanuvchi hech qanday javob olmasdan
+        # abadiy kutib qolardi.
         log.exception("_assistant_reply: ask_with_files xatosi")
         await bot.send_message(chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=thread_id,
                                text=f"⚠️ Javob tayyorlashda xatolik yuz berdi: {str(e)[:200]}")
         return
     scope = f"grp-{thread_id if thread_id is not None else 'main'}"
-    if delivery.wants_format_buttons(text) or delivery.wants_format_buttons(result.text):
-        delivery.remember(
-            scope, chat_id=settings.TELEGRAM_GROUP_ID, thread_id=thread_id,
-            question=text, user_key=_GENERAL_CHAT_KEY,
-            group_chat_id=_GENERAL_CHAT_KEY,
-        )
-        await delivery.send_assistant_text(
-            bot, settings.TELEGRAM_GROUP_ID, thread_id, result.text,
-            reply_markup=delivery.format_keyboard(scope),
-        )
-        await delivery.send_files(bot, settings.TELEGRAM_GROUP_ID, thread_id, result.files, text=result.text)
-    else:
-        await delivery.send_result(bot, settings.TELEGRAM_GROUP_ID, thread_id, result)
+    markup = delivery.offer_formats(
+        scope, text, result, chat_id=settings.TELEGRAM_GROUP_ID, thread_id=thread_id,
+        user_key=_GENERAL_CHAT_KEY, group_chat_id=_GENERAL_CHAT_KEY,
+    )
+    await delivery.send_result(bot, settings.TELEGRAM_GROUP_ID, thread_id, result, reply_markup=markup)
 
 
 async def _write_task(bot: Bot, result: AnalyzeResult, odoo_project_id: int,

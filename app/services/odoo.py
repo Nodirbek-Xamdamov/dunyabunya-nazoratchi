@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
+import ssl
 import threading
 import time
 import xmlrpc.client
 from typing import Any
+from urllib.parse import urlparse
 
 from app.config import settings
 from app.name_utils import strip_uzbek_suffixes
@@ -48,7 +51,76 @@ _ODOO_MAX_CONCURRENCY = 8
 
 
 class OdooError(Exception):
-    pass
+    """Odoo bilan ishlashdagi xato.
+
+    `kind` — xato Odoo'ga YETIB BORISH/KIRISH bosqichida bo'lsa uning turi:
+    "dns", "timeout", "refused", "ssl", "network", "http" yoki "auth". Odoo so'rovni
+    qabul qilib, o'zi rad etgan bo'lsa (XML-RPC Fault — noto'g'ri field va h.k.) None.
+    Xabar matni foydalanuvchiga ko'rsatishga yaroqli (aniq sabab, o'zbek tilida)."""
+
+    def __init__(self, message: str, *, kind: str | None = None):
+        super().__init__(message)
+        self.kind = kind
+
+
+# Aloqa xatosi turiga qarab "nima qilish kerak" tavsiyasi (foydalanuvchiga ko'rsatiladi)
+_CONNECTION_HINTS = {
+    "dns": "Odoo manzili o'zgargan bo'lishi mumkin (Odoo.sh test/dev bazasi qayta qurilganda "
+           "manzil almashadi) — .env faylidagi ODOO_URL va ODOO_DB ni joriy manzilga "
+           "yangilab, botni qayta ishga tushirish kerak.",
+    "timeout": "Birozdan keyin qayta urinib ko'ring yoki so'rov davrini qisqartiring; "
+               "takrorlansa Odoo serveri holatini tekshirish kerak.",
+    "refused": "Odoo serveri ishlab turganini tekshirish kerak.",
+    "network": "Bot turgan server internetga chiqayotganini va Odoo serveri ishlab "
+               "turganini tekshirish kerak.",
+    "ssl": "Odoo manzilining SSL sertifikatini tekshirish kerak.",
+    "http": "Odoo serveri va obunasi holatini tekshirish kerak.",
+    "auth": ".env faylidagi ODOO_USERNAME va ODOO_API_KEY ni tekshirish kerak (API kalit "
+            "Odoo'da o'chirilgan yoki qayta yaratilgan bo'lishi mumkin).",
+}
+
+
+def connection_hint(kind: str | None) -> str:
+    return _CONNECTION_HINTS.get(kind or "", "Tizim administratoriga murojaat qiling.")
+
+
+def _describe_connection_error(exc: BaseException, host: str, timeout: float) -> tuple[str, str]:
+    """Past darajadagi ulanish xatosidan (kind, aniq sabab) chiqaradi.
+
+    Ilgari har qanday OSError "Odoo 30s ichida javob bermadi (timeout)" deb yozilardi —
+    DNS xatosi (manzil yo'q) ham "timeout" bo'lib ko'rinib, haqiqiy sabab yashirinardi."""
+    if isinstance(exc, xmlrpc.client.ProtocolError):
+        code = exc.errcode
+        if code == 402:
+            reason = ("Odoo obunasi yoki to'lovi tugagan — server so'rovlarni qabul "
+                      "qilmayapti (HTTP 402 Payment Required)")
+        elif code in (401, 403):
+            reason = f"Odoo serveri kirishni rad etdi (HTTP {code})"
+        elif code == 404:
+            reason = ("Odoo manzilida baza topilmadi (HTTP 404) — baza o'chirilgan yoki "
+                      "manzil noto'g'ri")
+        elif code >= 500:
+            reason = f"Odoo serveri ishlamayapti yoki qayta ishga tushmoqda (HTTP {code})"
+        else:
+            reason = f"Odoo serveri kutilmagan javob qaytardi (HTTP {code} {exc.errmsg})"
+        return "http", reason
+    if isinstance(exc, socket.gaierror):
+        return "dns", (f"Odoo manzili ({host}) internetda topilmadi (DNS xatosi) — server "
+                       f"o'chirilgan, qayta qurilgan yoki manzili o'zgargan")
+    if isinstance(exc, TimeoutError):
+        return "timeout", (f"Odoo {timeout}s ichida javob bermadi (timeout) — server band "
+                           f"yoki so'rov juda og'ir")
+    if isinstance(exc, ssl.SSLError):
+        return "ssl", f"Odoo bilan xavfsiz (SSL) ulanish o'rnatilmadi: {exc}"
+    if isinstance(exc, ConnectionRefusedError):
+        return "refused", "Odoo serveri ulanishni rad etdi — server o'chiq yoki port yopiq"
+    return "network", f"Odoo serveriga tarmoq orqali yetib bo'lmadi: {exc}"
+
+
+def _fault_summary(exc: xmlrpc.client.Fault) -> str:
+    """Fault matni ko'pincha butun Python traceback — faqat oxirgi (mazmunli) qatori."""
+    lines = [ln.strip() for ln in str(exc.faultString or "").splitlines() if ln.strip()]
+    return (lines[-1] if lines else str(exc))[:200]
 
 
 class _TimeoutTransport(xmlrpc.client.Transport):
@@ -90,6 +162,7 @@ class OdooClient:
         timeout: int = settings.ODOO_TIMEOUT_SECONDS,
     ):
         self.url = url.rstrip("/")
+        self.host = urlparse(self.url).hostname or self.url
         self.db = db
         self.login = login
         self.api_key = api_key
@@ -121,16 +194,25 @@ class OdooClient:
             self._local.object_proxy = proxy
         return proxy
 
+    def _connection_error(self, exc: BaseException) -> OdooError:
+        kind, reason = _describe_connection_error(exc, self.host, self.timeout)
+        return OdooError(reason, kind=kind)
+
     def _get_uid(self) -> int:
         # UID thread-local — parallel to_thread chaqiruvlarida race bo'lmasligi uchun
         uid = getattr(self._local, "uid", None)
         if uid is None:
             try:
                 uid = self._common_proxy().authenticate(self.db, self.login, self.api_key, {})
-            except (TimeoutError, OSError) as exc:
-                raise OdooError(f"Odoo {self.timeout}s ichida javob bermadi (timeout, authenticate): {exc}") from exc
+            except (OSError, xmlrpc.client.ProtocolError) as exc:
+                # OSError: DNS, timeout, rad etilgan ulanish, SSL... — har biri o'z sababi bilan
+                raise self._connection_error(exc) from exc
+            except xmlrpc.client.Fault as exc:
+                raise OdooError(f"Odoo bazasiga ({self.db}) kirib bo'lmadi: {_fault_summary(exc)}",
+                                kind="auth") from exc
             if not uid:
-                raise OdooError("Odoo authenticate() muvaffaqiyatsiz — login yoki API key noto'g'ri")
+                raise OdooError("Odoo serveri javob beryapti, lekin tizimga kirib bo'lmadi — "
+                                "login yoki API kalit noto'g'ri", kind="auth")
             self._local.uid = uid
         return uid
 
@@ -139,20 +221,49 @@ class OdooClient:
         uid = self._get_uid()
         try:
             return self._object_proxy().execute_kw(self.db, uid, self.api_key, model, method, args, kwargs)
-        except (TimeoutError, OSError) as exc:
-            # Socket timeout — qayta urinish yordam bermaydi (Odoo javob bermayapti),
-            # darhol aniq xato bilan chiqamiz (aks holda chaqiruvchi abadiy kutib qolardi)
-            raise OdooError(f"Odoo {self.timeout}s ichida javob bermadi (timeout): {exc}") from exc
+        except OSError as exc:
+            # Ulanish xatosi (timeout, DNS...) — qayta urinish yordam bermaydi, darhol
+            # aniq sabab bilan chiqamiz (aks holda chaqiruvchi abadiy kutib qolardi)
+            raise self._connection_error(exc) from exc
         except (xmlrpc.client.Fault, xmlrpc.client.ProtocolError):
             # Autentifikatsiya eskirgan bo'lishi mumkin — qayta kirib urinamiz
             self._local.uid = None
             uid = self._get_uid()
             try:
                 return self._object_proxy().execute_kw(self.db, uid, self.api_key, model, method, args, kwargs)
-            except (TimeoutError, OSError) as exc2:
-                raise OdooError(f"Odoo {self.timeout}s ichida javob bermadi (timeout): {exc2}") from exc2
+            except (OSError, xmlrpc.client.ProtocolError) as exc2:
+                raise self._connection_error(exc2) from exc2
             except xmlrpc.client.Fault as exc2:
                 raise OdooError(f"Odoo XML-RPC xato: {exc2}") from exc2
+
+    def _diagnose_sync(self) -> dict:
+        """Odoo bilan aloqani JONLI tekshiradi — keshlangan uid/ulanish ishlatilmaydi,
+        har chaqiriqda yangi ulanish ochiladi (version -> authenticate)."""
+        info: dict[str, Any] = {"aloqa": False, "server": self.host, "baza": self.db}
+        started = time.monotonic()
+        try:
+            common = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/common",
+                                               transport=self._make_transport())
+            info["odoo_versiya"] = (common.version() or {}).get("server_version")
+            uid = common.authenticate(self.db, self.login, self.api_key, {})
+        except (OSError, xmlrpc.client.ProtocolError) as exc:
+            kind, reason = _describe_connection_error(exc, self.host, self.timeout)
+            info.update(xato_turi=kind, sabab=reason, tavsiya=connection_hint(kind))
+            return info
+        except xmlrpc.client.Fault as exc:
+            info.update(xato_turi="auth", tavsiya=connection_hint("auth"),
+                        sabab=f"Odoo bazasiga kirib bo'lmadi: {_fault_summary(exc)}")
+            return info
+        info["javob_vaqti_ms"] = round((time.monotonic() - started) * 1000)
+        if not uid:
+            info.update(xato_turi="auth", tavsiya=connection_hint("auth"),
+                        sabab="Server javob beryapti, lekin login yoki API kalit noto'g'ri")
+            return info
+        info["aloqa"] = True
+        return info
+
+    async def diagnose(self) -> dict:
+        return await asyncio.to_thread(self._diagnose_sync)
 
     async def execute_kw(self, model: str, method: str, args: list, kwargs: dict | None = None) -> Any:
         async with self._semaphore:

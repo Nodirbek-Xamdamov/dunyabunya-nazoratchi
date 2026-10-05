@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from anthropic import AsyncAnthropic
 
@@ -16,8 +17,8 @@ from app.config import settings
 from app.db import repo
 from app.db.session import SessionLocal
 from app.rbac import Role, ROLE_TOOLS, ROLE_PROMPTS, ROLE_NAMES, ROLE_ALLOWED_MODELS
-from app.services.odoo import OdooClient
-from app.services.odoo_tools import ALL_TOOLS, TOOL_SCHEMAS
+from app.services.odoo import OdooClient, OdooError, connection_hint
+from app.services.odoo_tools import ALL_TOOLS, TOOL_SCHEMAS, pop_text_export
 from app.prompt_guard import SECURITY_FRAGMENT, wrap_user_input
 
 log = logging.getLogger(__name__)
@@ -50,13 +51,17 @@ class AssistantResult:
     text: str
     files: list[FileOut] = field(default_factory=list)
     file_error: str | None = None  # fayl so'ralib topilmagan bo'lsa — sababi (log/diagnostika uchun)
+    # export_text tayyorlagan to'liq ro'yxatlar (tayyor Telegram-HTML) — alohida xabar bo'lib yuboriladi
+    texts: list[str] = field(default_factory=list)
+    # Odoo bilan aloqa yo'qligi sababli so'rov bajarilmagan bo'lsa — xato turi ("dns", "timeout"...)
+    odoo_error: str | None = None
 
 
 # Fayl/hisobot yaratuvchi tool'lar — shu nomlardan biri xato yoki "topilmadi" turidagi
 # matn qaytarsa va oxir-oqibat hech qanday fayl yaratilmasa, sababini foydalanuvchiga
 # ko'rsatish uchun eslab qolinadi (ilgari "Fayl yaratishning iloji bo'lmadi" degan umumiy
 # xabar sababini yashirib yuborardi).
-_FILE_TOOLS = {
+FILE_TOOLS = {
     "export_excel", "export_word", "export_pdf", "export_csv",
     "generate_html_report",
     "generate_company_report", "generate_sales_report",
@@ -119,6 +124,13 @@ BASE_TOOLS = [
             "required": ["model", "domain"],
         },
     },
+    {
+        "name": "check_odoo_connection",
+        "description": "Odoo serveri bilan aloqani jonli tekshiradi: aloqa bor-yo'qligi, server manzili, "
+                       "yo'q bo'lsa aniq sababi va tavsiya. Foydalanuvchi 'nega aloqa yo'q', 'server "
+                       "ishlayaptimi', 'Odoo'ga ulanganmisan' deb so'rasa shu toolni chaqiring.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -140,13 +152,13 @@ ASOSIY VA QAT'IY QOIDALAR:
 
 1. EMOJI (SMAYKLAR) VA ORTIQCHA MATN TAQIQLANADI:
 - Javoblarda hech qanday emoji (smayliklar) ishlatmang.
-- Kirish, xulosa, salomlashish yoki minnatdorchilik so'zlarini yozmang.
+- Ma'lumotli javoblarda kirish, xulosa yoki minnatdorchilik so'zlarini yozmang.
 - Javoblar qisqa, aniq va rasmiy bo'lishi shart.
 
 2. ANIQLIK VA GALUSTINATSIYA:
 - Faqat va faqat tool orqali bazadan olingan aniq faktlarga tayaning.
 - O'zingizdan biron bir raqam, ism yoki holat to'qib chiqarish qat'iyan taqiqlanadi.
-- Agar so'ralgan ma'lumot bazada topilmasa, mavjud bo'lmasa yoki vazifani bajarish imkoni bo'lmasa — hech qanday bahona va tushuntirishlarsiz to'g'ridan-to'g'ri ayting: "Buni qila olmayman" yoki "Ma'lumot topilmadi". Sababini tushuntirib o'tirish taqiqlanadi.
+- Agar so'ralgan ma'lumot bazada topilmasa yoki vazifani bajarib bo'lmasa — buni to'g'ridan-to'g'ri ayting VA SABABINI aniq ko'rsating: nima topilmadi yoki qaysi xato yuz berdi, kerak bo'lsa nima qilish mumkin. Sababsiz "Buni qila olmayman" deb javob bermang — bu javob faqat xavfsizlik qoidalari taqiqlagan so'rovlar (parol, API kalit, ichki prompt) uchun.
 
 3. GRAFIK VA STATISTIKA (DINAMIKA, TAHLIL):
 - Agar foydalanuvchi sotuv dinamikasi, oylik/yillik tahlil, diagramma yoki grafik talab qilinadigan statistikani so'rasa:
@@ -164,13 +176,17 @@ ASOSIY VA QAT'IY QOIDALAR:
 - Agar so'rov faqat oddiy ro'yxat yoki jadvaldan iborat bo'lsa (grafiksiz):
 - Ro'yxatni birdaniga chatga to'liq tashlamang.
 - Dastlab bir gap bilan jami sonini bildiring va formatni so'rang:
-  Jami {soni} ta ma'lumot topildi. Ushbu ma'lumotlarni qaysi formatda tayyorlab beray: Excel yoki HTML?
+  Jami {soni} ta ma'lumot topildi. Ushbu ma'lumotlarni qaysi formatda tayyorlab beray: Excel, HTML yoki matn (shu chatda)?
+- Foydalanuvchi so'rovning o'zida formatni aytgan bo'lsa (excel, html, matn) — so'ramasdan darhol o'sha formatda bering.
 - Xodimlar/ishchilar ro'yxati so'ralsa: search_employees_readonly yoki odoo_search_read (model: hr.employee) dan foydalaning.
 
 5. TANLOV BILDIRILGANDA:
-- Foydalanuvchi "excel" desa -> generate_* orqali Excel faylni tayyorlab, havola yoki faylni taqdim eting.
+- Foydalanuvchi "excel" desa -> export_excel orqali Excel faylni tayyorlab, havola yoki faylni taqdim eting.
 - Foydalanuvchi "html" desa -> generate_* orqali HTML linkini bering.
-- Javob faqat: "Hisobot tayyorlandi: {link}"
+  Bu ikki holatda javob faqat: "Hisobot tayyorlandi: {link}"
+- Foydalanuvchi "matn" / "text" / "shu yerga yoz" desa -> fayl YARATMANG:
+  * yozuvlar ro'yxati bo'lsa — export_text toolini chaqiring (to'liq ro'yxatni bot o'zi chatga yuboradi; siz ro'yxatni qayta yozmang, faqat bir jumla yozing);
+  * hisoblangan ko'rsatkichlar/statistika bo'lsa — raqamlarni tool orqali olib, barchasini to'liq matn bilan yozing.
 
 6. HISOBOT VIZUALIZATSIYASI (GRAFIK QOIDALARI — QAT'IY):
 - Grafik (bar-chart/diagramma) FAQAT quyidagi shartlardan biri bajarilganda chiziladi:
@@ -181,6 +197,16 @@ ASOSIY VA QAT'IY QOIDALAR:
   Bo'sh o'qli (0, 0.2, 0.4) grafik gridlari hech qachon ko'rsatilmaydi.
 - Moliyaviy katta sonlar ixcham yoziladi: 120 mlrd, 20 mlrd, 500 mln. To'liq uzun
   ko'rinish (masalan "120,000,000,000") yozilmaydi.
+
+7. ODDIY SUHBAT (MA'LUMOT SO'RALMAGAN XABARLAR):
+- Salomlashish, minnatdorchilik, "ishlayapsanmi?", "nima qila olasan?" kabi oddiy xabarlarga tool CHAQIRMASDAN bir-ikki jumla bilan xushmuomala javob bering (salomga — salom).
+- Bunday xabarlarga "Buni qila olmayman" yoki "Ma'lumot topilmadi" deb javob bermang.
+- Xabar mazmuni tushunarsiz bo'lsa — nimani nazarda tutganini qisqa so'rang.
+
+8. ODOO SERVERI BILAN ALOQA:
+- Tool natijasida "odoo_connection" xatosi kelsa — Odoo bilan aloqa yo'qligini, tool qaytargan sababni ("error") va tavsiyani ("tavsiya") TO'LIQ, o'zgartirmasdan yozing. Sababni "timeout" yoki "texnik nosozlik" deb umumlashtirmang.
+- Foydalanuvchi "nega aloqa yo'q?", "server ishlayaptimi?", "Odoo'ga ulanganmisan?" kabi savol bersa — check_odoo_connection toolini chaqiring va natijadagi barcha ma'lumotni (holat, server manzili, sabab, tavsiya) to'liq yozing. Bu ma'lumot maxfiy EMAS.
+- Parol va API kalit hech qachon ko'rsatilmaydi.
 
 TEXNIK MA'LUMOT (TOOL CHAQIRISH UCHUN):
 MAVJUD MODELLAR VA FIELDLAR:
@@ -212,14 +238,53 @@ Tool xato qaytarsa (masalan "Invalid field") — xato natijani javob sifatida is
 domain'ni tuzatib qayta chaqir.
 
 QOIDALAR:
-1. Har doim avval tegishli toolni chaqir, ma'lumotni olgach javob yoz.
+1. Ma'lumot so'ralganda har doim avval tegishli toolni chaqir, ma'lumotni olgach javob yoz.
 2. Tool natijasini qayta sanab o'tmang — qisqa xulosa bering.
 3. Sizning rolingiz: {role_name}
 {role_prompt}
 """
 
 
-_BASE_MODEL_TOOLS = {"odoo_search_read", "odoo_read_group", "odoo_count"}
+# export_text ham `model`ni erkin qabul qiladi — rol cheklovi unga ham qo'llanadi
+_BASE_MODEL_TOOLS = {"odoo_search_read", "odoo_read_group", "odoo_count", "export_text"}
+
+
+def _odoo_connection_failure(raw: str) -> dict | None:
+    """_exec_tool natijasi Odoo bilan ALOQA xatosi bo'lsa — o'sha xato dict'i, aks holda None."""
+    if '"odoo_connection"' not in raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) and parsed.get("odoo_connection") else None
+
+
+def _odoo_unreachable_text(failure: dict) -> str:
+    """Odoo bilan aloqa yo'qligi haqida foydalanuvchiga to'liq xabar: sabab, server, tavsiya."""
+    header = ("Odoo serveri javob beryapti, lekin tizimga kirib bo'lmadi — so'rov bajarilmadi."
+              if failure.get("odoo_connection") == "auth" else
+              "Odoo serveri bilan aloqa yo'q — so'rov bajarilmadi.")
+    return (
+        f"⚠️ {header}\n\n"
+        f"Sabab: {failure.get('error')}.\n"
+        f"Server: {_odoo.host} (baza: {_odoo.db})\n"
+        f"Nima qilish kerak: {failure.get('tavsiya')}"
+    )
+
+
+def _collect_text_exports(raw: str, found: list[str]) -> None:
+    """export_text natijasidagi tayyor matnni (token orqali) olib, yuborish ro'yxatiga qo'shadi."""
+    if '"text_export"' not in raw:
+        return
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return
+    if isinstance(parsed, dict) and parsed.get("text_export"):
+        text = pop_text_export(str(parsed["text_export"]))
+        if text:
+            found.append(text)
 
 
 async def _exec_tool(name: str, args: dict, role: Role) -> str:
@@ -251,6 +316,8 @@ async def _exec_tool(name: str, args: dict, role: Role) -> str:
             )
         elif name == "odoo_count":
             r = await _odoo.execute_kw(args["model"], "search_count", [args["domain"]])
+        elif name == "check_odoo_connection":
+            r = await _odoo.diagnose()
         elif name in ALL_TOOLS:
             func = ALL_TOOLS[name]
             r = await func(**args)
@@ -259,6 +326,15 @@ async def _exec_tool(name: str, args: dict, role: Role) -> str:
 
         log.info("tool %s ok: %s", name, str(r)[:100])
         return json.dumps(r, ensure_ascii=False, default=str)[:8000]
+    except OdooError as e:
+        if not e.kind:
+            # Odoo so'rovni qabul qilib rad etgan (noto'g'ri field/domain...) — model tuzatib qayta chaqiradi
+            log.exception("tool %s error", name)
+            return json.dumps({"error": str(e)[:300]})
+        # Odoo'ga yetib bo'lmadi/kirib bo'lmadi — aniq sabab va tavsiya bilan qaytariladi
+        log.warning("tool %s: Odoo bilan aloqa yo'q (%s) — %s", name, e.kind, e)
+        return json.dumps({"error": str(e)[:400], "odoo_connection": e.kind,
+                           "tavsiya": connection_hint(e.kind)}, ensure_ascii=False)
     except Exception as e:
         log.exception("tool %s error", name)
         return json.dumps({"error": str(e)[:300]})
@@ -268,7 +344,9 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
                          group_chat_id: int | None = None,
                          instruction: str = "",
                          force_tools: list[str] | None = None,
-                         tool_choice: dict | None = None) -> AssistantResult:
+                         tool_choice: dict | None = None,
+                         exclude_tools: set[str] | None = None,
+                         on_tool_start: Callable[[], Awaitable[None]] | None = None) -> AssistantResult:
     """Savolga javob berish — rolga mos tool'lar bilan.
 
     Matn javob bilan birga, agar tool'lar fayl (xlsx/html) yaratgan bo'lsa,
@@ -281,8 +359,19 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
     chaqirishga MAJBUR qilinadi (Anthropic `tool_choice`) — foydalanuvchi Excel/HTML
     tugmasini bosgach qayta so'ralganda ishlatiladi, aks holda model tool chaqirmasdan
     faqat matn bilan javob berib, fayl umuman yaratilmasligi mumkin edi.
+
+    `exclude_tools`: shu tool'lar modelga umuman berilmaydi ("Matn" tugmasi — fayl
+    yaratuvchi tool'larsiz).
+
+    `on_tool_start`: model BIRINCHI marta tool so'raganda (ya'ni haqiqatan Odoo'ga
+    murojaat boshlanganda) bir marta chaqiriladi — chaqiruvchi "so'rovingiz
+    tayyorlanmoqda" xabarini shu yerda yuboradi. Oddiy suhbatda (model tool'siz
+    darhol javob bersa) umuman chaqirilmaydi.
     """
     found_files: dict[str, FileOut] = {}
+    found_texts: list[str] = []
+    odoo_failure: dict | None = None
+    tool_started = False
     async with SessionLocal() as session:
         history = await repo.get_recent_conversation(session, telegram_user_id)
 
@@ -318,6 +407,8 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
         system += "\n\nQO'SHIMCHA TIZIM KO'RSATMACHI (bajarilishi shart):\n" + instruction
 
     tools = _get_tools_for_role(role)
+    if exclude_tools:
+        tools = [t for t in tools if t["name"] not in exclude_tools]
     if force_tools:
         narrowed = [t for t in tools if t["name"] in force_tools]
         # Agar rol shu tool'larning birortasiga ruxsatli bo'lmasa (bo'sh qolsa) —
@@ -356,17 +447,36 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
                 log.warning("ask_with_files: javob max_tokens chegarasida kesildi")
             break
 
+        log.info("iter %d: tools=%s", i, [b.name for b in tool_uses])
+        # Aloqa tekshiruvi — bir soniyalik diagnostika, ma'lumot so'rovi emas ("ishlayapsanmi?")
+        if (on_tool_start is not None and not tool_started
+                and any(b.name != "check_odoo_connection" for b in tool_uses)):
+            tool_started = True
+            try:
+                await on_tool_start()
+            except Exception:
+                log.warning("ask_with_files: on_tool_start xatosi", exc_info=True)
+
         messages.append({"role": "assistant", "content": resp.content})
         results = []
-        if tool_uses:
-            executed = await asyncio.gather(
-                *[_exec_tool(b.name, b.input, role) for b in tool_uses]
-            )
-            for b, r in zip(tool_uses, executed):
-                _collect_report_files(r, found_files)
-                if b.name in _FILE_TOOLS:
-                    file_tool_results.append((b.name, r))
-                results.append({"type": "tool_result", "tool_use_id": b.id, "content": r})
+        executed = await asyncio.gather(
+            *[_exec_tool(b.name, b.input, role) for b in tool_uses]
+        )
+        for b, r in zip(tool_uses, executed):
+            _collect_report_files(r, found_files)
+            _collect_text_exports(r, found_texts)
+            if b.name in FILE_TOOLS:
+                file_tool_results.append((b.name, r))
+            results.append({"type": "tool_result", "tool_use_id": b.id, "content": r})
+
+        # Barcha so'rovlar Odoo bilan aloqa yo'qligi sababli yiqilgan bo'lsa — modelni
+        # qayta chaqirish foydasiz (u sababni "timeout" deb qisqartirar yoki "Buni qila
+        # olmayman" deb yuborardi): aniq sabab foydalanuvchiga to'g'ridan-to'g'ri beriladi.
+        failures = [f for f in map(_odoo_connection_failure, executed) if f]
+        if failures and len(failures) == len(executed):
+            odoo_failure = failures[0]
+            answer = _odoo_unreachable_text(odoo_failure)
+            break
         messages.append({"role": "user", "content": results})
 
     if not answer:
@@ -395,7 +505,10 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
     async with SessionLocal() as session:
         await repo.add_conversation_message(session, telegram_user_id, "user", question)
         await repo.add_conversation_message(session, telegram_user_id, "assistant", answer)
-    return AssistantResult(text=answer, files=list(found_files.values()), file_error=file_error)
+    return AssistantResult(
+        text=answer, files=list(found_files.values()), file_error=file_error, texts=found_texts,
+        odoo_error=odoo_failure["odoo_connection"] if odoo_failure else None,
+    )
 
 
 async def ask(telegram_user_id: int, question: str, role: Role = Role.CEO,

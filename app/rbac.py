@@ -18,7 +18,7 @@ ROLE_TOOLS: dict[Role, list[str]] = {
         # Analytics
         "odoo_search_read", "odoo_read_group", "odoo_count",
         "export_excel", "generate_html_report",
-        "export_word", "export_pdf", "export_csv",
+        "export_word", "export_pdf", "export_csv", "export_text",
         "aggregate_data", "growth_dynamics",
         "search_employees_readonly",
         # Extra analytics
@@ -45,7 +45,7 @@ ROLE_TOOLS: dict[Role, list[str]] = {
         "search_payments", "create_payment_draft", "create_currency_exchange",
         "get_invoice_pdf", "get_payment_receipt_pdf",
         "get_sales_stats", "get_invoice_stats",
-        "export_excel", "export_word", "export_pdf", "export_csv",
+        "export_excel", "export_word", "export_pdf", "export_csv", "export_text",
         "generate_html_report",
     ],
     Role.OMBOR: [
@@ -53,7 +53,7 @@ ROLE_TOOLS: dict[Role, list[str]] = {
         "find_product", "check_stock_quant", "check_low_stock",
         "create_internal_transfer", "get_delivery_slip_pdf",
         "get_task_stats",
-        "export_excel", "export_word", "export_pdf", "export_csv",
+        "export_excel", "export_word", "export_pdf", "export_csv", "export_text",
         "generate_html_report",
     ],
     Role.SOTUV: [
@@ -63,13 +63,13 @@ ROLE_TOOLS: dict[Role, list[str]] = {
         "create_sale_order_draft", "check_partner_debt", "get_sale_order_pdf",
         "get_sales_stats", "get_sales_by_partner", "get_sales_by_product",
         "get_crm_stats",
-        "export_excel", "export_word", "export_pdf", "export_csv",
+        "export_excel", "export_word", "export_pdf", "export_csv", "export_text",
         "generate_html_report",
     ],
     Role.HR: [
         "odoo_search_read", "odoo_read_group", "odoo_count",
         "search_employees_readonly", "get_employees_by_department",
-        "export_excel", "export_word", "export_pdf", "export_csv",
+        "export_excel", "export_word", "export_pdf", "export_csv", "export_text",
         "generate_html_report",
     ],
     Role.NONE: [],

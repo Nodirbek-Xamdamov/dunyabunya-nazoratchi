@@ -95,20 +95,22 @@ async def _notify_general(bot: Bot, text: str) -> None:
 
 async def _answer_with_format_options(message: Message, bot: Bot, question: str,
                                       result, role: Role) -> None:
-    """Assistant natijasini yuborish — ma'lumotli savollarga Excel/HTML tugmalari bilan."""
-    if delivery.wants_format_buttons(question) or delivery.wants_format_buttons(result.text):
-        scope = f"dm-{message.from_user.id}"
-        delivery.remember(
-            scope, chat_id=message.from_user.id, thread_id=None,
-            question=question, user_key=message.from_user.id, role=role,
-        )
-        await delivery.send_assistant_text(
-            bot, message.chat.id, None, result.text,
-            reply_markup=delivery.format_keyboard(scope),
-        )
-        await delivery.send_files(bot, message.from_user.id, None, result.files, text=result.text)
-    else:
-        await delivery.send_result(bot, message.from_user.id, None, result)
+    """Assistant natijasini yuborish — ma'lumotli savollarga Excel/HTML/Matn tugmalari bilan."""
+    markup = delivery.offer_formats(
+        f"dm-{message.from_user.id}", question, result,
+        chat_id=message.from_user.id, thread_id=None,
+        user_key=message.from_user.id, role=role,
+    )
+    await delivery.send_result(bot, message.from_user.id, None, result, reply_markup=markup)
+
+
+async def _ask_assistant(message: Message, text: str, role: Role):
+    """Yordamchidan javob oladi. "So'rovingiz tayyorlanmoqda" xabari faqat model
+    haqiqatan Odoo'ga murojaat qilganda chiqadi — oddiy suhbatda yuborilmaydi."""
+    async def _notify_working() -> None:
+        await message.answer(replies.assistant_thinking_text())
+
+    return await ask_with_files(message.from_user.id, text, role=role, on_tool_start=_notify_working)
 
 
 # ─── /start ─────────────────────────────────────────────────────────────────
@@ -610,9 +612,8 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
 
     # 2) CEO — to'liq yordamchi (barcha bo'limlar)
     if _is_ceo(user_id, message.from_user.username):
-        await message.answer(replies.assistant_thinking_text())
         try:
-            result = await ask_with_files(user_id, text, role=Role.CEO)
+            result = await _ask_assistant(message, text, Role.CEO)
         except Exception as e:
             log.exception("on_private_dm_message (CEO): ask_with_files xatosi")
             await message.answer(f"⚠️ Javob tayyorlashda xatolik yuz berdi: {str(e)[:200]}")
@@ -642,9 +643,8 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
         log.warning("on_private_dm_message: tanib bo'lmagan bo'lim %r — Role.NONE beriladi", manager.department)
     role = role_map.get(manager.department, Role.NONE)
 
-    await message.answer(replies.assistant_thinking_text())
     try:
-        result = await ask_with_files(user_id, text, role=role)
+        result = await _ask_assistant(message, text, role)
     except Exception as e:
         log.exception("on_private_dm_message (manager): ask_with_files xatosi")
         await message.answer(f"⚠️ Javob tayyorlashda xatolik yuz berdi: {str(e)[:200]}")

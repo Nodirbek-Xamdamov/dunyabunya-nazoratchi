@@ -18,6 +18,7 @@ import pytest
 
 import app.telegram.handlers as handlers
 import app.telegram.handlers_manager as handlers_manager
+from app.services.assistant import AssistantResult
 from app.services.llm import AnalyzeResult
 from app.services.odoo import OdooError
 
@@ -365,13 +366,107 @@ async def test_assistant_reply_ask_with_files_failure_notifies_user(monkeypatch)
     await handlers._assistant_reply(bot, "Nechta xodim bor?", thread_id=3)
 
     # Ilgari xato bo'lsa handler shu yerda jimgina to'xtardi (hech qanday
-    # qo'shimcha xabarsiz) — endi "kuting" xabaridan KEYIN aniq xatolik xabari
-    # ham borishi, va delivery.send_result kabi keyingi bosqichlarga
-    # o'tilmasligi (jami roppa-rosa 2 ta xabar) shart.
+    # qo'shimcha xabarsiz) — endi aniq xatolik xabari borishi, va
+    # delivery.send_result kabi keyingi bosqichlarga o'tilmasligi shart.
+    # ("kuting" xabari yo'q: model hali Odoo'ga murojaat boshlamagan.)
     texts = [s["text"] for s in bot.sent]
-    assert len(bot.sent) == 2
-    assert any("kuting" in t.lower() for t in texts)
-    assert any("xatolik" in t.lower() and "anthropic api 500" in t.lower() for t in texts)
+    assert len(bot.sent) == 1
+    assert "xatolik" in texts[0].lower() and "anthropic api 500" in texts[0].lower()
+
+
+async def test_assistant_reply_plain_chat_sends_no_thinking_message(monkeypatch):
+    """Oddiy suhbat (model tool'siz darhol javob beradi) — "tayyorlanmoqda" xabari chiqmaydi."""
+    async def fake_ask_with_files(*a, on_tool_start=None, **kw):
+        return AssistantResult(text="Va alaykum assalom.")
+
+    monkeypatch.setattr(handlers, "ask_with_files", fake_ask_with_files)
+    bot = _FakeBot()
+    await handlers._assistant_reply(bot, "Assalomu alaykum", thread_id=None)
+
+    assert [s["text"] for s in bot.sent] == ["Va alaykum assalom."]
+    assert bot.sent[0].get("reply_markup") is None
+
+
+async def test_assistant_reply_data_request_sends_thinking_before_answer(monkeypatch):
+    """Model Odoo'ga murojaat boshlaganda (on_tool_start) — avval "tayyorlanmoqda", keyin javob."""
+    async def fake_ask_with_files(*a, on_tool_start=None, **kw):
+        await on_tool_start()
+        return AssistantResult(text="Jami 18 ta ochiq vazifa bor.")
+
+    monkeypatch.setattr(handlers, "ask_with_files", fake_ask_with_files)
+    bot = _FakeBot()
+    await handlers._assistant_reply(bot, "Nechta ochiq vazifa bor?", thread_id=3)
+
+    texts = [s["text"] for s in bot.sent]
+    assert len(texts) == 2
+    assert "tayyorlanmoqda" in texts[0].lower()
+    assert texts[1] == "Jami 18 ta ochiq vazifa bor."
+
+
+async def test_assistant_reply_list_request_offers_excel_html_and_text(monkeypatch):
+    """Ro'yxat so'ralganda format tugmalari orasida "Matn" ham bo'lishi shart."""
+    async def fake_ask_with_files(*a, on_tool_start=None, **kw):
+        return AssistantResult(text="Jami 187 ta ma'lumot topildi. Qaysi formatda tayyorlab beray?")
+
+    monkeypatch.setattr(handlers, "ask_with_files", fake_ask_with_files)
+    bot = _FakeBot()
+    await handlers._assistant_reply(bot, "Xodimlar ro'yxatini ber", thread_id=None)
+
+    markup = bot.sent[-1]["reply_markup"]
+    callback_datas = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert callback_datas == ["fmt:excel:grp-main", "fmt:html:grp-main", "fmt:text:grp-main"]
+
+
+async def test_assistant_reply_odoo_unreachable_shows_reason_without_buttons(monkeypatch):
+    """Odoo bilan aloqa yo'q — sabab ko'rsatiladi, format tugmalari qo'yilmaydi
+    (ilgari ro'yxat so'rovida xato xabari ostida ham Excel/HTML tugmalari chiqardi)."""
+    async def fake_ask_with_files(*a, on_tool_start=None, **kw):
+        return AssistantResult(text="⚠️ Odoo serveri bilan aloqa yo'q.\n\nSabab: DNS xatosi.", odoo_error="dns")
+
+    monkeypatch.setattr(handlers, "ask_with_files", fake_ask_with_files)
+    bot = _FakeBot()
+    await handlers._assistant_reply(bot, "Xodimlar ro'yxatini ber", thread_id=None)
+
+    assert len(bot.sent) == 1
+    assert "Sabab: DNS xatosi" in bot.sent[0]["text"]
+    assert bot.sent[0].get("reply_markup") is None
+
+
+# ── "@kimdir ..." — boshqa odamga yozilgan xabarga bot aralashmaydi ─────────
+
+async def test_general_message_addressed_to_another_user_gets_no_reply(monkeypatch):
+    called = {"assistant_reply": False, "saved": False}
+
+    async def fake_assistant_reply(bot, text, thread_id=None):
+        called["assistant_reply"] = True
+
+    async def fake_save_group_message(*a, **kw):
+        called["saved"] = True
+
+    monkeypatch.setattr(handlers, "_assistant_reply", fake_assistant_reply)
+    monkeypatch.setattr(handlers, "save_group_message", fake_save_group_message)
+    monkeypatch.setattr(handlers, "SessionLocal", _session_factory())
+    monkeypatch.setattr(handlers.settings, "CEO_TELEGRAM_USER_ID", 111)
+
+    bot = _FakeBot()
+    message = _FakeMessage(text="@NodirXamdamov nima muammo bo'lyapti?", thread_id=None,
+                           chat_id=handlers.settings.TELEGRAM_GROUP_ID)
+    await handlers.on_general_message(message, bot)
+
+    assert called == {"assistant_reply": False, "saved": True}  # kontekstga yoziladi, javob yo'q
+    assert bot.sent == [] and bot.chat_actions == []
+
+
+async def test_mention_of_the_bot_itself_is_still_answered():
+    class _BotWithMe(_FakeBot):
+        async def me(self):
+            return types.SimpleNamespace(username="dunyabunya_ceo_bot")
+
+    bot = _BotWithMe()
+    assert await handlers._is_for_another_user("@dunyabunya_ceo_bot nechta xodim bor?", bot) is False
+    assert await handlers._is_for_another_user("@NodirXamdamov qarab yubor", bot) is True
+    assert await handlers._is_for_another_user("Bugun @NodirXamdamov bilan majlis", bot) is False
+    assert await handlers._is_for_another_user("Nechta xodim bor?", bot) is False
 
 
 async def test_on_delete_task_odoo_failure_notifies_manager(monkeypatch):
