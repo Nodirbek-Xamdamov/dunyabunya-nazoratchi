@@ -19,6 +19,11 @@ tiklandi (pastga qarang). `backup_db.ps1` endi PostgreSQL 17'ning
 diskda emas — CEO ko'rsatmasi bo'yicha, "serverdan boshqa joyda saqlash"
 talabini qisman yaxshilaydi, garchi hamon SHU SERVERNING o'zida bo'lsa ham).
 
+**2026-10-05 yangilanishi:** vazifa S4U turida ro'yxatga olingan — server
+qayta yongach hech kim tizimga kirmagan bo'lsa ham backup olinadi (ilgari
+"Interactive" turida edi: kimdir RDP orqali kirmaguncha ishlamasdi). Bot
+watchdog vazifasi (`dunyabunya_bot_watchdog`) ham shu turga o'tkazilgan.
+
 Qo'lda ishga tushirish:
 ```powershell
 powershell -ExecutionPolicy Bypass -File "D:\Demos\dunyabunya ceo agent\scripts\backup_db.ps1"
