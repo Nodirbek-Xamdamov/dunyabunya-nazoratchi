@@ -279,8 +279,8 @@ async def test_company_report_shows_real_order_and_lead_counts(monkeypatch):
     url = await odoo_tools.generate_company_report("2026-09-01", "2026-09-30")
     page = _report_text(url)
 
-    assert '<div class="lbl">Buyurtmalar</div><div class="val">11 348</div>' in page
-    assert '<div class="lbl">CRM lidlar</div><div class="val">2</div>' in page
+    assert "11 348 ta buyurtma" in page  # bosh kartochka izohida (ilgari "Buyurtmalar: 0" edi)
+    assert "jami 2 ta lid" in page  # ilgari "CRM lidlar: 0" edi
     assert "Sentabr 2026" in page and "Ish jarayonida" in page
     assert "Summalar valyutasi: UZS" in page
     # Odoo'dagi nomlar HTML'ni buzmaydi
@@ -318,11 +318,12 @@ async def test_html_report_treats_empty_fields_as_blank_not_numbers(monkeypatch)
     # Sarlavhalar — Odoo'dagi maydon nomi, texnik nom emas
     assert "<th>Xodim nomi</th><th>Ish Mobil</th><th>Faol</th><th>Bo&#x27;lim</th>" in page
     assert "mobile_phone" not in page
-    assert "<td>ABASOV &lt;P&gt;</td><td></td><td>Ha</td><td>Xavfsizlik</td>" in page
+    cells = re.sub(r' class="[^"]*"', "", page)  # katak klasslari (tekislash) ahamiyatsiz
+    assert "<td>ABASOV &lt;P&gt;</td><td></td><td>Ha</td><td>Xavfsizlik</td>" in cells
     assert "+998931097303" in page
-    # Yagona kartochka — yozuvlar soni; telefon bo'yicha "yig'indi" yoki grafik yo'q
-    assert page.count('class="card"') == 1
-    assert 'class="kpi-chip"' not in page and "<canvas" not in page
+    # Faqat jadval: telefon bo'yicha "yig'indi" kartochkasi ham, grafik ham yo'q
+    assert page.count('class="card"') == 1 and 'class="tile' not in page
+    assert 'class="hbars"' not in page and 'class="cols"' not in page
 
 
 async def test_html_report_says_when_rows_do_not_fit_and_uses_real_totals(monkeypatch):

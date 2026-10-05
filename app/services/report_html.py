@@ -1,28 +1,45 @@
-"""HTML hisobot sahifalari uchun umumiy qurilish bloklari.
+"""HTML hisobot sahifalari uchun umumiy qurilish bloklari (dizayn tizimi).
 
-Barcha matn (sarlavha, yozuv nomlari, jadval kataklari) HTML uchun ekranlanadi —
-Odoo'dagi "A&B <Savdo>" kabi nomlar sahifani buzmaydi. Grafiklar Chart.js bilan
-chiziladi, lekin har birining ostida oddiy CSS-ustunli ko'rinishi ham bor: Chart.js
-yuklanmasa (internet yo'q, Telegram'ning ichki ko'rish oynasi skriptni
-ishlatmaydi) hisobot baribir to'liq o'qiladi.
+Sahifa to'liq mustaqil: CSS va kichik skript ichida, tashqi kutubxona/shrift so'ralmaydi —
+Telegram'dan yuklab olingan fayl internetsiz ham, telefonda ham to'liq ochiladi.
+
+Tamoyillar:
+- grafiklar HTML/CSS bilan chiziladi (skriptsiz ham ko'rinadi); skript faqat qulaylik
+  qo'shadi — ustiga borganda qiymat, jadvalda qidiruv/saralash, yorug'/qorong'i mavzu;
+- rang ma'lumotni bildiradi, bezak emas: bitta ko'rsatkich — bitta rang, ikki qatorli
+  grafikda ikki rang + izoh (legend). Ranglar yorug' va qorong'i fon uchun alohida
+  tanlangan va rang ajrata olmaydiganlar uchun tekshirilgan (ko'k/to'q sariq juftligi);
+- har bir grafikdagi son jadvalda ham bor; matn hech qachon grafik rangida yozilmaydi;
+- Odoo'dan kelgan barcha matn ekranlanadi ("A&B <Savdo>" sahifani buzmaydi).
 """
 
 from __future__ import annotations
 
 import html
 import json
+import math
+import re
 from datetime import datetime
 
-_PALETTE = ["#6366f1", "#a855f7", "#ec4899", "#22d3ee", "#34d399", "#fbbf24", "#f43f5e", "#f472b6"]
+# ── Qiymatlarni yozish ──────────────────────────────────────────────────────
 
 
 def esc(value) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
-def js(value) -> str:
-    """Qiymatni <script> ichiga xavfsiz joylash (JSON; "</script>" yorib chiqa olmaydi)."""
-    return json.dumps(value, ensure_ascii=False).replace("</", "<\\/")
+def slug(title) -> str:
+    """Sarlavhadan fayl nomi uchun xavfsiz bo'lak: "Xodimlar ro'yxati" -> "xodimlar_royxati"
+    (Telegram'da fayl "Xodimlar Royxati" bo'lib ko'rinadi)."""
+    text = re.sub(r"[^a-z0-9Ѐ-ӿ]+", "_", str(title).lower().replace("'", "").replace("‘", "")
+                  .replace("’", "").replace("ʻ", ""))
+    return re.sub(r"_+", "_", text).strip("_")[:40] or "hisobot"
+
+
+def is_number(value) -> bool:
+    """bool Python'da int hisoblanadi — Odoo bo'sh maydonni False qaytargani uchun
+    u son sifatida qaralmasligi kerak."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def fmt_num(n, precision: int = 1) -> str:
@@ -52,169 +69,413 @@ def fmt_int(n) -> str:
         return str(n)
 
 
-def is_number(value) -> bool:
-    """bool Python'da int hisoblanadi — Odoo bo'sh maydonni False qaytargani uchun
-    u son sifatida qaralmasligi kerak."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+def fmt_full(n) -> str:
+    """Qisqartirilmagan to'liq qiymat (ixcham yozilgan son ustiga borganda ko'rinadi)."""
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        return str(n)
+    return (f"{int(n):,}" if n == int(n) else f"{n:,.2f}").replace(",", " ")
 
 
-def chart_ok(values) -> bool:
-    """Grafik faqat kamida 2 ta nol bo'lmagan qiymat bo'lsa chiziladi."""
-    return sum(1 for v in values if is_number(v) and v) >= 2
+def fmt_pct(part, whole) -> str:
+    if not whole:
+        return "0%"
+    pct = part / whole * 100
+    return f"{pct:.0f}%" if abs(pct - round(pct)) < 0.05 or pct >= 99.95 else f"{pct:.1f}%"
 
 
-def bars(labels, values, color: str = "#6366f1") -> str:
-    """Gorizontal ustunli grafik — faqat HTML/CSS (skriptsiz ham ko'rinadi)."""
-    nums = [v if is_number(v) else 0 for v in values]
-    top = max((abs(v) for v in nums), default=0) or 1
-    rows = []
-    for label, value in zip(labels, nums):
-        pct = abs(value) / top * 100
-        rows.append(
-            f'<div class="bar-row"><div class="bar-label">{esc(label)}</div>'
-            f'<div class="bar-container"><div class="bar" style="width:{pct:.0f}%;background:{color}"></div></div>'
-            f'<div class="bar-value">{esc(fmt_num(value))}</div></div>'
-        )
-    return f'<div class="bar-chart">{"".join(rows)}</div>' if rows else ""
+# ── Stil ────────────────────────────────────────────────────────────────────
 
+_LIGHT = ("color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink-2:#52514e;"
+          "--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.10);"
+          "--wash:rgba(11,11,11,.04);--series-1:#2a78d6;--series-2:#eb6834;--track:#cde2fb;")
+_DARK = ("color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#ffffff;--ink-2:#c3c2b7;"
+         "--muted:#898781;--grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.10);"
+         "--wash:rgba(255,255,255,.05);--series-1:#3987e5;--series-2:#d95926;--track:#0d366b;")
 
-def kpi_chips(labels, values) -> str:
-    """Grafik o'rniga ixcham kartochkalar (katta son + ostida nom); nol qiymatlar chiqmaydi."""
-    chips = "".join(
-        f'<div class="kpi-chip"><div class="kpi-value">{esc(fmt_num(v))}</div>'
-        f'<div class="kpi-label">{esc(lb)}</div></div>'
-        for lb, v in zip(labels, values) if is_number(v) and v
-    )
-    return f'<div class="kpi-row">{chips}</div>' if chips else '<p class="empty">Ma\'lumot yo\'q</p>'
+_CSS = (
+    ":root{" + _LIGHT + "}"
+    "@media (prefers-color-scheme:dark){:root:where(:not([data-theme=light])){" + _DARK + "}}"
+    ":root[data-theme=dark]{" + _DARK + "}"
+    # Bosmada har doim yorug' mavzu (qora fon siyohni behuda sarflaydi)
+    "@media print{:root:root:root{" + _LIGHT + "}}"
+    """
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:var(--page);color:var(--ink);padding:28px 16px 44px}
+.wrap{max-width:1080px;margin:0 auto}
+.wrap.wide{max-width:1360px}
+.top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:22px}
+.brand{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--ink-2);margin-bottom:8px}
+.brand i{width:10px;height:10px;border-radius:3px;background:var(--series-1)}
+h1{font-size:25px;line-height:1.2;font-weight:650;letter-spacing:-.01em}
+.sub{color:var(--ink-2);font-size:13px;margin-top:6px}
+.theme{flex:none;width:36px;height:36px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--ink-2);font-size:16px;line-height:1;cursor:pointer}
+.theme:hover{background:var(--wash)}
+.tiles{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px}
+.tile{flex:1 1 150px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;min-width:0}
+.tile.hero{flex:2 1 320px}
+.tile .lbl{font-size:13px;color:var(--ink-2)}
+.tile .val{font-size:26px;font-weight:600;line-height:1.15;margin-top:6px;letter-spacing:-.01em;overflow-wrap:anywhere}
+.tile.hero .val{font-size:clamp(40px,12vw,48px);line-height:1.05}
+.tile .nt{font-size:12px;color:var(--muted);margin-top:6px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px;min-width:0}
+.card h2{font-size:15px;font-weight:600;margin-bottom:14px}
+.card h2.hs{margin-bottom:2px}
+.card .cs{font-size:12px;color:var(--muted);margin-bottom:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-bottom:16px}
+.grid>.card{margin-bottom:0}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--ink-2);margin-bottom:12px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:10px;height:10px;border-radius:2px;background:var(--series-1);flex:none}
+.sw.s2{background:var(--series-2)}.sw.pt{background:var(--track)}
+.cols{margin-top:4px}
+.cols-plot{position:relative;height:220px;margin:18px 0 0 58px}
+.cols-tick{position:absolute;left:0;right:0;height:0;border-top:1px solid var(--grid)}
+.cols-tick.base{border-top-color:var(--axis)}
+.cols-tick span{position:absolute;right:calc(100% + 8px);top:-8px;font-size:11px;line-height:16px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.cols-bars{position:absolute;inset:0;display:flex;align-items:flex-end;gap:2px;padding:0 6px}
+.col{flex:1 1 0;min-width:0;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;outline:none}
+.col-val{font-size:11px;line-height:14px;color:var(--ink-2);white-space:nowrap;margin-bottom:4px}
+.col-stack{flex:none;width:100%;max-width:24px;min-height:2px;display:flex;flex-direction:column-reverse;gap:2px;border-radius:4px 4px 0 0;overflow:hidden}
+.seg{background:var(--series-1);min-height:0}
+.seg.s2{background:var(--series-2)}.seg.pt{background:var(--track)}
+.col:hover .seg,.col:focus-visible .seg{filter:brightness(1.12)}
+.col:focus-visible .col-stack{outline:2px solid var(--ink);outline-offset:2px}
+.cols-x{display:flex;gap:2px;padding:6px 6px 0;margin-left:58px}
+.cols-x span{flex:1 1 0;min-width:0;text-align:center;font-size:11px;line-height:14px;color:var(--muted);white-space:nowrap;overflow:hidden}
+.cols-x small{display:block;font-size:10px}
+.cols+.tbl,.cols+.tools{margin-top:22px}
+.hbars{display:grid;grid-template-columns:fit-content(38%) 1fr;gap:10px 14px;align-items:center}
+.hb-l{font-size:13px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hb{display:flex;align-items:center;gap:8px;min-width:0;outline:none}
+.hb i{flex:none;height:14px;min-width:2px;border-radius:0 4px 4px 0;background:var(--series-1)}
+.hb:hover i,.hb:focus-visible i{filter:brightness(1.12)}
+.hb span{font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.meter-pct{font-size:32px;font-weight:600;line-height:1.1;letter-spacing:-.01em}
+.meter-cap{font-size:13px;color:var(--ink-2);margin:2px 0 14px}
+.meter-track{height:12px;border-radius:6px;background:var(--track);overflow:hidden}
+.meter-fill{height:100%;min-width:2px;background:var(--series-1);border-radius:0 4px 4px 0}
+.meter-legend{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:14px;font-size:13px;color:var(--ink-2)}
+.meter-legend span{display:inline-flex;align-items:center;gap:6px}
+.meter-legend b{color:var(--ink);font-weight:600}
+.tools{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.tools input{flex:1;min-width:0;max-width:320px;font:inherit;font-size:14px;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--page);color:var(--ink)}
+.tools input:focus{outline:2px solid var(--series-1);outline-offset:1px}
+.tools .cnt{font-size:12px;color:var(--muted);white-space:nowrap}
+.tbl{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.tbl.tall{max-height:72vh;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{position:sticky;top:0;z-index:1;background:var(--surface);text-align:left;font-weight:600;font-size:12px;color:var(--ink-2);padding:10px 12px;white-space:nowrap;box-shadow:inset 0 -1px 0 var(--axis)}
+th[data-s]{cursor:pointer;user-select:none}
+th[aria-sort=ascending]::after{content:" \\25B2";font-size:9px}
+th[aria-sort=descending]::after{content:" \\25BC";font-size:9px}
+td{padding:9px 12px;border-bottom:1px solid var(--grid);vertical-align:top}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover td{background:var(--wash)}
+.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.s{white-space:nowrap}
+.w{min-width:210px}
+.i{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums;width:1%;white-space:nowrap}
+tbody.auto{counter-reset:r}tbody.auto tr:not([hidden]){counter-increment:r}tbody.auto td.i::before{content:counter(r)}
+tr[hidden]{display:none}
+.rb{height:6px;min-width:2px;border-radius:0 3px 3px 0;background:var(--series-1);margin-top:6px}
+.empty{color:var(--muted);font-size:13px}
+.note{color:var(--muted);font-size:12px;margin-top:12px}
+footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
+.tip{position:fixed;z-index:9;pointer-events:none;background:var(--ink);color:var(--surface);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.45;box-shadow:0 4px 16px rgba(0,0,0,.2);max-width:260px}
+.tip .tt{opacity:.75;margin-bottom:2px}
+.tip .tr{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.tip .tr b{font-size:13px}
+.tip .tr span{opacity:.75}
+.tip .k{width:10px;height:2px;border-radius:1px;background:var(--series-1);flex:none}
+.tip .k.s2{background:var(--series-2)}.tip .k.pt{background:var(--track)}
+@media (max-width:600px){body{padding:18px 12px 32px}h1{font-size:21px}.card{padding:16px}.cols-plot,.cols-x{margin-left:50px}td,th{padding-left:10px;padding-right:10px}}
+@media print{body{padding:0;background:#fff}.theme,.tools{display:none!important}.card,.tile{break-inside:avoid}.tbl,.tbl.tall{max-height:none;overflow:visible}th{position:static}thead{display:table-header-group}.seg,.rb,.hb i,.meter-fill,.meter-track,.sw,.brand i{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+"""
+)
 
-
-def table(headers, rows, numbered: bool = False) -> str:
-    """Jadval. Son kataklari o'ngga tekislanadi, 0 qiymatlar bo'sh qoldiriladi."""
-    if not rows:
-        return '<p class="empty">Ma\'lumot yo\'q</p>'
-    head = ("<th>#</th>" if numbered else "") + "".join(f"<th>{esc(h)}</th>" for h in headers)
-    body = []
-    for n, row in enumerate(rows, start=1):
-        cells = [f'<td class="number">{n}</td>'] if numbered else []
-        for cell in row:
-            if is_number(cell):
-                cells.append(f'<td class="number">{esc(fmt_num(cell, 2)) if cell else ""}</td>')
-            else:
-                cells.append(f"<td>{esc(cell)}</td>")
-        body.append(f"<tr>{''.join(cells)}</tr>")
-    return (f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
-
-
-class Charts:
-    """Sahifadagi grafiklar: `add()` joylashtiriladigan HTML'ni qaytaradi va Chart.js
-    konfiguratsiyasini yig'adi, `script()` esa hammasini chizuvchi <script> beradi."""
-
-    def __init__(self) -> None:
-        self._configs: list[tuple[str, dict]] = []
-
-    def add(self, labels, values, *, kind: str = "bar", horizontal: bool = False,
-            color: str = "#6366f1", label: str = "") -> str:
-        labels = [str(lb) for lb in labels]
-        values = [v if is_number(v) else 0 for v in values]
-        if not chart_ok(values):
-            return kpi_chips(labels, values)
-        cid = f"c{len(self._configs) + 1}"
-        colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(values))]
-        dataset: dict = {"label": label, "data": values,
-                         "backgroundColor": colors if kind == "doughnut" else color}
-        if kind != "doughnut":
-            dataset["borderRadius"] = 6
-        self._configs.append((cid, {"kind": kind, "horizontal": horizontal,
-                                    "labels": labels, "dataset": dataset}))
-        return (f'<div class="chart-wrap" id="w_{cid}" hidden><canvas id="{cid}"></canvas></div>'
-                f'<div id="f_{cid}">{bars(labels, values, color)}</div>')
-
-    def script(self) -> str:
-        if not self._configs:
-            return ""
-        return (
-            '<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>\n<script>\n'
-            "(function(){\n"
-            "if(!window.Chart)return;\n"
-            "Chart.defaults.color='#cbd5e1';Chart.defaults.borderColor='rgba(148,163,184,0.08)';\n"
-            "var short=function(v){var a=Math.abs(v);return a>=1e9?(v/1e9).toFixed(1)+' mlrd':"
-            "a>=1e6?(v/1e6).toFixed(1)+' mln':a>=1e3?(v/1e3).toFixed(0)+' ming':v;};\n"
-            f"var charts={js(self._configs)};\n"
-            "charts.forEach(function(item){try{\n"
-            "var id=item[0],c=item[1],round=c.kind==='doughnut';\n"
-            "var opts={responsive:true,maintainAspectRatio:false,"
-            "plugins:{legend:{display:round,position:'right',labels:{color:'#cbd5e1'}}}};\n"
-            "if(!round){var axis={beginAtZero:true,grid:{color:'rgba(148,163,184,0.08)'},ticks:{callback:short}};"
-            "opts.scales=c.horizontal?{x:axis}:{y:axis};if(c.horizontal)opts.indexAxis='y';}\n"
-            "document.getElementById('w_'+id).hidden=false;"
-            "document.getElementById('f_'+id).style.display='none';\n"
-            "new Chart(document.getElementById(id).getContext('2d'),"
-            "{type:c.kind,data:{labels:c.labels,datasets:[c.dataset]},options:opts});\n"
-            "}catch(e){}});\n"
-            "})();\n</script>"
-        )
-
-
-_CSS = """
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif; background:linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f172a 100%); color:#e2e8f0; padding:20px; min-height:100vh; }
-.container { max-width:1000px; margin:0 auto; }
-h1 { font-size:1.5em; margin-bottom:4px; font-weight:800; color:#fff; }
-.sub { color:#94a3b8; font-size:.9em; margin-bottom:20px; }
-.cards { display:flex; gap:14px; margin-bottom:20px; flex-wrap:wrap; }
-.card { background:rgba(30,41,59,.75); border:1px solid rgba(148,163,184,.12); border-radius:16px; padding:18px 20px; flex:1; min-width:140px; box-shadow:0 8px 24px rgba(0,0,0,.25); text-align:center; }
-.card .lbl { font-size:.8em; color:#94a3b8; margin-bottom:2px; }
-.card .val { font-size:1.5em; font-weight:700; color:#c7d2fe; }
-.section { background:rgba(30,41,59,.75); border:1px solid rgba(148,163,184,.12); border-radius:16px; padding:20px; margin-bottom:16px; box-shadow:0 8px 24px rgba(0,0,0,.25); }
-.section h2 { font-size:1.1em; margin-bottom:14px; color:#f1f5f9; }
-.row { display:flex; gap:16px; flex-wrap:wrap; }
-.row > .section { flex:1; min-width:300px; }
-.chart-wrap { height:270px; position:relative; margin-bottom:12px; }
-.bar-chart { display:flex; flex-direction:column; gap:8px; margin-bottom:12px; }
-.bar-row { display:flex; align-items:center; gap:12px; }
-.bar-label { width:34%; max-width:220px; font-size:.85em; text-align:right; color:#cbd5e1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.bar-container { flex:1; background:rgba(148,163,184,.14); border-radius:6px; height:24px; overflow:hidden; }
-.bar { height:100%; border-radius:6px; }
-.bar-value { min-width:84px; font-size:.85em; color:#e2e8f0; font-weight:500; }
-.table-wrap { overflow-x:auto; }
-table { width:100%; border-collapse:collapse; font-size:.88em; background:rgba(30,41,59,.45); border:1px solid rgba(148,163,184,.12); }
-th { background:rgba(99,102,241,.2); color:#e0e7ff; padding:9px 12px; text-align:left; border-bottom:1px solid rgba(148,163,184,.15); white-space:nowrap; }
-td { padding:8px 12px; border-bottom:1px solid rgba(148,163,184,.1); color:#e2e8f0; vertical-align:top; }
-tr:hover td { background:rgba(99,102,241,.08); }
-.number { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
-.kpi-row { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
-.kpi-chip { background:rgba(99,102,241,.12); border:1px solid rgba(148,163,184,.15); border-radius:12px; padding:12px 16px; min-width:110px; text-align:center; }
-.kpi-chip .kpi-value { font-size:1.4em; font-weight:700; color:#c7d2fe; }
-.kpi-chip .kpi-label { font-size:.78em; color:#94a3b8; margin-top:2px; }
-.note { color:#94a3b8; font-size:.82em; margin-top:8px; }
-.empty { color:#64748b; font-size:.9em; }
-.footer { text-align:center; color:#64748b; font-size:.78em; margin-top:20px; }
+# Skript faqat qulaylik qo'shadi — usiz ham sahifa to'liq o'qiladi. Ma'lumot DOM'ga faqat
+# textContent orqali qo'yiladi (Odoo'dagi nomlar HTML sifatida bajarilmaydi).
+_JS = """
+(function(){
+var d=document,root=d.documentElement;
+var btn=d.querySelector('.theme');
+if(btn){btn.hidden=false;btn.addEventListener('click',function(){
+var dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
+root.dataset.theme=dark?'light':'dark';});}
+var tip=null;
+function hide(){if(tip)tip.hidden=true;}
+function show(el,x,y){var data;try{data=JSON.parse(el.getAttribute('data-tip'));}catch(e){return;}
+if(!tip){tip=d.createElement('div');tip.className='tip';d.body.appendChild(tip);}
+tip.textContent='';
+if(data.t){var t=d.createElement('div');t.className='tt';t.textContent=data.t;tip.appendChild(t);}
+(data.r||[]).forEach(function(r){var row=d.createElement('div');row.className='tr';
+var k=d.createElement('i');k.className='k '+(r[2]||'');row.appendChild(k);
+var b=d.createElement('b');b.textContent=r[1];row.appendChild(b);
+if(r[0]){var s=d.createElement('span');s.textContent=r[0];row.appendChild(s);}
+tip.appendChild(row);});
+tip.hidden=false;
+var w=tip.offsetWidth,h=tip.offsetHeight;
+var left=Math.min(Math.max(8,x+14),innerWidth-w-8),top=y-h-12;if(top<8)top=y+18;
+tip.style.left=left+'px';tip.style.top=top+'px';}
+d.querySelectorAll('[data-tip]').forEach(function(el){el.removeAttribute('title');
+el.addEventListener('pointermove',function(e){show(el,e.clientX,e.clientY);});
+el.addEventListener('pointerleave',hide);
+el.addEventListener('focus',function(){var r=el.getBoundingClientRect();show(el,r.left+r.width/2,r.top);});
+el.addEventListener('blur',hide);});
+d.addEventListener('scroll',hide,true);
+d.querySelectorAll('table[data-x]').forEach(function(tb){
+var body=tb.tBodies[0];if(!body)return;
+var rows=Array.prototype.slice.call(body.rows);
+var tools=tb.closest('.card')?tb.closest('.card').querySelector('.tools'):null;
+if(tools){tools.hidden=false;var inp=tools.querySelector('input'),cnt=tools.querySelector('.cnt');
+var fmt=function(n){return String(n).replace(/\\B(?=(\\d{3})+(?!\\d))/g,' ');};
+var upd=function(){var q=inp.value.trim().toLowerCase(),n=0;
+rows.forEach(function(r){var ok=!q||r.textContent.toLowerCase().indexOf(q)>=0;r.hidden=!ok;if(ok)n++;});
+cnt.textContent=q?(fmt(n)+' / '+fmt(rows.length)+' ta'):(fmt(rows.length)+' ta');};
+inp.addEventListener('input',upd);upd();}
+Array.prototype.forEach.call(tb.tHead.rows[0].cells,function(th,ci){
+if(!th.hasAttribute('data-s'))return;
+th.addEventListener('click',function(){
+var asc=th.getAttribute('aria-sort')!=='ascending';
+Array.prototype.forEach.call(tb.tHead.rows[0].cells,function(o){o.removeAttribute('aria-sort');});
+th.setAttribute('aria-sort',asc?'ascending':'descending');
+var key=function(r){var c=r.cells[ci];if(!c)return '';var v=c.getAttribute('data-v');
+return v!==null?parseFloat(v):c.textContent.trim().toLowerCase();};
+rows.sort(function(a,b){var x=key(a),y=key(b);
+if(typeof x==='number'&&typeof y==='number')return asc?x-y:y-x;
+x=String(x);y=String(y);if(x===''&&y!=='')return 1;if(y===''&&x!=='')return -1;
+return asc?x.localeCompare(y,undefined,{numeric:true}):y.localeCompare(x,undefined,{numeric:true});});
+rows.forEach(function(r){body.appendChild(r);});});});});
+})();
 """
 
 
-def card(label, value) -> str:
-    return f'<div class="card"><div class="lbl">{esc(label)}</div><div class="val">{esc(value)}</div></div>'
+def _tip(title, rows) -> str:
+    """Belgi (ustun/chiziq) uchun maslahat: `data-tip` (skript ko'rsatadi) va `title`
+    (skriptsiz brauzerning o'zi ko'rsatadi). rows: [(nom, qiymat, rang-klassi)]."""
+    payload = json.dumps({"t": str(title), "r": [[str(n), str(v), str(k)] for n, v, k in rows]},
+                         ensure_ascii=False)
+    plain = "; ".join(f"{n}: {v}" if n else str(v) for n, v, _k in rows)
+    if title:
+        plain = f"{title} — {plain}"
+    return f'data-tip="{esc(payload)}" title="{esc(plain)}"'
 
 
-def section(title, *blocks: str) -> str:
-    return f'<div class="section"><h2>{esc(title)}</h2>{"".join(b for b in blocks if b)}</div>'
+# ── Bloklar ─────────────────────────────────────────────────────────────────
+
+def tile(label, value, note: str = "", *, hero: bool = False) -> str:
+    """Ko'rsatkich kartochkasi: nom, katta son va ixtiyoriy izoh. `hero` — sahifaning
+    bosh raqami (bittadan ortiq bo'lmasin)."""
+    extra = f'<div class="nt">{esc(note)}</div>' if note else ""
+    return (f'<div class="tile{" hero" if hero else ""}"><div class="lbl">{esc(label)}</div>'
+            f'<div class="val">{esc(value)}</div>{extra}</div>')
 
 
-def row(*sections: str) -> str:
-    return f'<div class="row">{"".join(sections)}</div>'
+def tiles(*items: str) -> str:
+    items = [i for i in items if i]
+    return f'<section class="tiles">{"".join(items)}</section>' if items else ""
+
+
+def card(title, *blocks: str, sub: str = "") -> str:
+    head = (f'<h2 class="hs">{esc(title)}</h2><div class="cs">{esc(sub)}</div>' if sub
+            else f"<h2>{esc(title)}</h2>")
+    return f'<section class="card">{head}{"".join(b for b in blocks if b)}</section>'
+
+
+def grid(*cards: str) -> str:
+    return f'<div class="grid">{"".join(c for c in cards if c)}</div>'
 
 
 def note(text) -> str:
-    return f'<p class="note">{esc(text)}</p>'
+    return f'<p class="note">{esc(text)}</p>' if text else ""
 
 
-def page(*, title: str, subtitle: str = "", cards: list[str] | None = None,
-         body: str = "", charts: Charts | None = None) -> str:
-    """To'liq mustaqil HTML sahifa (CSS ichida; tashqi so'rov — faqat ixtiyoriy Chart.js)."""
+def empty(text: str = "Ma'lumot yo'q") -> str:
+    return f'<p class="empty">{esc(text)}</p>'
+
+
+def _nice_ticks(top: float, count: int = 4) -> list[float]:
+    """O'q belgilari: 0 dan boshlab "chiroyli" qadam bilan (1, 2, 2.5, 5 x 10^n)."""
+    if top <= 0:
+        return [0.0, 1.0]
+    raw = top / count
+    magnitude = 10 ** math.floor(math.log10(raw))
+    step = next(m * magnitude for m in (1, 2, 2.5, 5, 10) if raw <= m * magnitude)
+    return [i * step for i in range(math.ceil(top / step - 1e-9) + 1)]
+
+
+def columns(labels, series, *, titles=None, sublabels=None, partial_last: bool = False) -> str:
+    """Ustunli grafik (vaqt bo'yicha ko'rsatkich). `series`: [(nom, qiymatlar)] — bitta
+    qator yoki ustma-ust ikki qator. `titles` — maslahatdagi to'liq nomlar ("Mart 2026"),
+    `sublabels` — o'q yozuvi ostidagi ikkinchi qator (yil). `partial_last` — oxirgi davr
+    hali tugamagan: ustuni ochroq rangda chiziladi, toki "tushib ketgan"dek ko'rinmasin."""
+    labels = [str(lb) for lb in labels]
+    series = [(str(name), [v if is_number(v) and v > 0 else 0 for v in values]) for name, values in series][:2]
+    if not labels or not series:
+        return empty()
+    count = len(labels)
+    titles = list(titles or labels)
+    sublabels = list(sublabels or [""] * count)
+    totals = [sum(values[i] for _name, values in series) for i in range(count)]
+    if not any(totals):
+        return empty()
+
+    ticks = _nice_ticks(max(totals))
+    top = ticks[-1]
+    grid_html = "".join(
+        f'<div class="cols-tick{" base" if t == 0 else ""}" style="bottom:{t / top * 100:.2f}%">'
+        f'<span>{esc(fmt_num(t))}</span></div>'
+        for t in ticks
+    )
+
+    # Qiymat har ustunga yozilmaydi (o'qib bo'lmaydigan shovqin) — faqat eng balandiga va
+    # oxirgisiga; qolganlari o'qdan, maslahatdan va jadvaldan o'qiladi.
+    peak = max(range(count), key=lambda i: totals[i])
+    labelled = {peak}
+    if count <= 6 or abs(count - 1 - peak) >= 2:
+        labelled.add(count - 1)
+
+    classes = ["", "s2"]
+    bars = []
+    for i in range(count):
+        partial = partial_last and i == count - 1 and len(series) == 1
+        segments, tip_rows = [], []
+        for si, (name, values) in enumerate(series):
+            cls = "pt" if partial else classes[si]
+            if values[i]:
+                share = values[i] / totals[i] * 100
+                segments.append(f'<div class="seg {cls}" style="flex:{share:.3f} 1 0"></div>')
+            tip_rows.append((name if len(series) > 1 else "", fmt_num(values[i], 2), cls))
+        if len(series) > 1:
+            tip_rows.append(("Jami", fmt_num(totals[i], 2), ""))
+        value_label = f'<div class="col-val">{esc(fmt_num(totals[i]))}</div>' if i in labelled and totals[i] else ""
+        stack = (f'<div class="col-stack" style="height:{totals[i] / top * 100:.2f}%">{"".join(segments)}</div>'
+                 if totals[i] else "")
+        tip_title = titles[i] + (" (oy tugamagan)" if partial else "")
+        bars.append(f'<div class="col" tabindex="0" {_tip(tip_title, tip_rows)}>{value_label}{stack}</div>')
+
+    axis = "".join(
+        f"<span>{esc(lb)}{f'<small>{esc(sub)}</small>' if sub else ''}</span>"
+        for lb, sub in zip(labels, sublabels)
+    )
+    legend = ""
+    if len(series) > 1:
+        legend = '<div class="legend">' + "".join(
+            f'<span><i class="sw {classes[si]}"></i>{esc(name)}</span>' for si, (name, _v) in enumerate(series)
+        ) + "</div>"
+    elif partial_last:
+        legend = ('<div class="legend"><span><i class="sw"></i>to\'liq oy</span>'
+                  '<span><i class="sw pt"></i>joriy oy (hali tugamagan)</span></div>')
+    return (f'{legend}<div class="cols"><div class="cols-plot">{grid_html}'
+            f'<div class="cols-bars">{"".join(bars)}</div></div>'
+            f'<div class="cols-x">{axis}</div></div>')
+
+
+def hbars(labels, values) -> str:
+    """Gorizontal chiziqlar — nomli toifalarni taqqoslash (qiymat chiziq uchida)."""
+    pairs = [(str(lb), v if is_number(v) else 0) for lb, v in zip(labels, values)]
+    if not pairs or not any(v for _lb, v in pairs):
+        return empty()
+    if len(pairs) == 1:
+        # Bitta chiziqli "grafik" hech narsani taqqoslamaydi — sonning o'zi yoziladi
+        label, value = pairs[0]
+        return f'<div class="meter-pct">{esc(fmt_num(value))}</div><div class="meter-cap">{esc(label)}</div>'
+    top = max(abs(v) for _lb, v in pairs) or 1
+    cells = []
+    for label, value in pairs:
+        share = abs(value) / top
+        cells.append(
+            f'<div class="hb-l" title="{esc(label)}">{esc(label)}</div>'
+            f'<div class="hb" tabindex="0" {_tip(label, [("", fmt_full(value), "")])}>'
+            f'<i style="width:calc((100% - 76px) * {share:.4f})"></i><span>{esc(fmt_num(value))}</span></div>'
+        )
+    return f'<div class="hbars">{"".join(cells)}</div>'
+
+
+def meter(filled, total, filled_label: str, rest_label: str) -> str:
+    """Ulush o'lchagichi: `filled` — `total`ning qancha qismi (masalan to'langan fakturalar)."""
+    filled = filled if is_number(filled) else 0
+    total = total if is_number(total) else 0
+    if total <= 0:
+        return empty()
+    share = max(0.0, min(1.0, filled / total))
+    rest = total - filled
+    return (
+        f'<div class="meter-pct">{esc(fmt_pct(filled, total))}</div>'
+        f'<div class="meter-cap">{esc(filled_label.lower())}</div>'
+        f'<div class="meter-track" role="img" aria-label="{esc(filled_label)}: {esc(fmt_pct(filled, total))}">'
+        f'<div class="meter-fill" style="width:{share * 100:.2f}%"></div></div>'
+        f'<div class="meter-legend">'
+        f'<span><i class="sw"></i>{esc(filled_label)} <b>{esc(fmt_num(filled, 2))}</b></span>'
+        f'<span><i class="sw pt"></i>{esc(rest_label)} <b>{esc(fmt_num(rest, 2))}</b> '
+        f'({esc(fmt_pct(rest, total))})</span></div>'
+    )
+
+
+def _number_cell(value) -> str:
+    if not value:
+        return '<td class="n"></td>'  # 0 qiymatlar bo'sh qoldiriladi
+    short = fmt_num(value, 2)
+    full = fmt_full(value)
+    hint = f' title="{esc(full)}"' if short != full else ""
+    return f'<td class="n" data-v="{value:.10g}"{hint}>{esc(short)}</td>'
+
+
+def table(headers, rows, *, numbered: bool = False, interactive: bool = False,
+          bar_col: int | None = None, label_col: int = 0) -> str:
+    """Jadval. Son kataklari o'ngga tekislanadi va ixcham yoziladi (to'liq qiymat — ustiga
+    borganda), 0 qiymatlar bo'sh qoldiriladi.
+
+    `interactive` — qidiruv maydoni va ustun sarlavhasini bosib saralash (uzun ro'yxatlar uchun).
+    `bar_col` — shu ustun qiymatiga mutanosib ingichka chiziq `label_col` katagi ostida
+    chiziladi (reyting jadvali: "top mijozlar")."""
+    rows = [list(r) for r in rows]
+    if not rows:
+        return empty()
+    numeric = [any(is_number(r[c]) for r in rows if c < len(r)) for c in range(len(headers))]
+    bar_top = max((abs(r[bar_col]) for r in rows if is_number(r[bar_col])), default=0) if bar_col is not None else 0
+
+    sort_attr = " data-s" if interactive else ""
+    head = ('<th class="i">#</th>' if numbered else "") + "".join(
+        f'<th class="n"{sort_attr}>{esc(h)}</th>' if numeric[c] else f"<th{sort_attr}>{esc(h)}</th>"
+        for c, h in enumerate(headers)
+    )
+    body = []
+    for n, r in enumerate(rows, start=1):
+        cells = [f'<td class="i">{"" if interactive else n}</td>'] if numbered else []
+        for c, cell in enumerate(r):
+            if is_number(cell):
+                cells.append(_number_cell(cell))
+                continue
+            text = esc(cell)
+            if bar_top and c == label_col and is_number(r[bar_col]):
+                text += f'<div class="rb" style="width:{abs(r[bar_col]) / bar_top * 100:.1f}%"></div>'
+                cells.append(f"<td>{text}</td>")
+                continue
+            # Qisqa qiymat (sana, oy nomi, raqamli kod) tor ekranda ikki qatorga bo'linib ketmasin;
+            # uzun matnli ustun esa siqilib, har katagi besh-olti qatorga cho'zilib ketmasin
+            # (jadval sig'masa — gorizontal aylantiriladi)
+            length = len(str(cell or ""))
+            cls = ' class="s"' if length <= 18 else ' class="w"' if length >= 34 else ""
+            cells.append(f"<td{cls}>{text}</td>")
+        body.append(f"<tr>{''.join(cells)}</tr>")
+
+    tools = ('<div class="tools" hidden><input type="search" placeholder="Qidirish…" '
+             'aria-label="Jadvaldan qidirish"><span class="cnt"></span></div>') if interactive else ""
+    tall = " tall" if len(rows) > 15 else ""
+    return (f'{tools}<div class="tbl{tall}"><table{" data-x" if interactive else ""}>'
+            f'<thead><tr>{head}</tr></thead>'
+            f'<tbody{" class=auto" if interactive and numbered else ""}>{"".join(body)}</tbody></table></div>')
+
+
+def page(*, title: str, subtitle: str = "", tiles_html: str = "", body: str = "", wide: bool = False) -> str:
+    """To'liq mustaqil HTML sahifa (tashqi so'rovsiz). `wide` — ko'p ustunli jadval uchun kengroq sahifa."""
     now = datetime.now()
-    sub = f"{subtitle} | " if subtitle else ""
-    cards_html = f'<div class="cards">{"".join(cards)}</div>' if cards else ""
+    wrap_class = "wrap wide" if wide else "wrap"
+    sub = " · ".join(p for p in (subtitle, f"tayyorlangan: {now.strftime('%Y-%m-%d %H:%M')}") if p)
     return f"""<!DOCTYPE html>
 <html lang="uz">
 <head>
@@ -224,13 +485,15 @@ def page(*, title: str, subtitle: str = "", cards: list[str] | None = None,
 <style>{_CSS}</style>
 </head>
 <body>
-<div class="container">
-<h1>{esc(title)}</h1>
-<p class="sub">{esc(sub)}{now.strftime('%Y-%m-%d %H:%M')}</p>
-{cards_html}
+<div class="{wrap_class}">
+<header class="top">
+<div><div class="brand"><i></i>dunyabunya</div><h1>{esc(title)}</h1><p class="sub">{esc(sub)}</p></div>
+<button class="theme" type="button" hidden title="Yorug' / qorong'i mavzu" aria-label="Mavzuni almashtirish">&#9680;</button>
+</header>
+{tiles_html}
 {body}
-<p class="footer">dunyabunya agent — {now.strftime('%Y-%m-%d')}</p>
+<footer>dunyabunya agent · {now.strftime('%Y-%m-%d')}</footer>
 </div>
-{charts.script() if charts else ""}
+<script>{_JS}</script>
 </body>
 </html>"""

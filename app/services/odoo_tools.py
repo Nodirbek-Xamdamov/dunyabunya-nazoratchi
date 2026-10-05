@@ -730,19 +730,20 @@ EXPORT_MAX_ROWS = 50000  # bitta faylga sig'adigan eng ko'p yozuv
 
 
 def _export_slug(title: str) -> str:
-    slug = re.sub(r"[^a-z0-9Ѐ-ӿ]+", "_", str(title).lower().replace("'", "")).strip("_") or "export"
-    return re.sub(r"_+", "_", slug)[:40]
+    return rh.slug(title)
 
 
 async def _export_rows(model: str, domain: list | None = None, fields: list | None = None,
-                       limit: int = 10000) -> tuple[list[dict], list[tuple[str, str]], int]:
-    """Eksport uchun tayyor qatorlar, ustunlar [(maydon, sarlavha)] va bazadagi JAMI soni."""
+                       limit: int = 10000) -> tuple[list[dict], list[tuple[str, str]], int, dict[str, str]]:
+    """Eksport uchun tayyor qatorlar, ustunlar [(maydon, sarlavha)], bazadagi JAMI soni va
+    maydon turlari {maydon: "monetary" | "date" | ...} (fayl formatlash uchun)."""
     limit = max(1, min(int(limit or 10000), EXPORT_MAX_ROWS))
-    (rows, columns, _meta), total = await asyncio.gather(
+    (rows, columns, meta), total = await asyncio.gather(
         _read_rows(model, domain, fields, limit, keep_id=True),
         _count(model, domain),
     )
-    return rows, columns, max(total, len(rows))
+    types = {field: (meta.get(field) or {}).get("type") or "" for field, _label in columns}
+    return rows, columns, max(total, len(rows)), types
 
 
 def _export_result(filename: str, shown: int, total: int) -> dict | str:
@@ -767,34 +768,196 @@ def _display_value(val) -> str:
     return val
 
 
-def _write_xlsx(path: Path, title: str, rows: list[dict], columns: list[tuple[str, str]]) -> None:
+# ── Excel ko'rinishi ──
+_XLSX_HEADER_FILL = "184F95"   # sarlavha qatori (to'q ko'k; oq matn bilan kontrasti 8:1)
+_XLSX_ACCENT = "2A78D6"
+_XLSX_STRIPE = "F3F7FD"        # juft qatorlar (juda och ko'k)
+_XLSX_TOTAL_FILL = "E3EDFA"
+_XLSX_MUTED = "6B6A66"
+_XLSX_HEADER_ROW = 4           # 1-qator: nom, 2-qator: izoh, 3-qator: bo'sh
+_XLSX_FULL_STYLE_MAX_ROWS = 5000  # bundan katta faylda har katakni bezash juda sekin
+_XLSX_MAX_WIDTH = 50
+
+
+_XLSX_DATE = "DD.MM.YYYY"
+_XLSX_DATETIME = "DD.MM.YYYY HH:MM"
+
+
+def _xlsx_column_format(field: str, ftype: str, values: list) -> str | None:
+    """Ustunning raqam formati — butun ustun uchun bitta (bir ustunda "1 000" va "1 000,50"
+    aralash chiqmasligi uchun): sana, sana-vaqt, butun son yoki ikki kasr xonali summa."""
+    if ftype == "date":
+        return _XLSX_DATE
+    if ftype == "datetime":
+        return _XLSX_DATETIME
+    numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not numbers:
+        return None
+    if field == "id":
+        return "0"
+    if ftype == "integer" or all(float(v).is_integer() for v in numbers):
+        return "#,##0"
+    return "#,##0.00"
+
+
+def _xlsx_value(value, number_format: str | None):
+    """Katak qiymati: sana — haqiqiy Excel sanasi (saralash va filtr to'g'ri ishlaydi),
+    0 va bo'sh qiymat — bo'sh katak."""
+    if value is None or value == "" or value is False:
+        return None
+    if value is True:
+        return "Ha"
+    if isinstance(value, (int, float)):
+        return value or None  # 0 qiymatlar bo'sh qoldiriladi
+    if isinstance(value, str) and number_format == _XLSX_DATE:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return value
+    if isinstance(value, str) and number_format == _XLSX_DATETIME:
+        try:
+            return datetime.strptime(value[:16], "%Y-%m-%d %H:%M")
+        except ValueError:
+            return value
+    return value
+
+
+def _xlsx_text_width(value, number_format) -> int:
+    """Katak matni taxminan necha belgi joy egallashi (ustun kengligi uchun)."""
+    if value is None:
+        return 0
+    if isinstance(value, datetime):
+        return 16
+    if isinstance(value, date):
+        return 10
+    if isinstance(value, (int, float)):
+        return len(f"{value:,.2f}" if number_format == "#,##0.00" else f"{value:,.0f}")
+    return max((len(line) for line in str(value).split("\n")), default=0)
+
+
+def _write_xlsx(path: Path, title: str, rows: list[dict], columns: list[tuple[str, str]],
+                types: dict[str, str] | None = None, total: int | None = None) -> None:
+    """Excel fayl: sarlavha bloki, rangli ustun nomlari, navbatlashgan qatorlar, sonlar va
+    sanalar o'z formatida, summalar bo'yicha "Jami" qatori, filtr, qotirilgan sarlavha va
+    bosmaga tayyor sahifa sozlamalari."""
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.formatting.rule import FormulaRule
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.properties import PageSetupProperties
+
+    types = types or {}
+    count = len(columns)
+    last_letter = get_column_letter(count)
+    first_row = _XLSX_HEADER_ROW + 1
+    last_row = _XLSX_HEADER_ROW + len(rows)
+    polish = len(rows) <= _XLSX_FULL_STYLE_MAX_ROWS
 
     wb = Workbook()
     ws = wb.active
     ws.title = re.sub(r"[\[\]:*?/\\]", " ", title or "Hisobot")[:31] or "Hisobot"
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = _XLSX_ACCENT
+    wb.properties.title = title or "Hisobot"
+    wb.properties.creator = "dunyabunya agent"
 
-    header_fill = PatternFill("solid", fgColor="1A1A2E")
-    header_font = Font(bold=True, color="FFFFFF")
+    # 1) Sarlavha bloki
+    ws.cell(row=1, column=1, value=title or "Hisobot").font = Font(size=15, bold=True, color="0B0B0B")
+    ws.row_dimensions[1].height = 26
+    shown = len(rows)
+    info = f"{shown:,} ta yozuv".replace(",", " ")
+    if total and total > shown:
+        info = f"jami {total:,} ta yozuvdan dastlabki {shown:,} tasi".replace(",", " ")
+    info += f"  ·  {datetime.now(_TZ).strftime('%d.%m.%Y %H:%M')}  ·  dunyabunya"
+    ws.cell(row=2, column=1, value=info).font = Font(size=9, color=_XLSX_MUTED)
+
+    # 2) Ustun nomlari (son va sana ustunlari — qiymatlari kabi o'ngga tekislanadi)
+    formats = {
+        ci: _xlsx_column_format(field, types.get(field) or "", [row.get(field) for row in rows])
+        for ci, (field, _label) in enumerate(columns, start=1)
+    }
+    header_font = Font(bold=True, color="FFFFFF", size=10.5)
+    header_fill = PatternFill("solid", fgColor=_XLSX_HEADER_FILL)
+    header_border = Border(bottom=Side(style="medium", color=_XLSX_ACCENT))
     for ci, (_field, label) in enumerate(columns, start=1):
-        cell = ws.cell(row=1, column=ci, value=str(label))
-        cell.fill = header_fill
+        cell = ws.cell(row=_XLSX_HEADER_ROW, column=ci, value=str(label))
         cell.font = header_font
-        cell.alignment = Alignment(horizontal="center")
+        cell.fill = header_fill
+        cell.border = header_border
+        cell.alignment = Alignment(horizontal="right" if formats[ci] else "left", vertical="center",
+                                   wrap_text=True, indent=1)
+    ws.row_dimensions[_XLSX_HEADER_ROW].height = 30
 
-    # Ma'lumotlar — 0 qiymatlar bo'sh (blank) qoldiriladi
-    for ri, row in enumerate(rows, start=2):
+    # 3) Ma'lumotlar
+    widths = [len(str(label)) + 4 for _field, label in columns]  # +4: filtr tugmasi uchun joy
+    sums: dict[int, float] = {}
+    measures = {ci for ci, (field, _label) in enumerate(columns, start=1)
+                if types.get(field) in ("monetary", "float")}
+    top = Alignment(vertical="top")
+    wrap = Alignment(vertical="top", wrap_text=True)
+    for ri, row in enumerate(rows, start=first_row):
         for ci, (field, _label) in enumerate(columns, start=1):
-            ws.cell(row=ri, column=ci, value=_display_value(row.get(field)))
+            number_format = formats[ci]
+            value = _xlsx_value(row.get(field), number_format)
+            if value is None:
+                continue
+            cell = ws.cell(row=ri, column=ci, value=value)
+            if number_format and not isinstance(value, str):
+                cell.number_format = number_format
+            if ci in measures and isinstance(value, (int, float)):
+                sums[ci] = sums.get(ci, 0) + value
+            if polish or ri - first_row < 300:
+                width = _xlsx_text_width(value, number_format)
+                if width > widths[ci - 1]:
+                    widths[ci - 1] = width
+                if polish and isinstance(value, str):
+                    cell.alignment = wrap if (width > _XLSX_MAX_WIDTH or "\n" in value) else top
+                elif polish:
+                    cell.alignment = top
 
-    for ci, (field, label) in enumerate(columns, start=1):
-        widest = max([len(str(label))] + [len(str(row.get(field, ""))) for row in rows[:200]])
-        ws.column_dimensions[get_column_letter(ci)].width = min(widest + 2, 45)
+    # 4) Jami qatori (faqat summa/miqdor ustunlari bo'lsa)
+    if sums and len(rows) > 1:
+        total_row = last_row + 1
+        total_font = Font(bold=True)
+        total_fill = PatternFill("solid", fgColor=_XLSX_TOTAL_FILL)
+        total_border = Border(top=Side(style="thin", color=_XLSX_ACCENT))
+        label_col = next((ci for ci in range(1, count + 1) if ci not in sums), None)
+        for ci in range(1, count + 1):
+            cell = ws.cell(row=total_row, column=ci)
+            cell.font, cell.fill, cell.border = total_font, total_fill, total_border
+            if ci in sums:
+                cell.value = sums[ci]
+                cell.number_format = formats[ci] or "#,##0.00"
+                widths[ci - 1] = max(widths[ci - 1], _xlsx_text_width(sums[ci], cell.number_format) + 1)
+            elif ci == label_col:
+                # Faylga yozuvlarning bir qismi sig'gan bo'lsa — yig'indi ham shu qismga tegishli
+                cell.value = "Jami (fayldagi qatorlar)" if total and total > shown else "Jami"
+        ws.row_dimensions[total_row].height = 20
 
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
+    # 5) Navbatlashgan qatorlar — bitta shartli format (har katakni bo'yamasdan, katta faylda ham tez)
+    if rows:
+        ws.conditional_formatting.add(
+            f"A{first_row}:{last_letter}{last_row}",
+            FormulaRule(formula=["MOD(ROW(),2)=0"], stopIfTrue=False,
+                        fill=PatternFill(start_color=_XLSX_STRIPE, end_color=_XLSX_STRIPE, fill_type="solid")),
+        )
+
+    for ci, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(ci)].width = max(8, min(width + 2, _XLSX_MAX_WIDTH))
+
+    # 6) Ko'rish va bosma sozlamalari
+    ws.freeze_panes = ws.cell(row=first_row, column=2 if count >= 5 else 1)
+    ws.auto_filter.ref = f"A{_XLSX_HEADER_ROW}:{last_letter}{max(last_row, _XLSX_HEADER_ROW)}"
+    ws.print_title_rows = f"{_XLSX_HEADER_ROW}:{_XLSX_HEADER_ROW}"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_margins.left = ws.page_margins.right = 0.4
+    ws.page_margins.top = ws.page_margins.bottom = 0.6
+    ws.oddFooter.center.text = "&P / &N"
+    ws.oddFooter.right.text = "dunyabunya"
     wb.save(path)
 
 
@@ -811,7 +974,7 @@ async def export_excel(model: str = "", domain: list | None = None,
     if not model:
         return "Excel uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
 
-    rows, columns, total = await _export_rows(model, domain, fields, limit)
+    rows, columns, total, types = await _export_rows(model, domain, fields, limit)
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
     try:
@@ -822,7 +985,7 @@ async def export_excel(model: str = "", domain: list | None = None,
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{_export_slug(title)}_{uuid.uuid4().hex[:8]}.xlsx"
     # Katta faylni yozish soniyalab davom etadi — boshqa foydalanuvchilar kutib qolmasligi uchun alohida oqimda
-    await asyncio.to_thread(_write_xlsx, REPORTS_DIR / filename, title, rows, columns)
+    await asyncio.to_thread(_write_xlsx, REPORTS_DIR / filename, title, rows, columns, types, total)
     return _export_result(filename, len(rows), total)
 
 
@@ -942,7 +1105,7 @@ async def export_word(model: str = "", domain: list | None = None,
     if not model:
         return "Word uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
     # Word jadvali minglab qatorda juda sekin va og'ir — 2000 qator bilan cheklanadi
-    rows, columns, total = await _export_rows(model, domain, fields, min(int(limit or 2000), 2000))
+    rows, columns, total, _types = await _export_rows(model, domain, fields, min(int(limit or 2000), 2000))
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
     try:
@@ -1007,7 +1170,7 @@ async def export_pdf(model: str = "", domain: list | None = None,
     if not model:
         return "PDF uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
     # PDF jadvali sahifalab teriladi — 5000 qatordan ortig'i daqiqalab ketadi
-    rows, columns, total = await _export_rows(model, domain, fields, min(int(limit or 5000), 5000))
+    rows, columns, total, _types = await _export_rows(model, domain, fields, min(int(limit or 5000), 5000))
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
     try:
@@ -1037,7 +1200,7 @@ async def export_csv(model: str = "", domain: list | None = None,
     """Odoo ma'lumotlaridan CSV fayl yaratadi (Excel ocha oladi)."""
     if not model:
         return "CSV uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
-    rows, columns, total = await _export_rows(model, domain, fields, limit)
+    rows, columns, total, _types = await _export_rows(model, domain, fields, limit)
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
 
@@ -1347,17 +1510,58 @@ async def get_task_stats() -> list[dict]:
     return await _task_state_groups()
 
 
-async def _single_currency_note(model: str, domain: list) -> str:
-    """Summalar qaysi valyutada ekanini aytadi; aralash bo'lsa — ogohlantiradi."""
+_UZ_MONTHS_SHORT = ("Yan", "Fev", "Mar", "Apr", "May", "Iyn", "Iyl", "Avg", "Sen", "Okt", "Noy", "Dek")
+
+
+def _report_file(title: str) -> str:
+    """Hisobot fayli nomi: o'qiladigan nom + taxmin qilib bo'lmaydigan qo'shimcha
+    (Telegram'da "Kompaniya Statistikasi.html" bo'lib ko'rinadi)."""
+    return f"{_export_slug(title)}_{uuid.uuid4().hex[:12]}.html"
+
+
+async def _currency_info(model: str, domain: list) -> tuple[str, str]:
+    """(valyuta nomi, ogohlantirish). Hujjatlar bitta valyutada bo'lsa — uning nomi;
+    aralash bo'lsa — nom bo'sh va ogohlantirishda valyutalar bo'yicha taqsimot."""
     groups = await _rg(model, domain, ["amount_total"], "currency_id")
-    names = [_m2o_name(g.get("currency_id"), "") for g in groups if g.get("currency_id")]
-    if len(names) == 1:
-        return f"Summalar valyutasi: {names[0]}"
-    if len(names) > 1:
-        parts = ", ".join(f"{_m2o_name(g.get('currency_id'), '')}: {rh.fmt_num(g.get('amount_total'))}"
-                          for g in groups if g.get("currency_id"))
-        return f"Diqqat: hujjatlar turli valyutalarda ({parts}) — jami summalar ularning oddiy yig'indisi."
-    return ""
+    named = [(_m2o_name(g.get("currency_id"), ""), g.get("amount_total") or 0)
+             for g in groups if g.get("currency_id")]
+    if len(named) == 1:
+        return named[0][0], ""
+    if len(named) > 1:
+        parts = ", ".join(f"{name}: {rh.fmt_num(amount)}" for name, amount in named)
+        return "", f"Diqqat: hujjatlar turli valyutalarda ({parts}) — jami summalar ularning oddiy yig'indisi."
+    return "", ""
+
+
+def _subtitle(date_from: str, date_to: str, currency: str) -> str:
+    period = _period_label(date_from, date_to)
+    return f"{period} · Summalar valyutasi: {currency}" if currency else period
+
+
+def _month_axis(keys: list) -> tuple[list[str], list[str], list[str]]:
+    """Oylar o'qi uchun yozuvlar: qisqa nom ("Mar"), ostidagi yil (birinchi ustunda va har
+    yanvarda) va to'liq nom ("Mart 2026")."""
+    short, years, full = [], [], []
+    for i, key in enumerate(keys):
+        if not key or key == (0, 0):
+            short.append("—")
+            years.append("")
+            full.append("Sanasi yo'q")
+            continue
+        year, month = key
+        short.append(_UZ_MONTHS_SHORT[month - 1])
+        years.append(str(year) if i == 0 or month == 1 else "")
+        full.append(f"{_UZ_MONTHS[month - 1]} {year}")
+    return short, years, full
+
+
+def _is_partial_month(key, date_to: str) -> bool:
+    """Grafikdagi oxirgi oy hali tugamaganmi? Shunday bo'lsa uning ustuni past chiqadi —
+    bu sotuv tushib ketgani emas, shuning uchun alohida (ochroq) ko'rsatiladi."""
+    if not key or key == (0, 0):
+        return False
+    end = min(date.fromisoformat(date_to[:10]), _today()) if date_to else _today()
+    return (end.year, end.month) == tuple(key) and (end + timedelta(days=1)).month == end.month
 
 
 async def generate_sales_report(date_from: str = "", date_to: str = "") -> str:
@@ -1367,107 +1571,120 @@ async def generate_sales_report(date_from: str = "", date_to: str = "") -> str:
 
     # Mustaqil statistikalarni PARALLEL o'qiymiz. "Top" ro'yxatlar summa bo'yicha
     # saralanadi (ilgari tartibsiz birinchi 15 ta guruh olinardi — ular eng yiriklari emas edi).
-    monthly, by_partner, by_product, by_seller, currency_note = await asyncio.gather(
+    monthly, by_partner, by_product, by_seller, (currency, currency_note) = await asyncio.gather(
         _rg("sale.order", domain, ["amount_total", "amount_tax"], "date_order:month"),
         _rg("sale.order", domain, ["amount_total"], "partner_id", limit=15, orderby="amount_total desc"),
         _rg("sale.order.line", _sale_line_domain(date_from, date_to),
             ["price_subtotal", "product_uom_qty"], "product_id", limit=15, orderby="price_subtotal desc"),
         _rg("sale.order", domain, ["amount_total"], "user_id", limit=10, orderby="amount_total desc"),
-        _single_currency_note("sale.order", domain),
+        _currency_info("sale.order", domain),
     )
 
     total_orders = sum(_group_count(m, "date_order:month") for m in monthly)
     total_amount = sum(m.get("amount_total") or 0 for m in monthly)
     total_tax = sum(m.get("amount_tax") or 0 for m in monthly)
 
-    month_labels = [_month_label(m, "date_order:month") for m in monthly]
-    month_values = [round(m.get("amount_total") or 0) for m in monthly]
+    keys = [_month_key(m, "date_order:month") for m in monthly]
+    short, years, full = _month_axis(keys)
+    amounts = [round(m.get("amount_total") or 0) for m in monthly]
 
-    def top(rows: list[dict], field: str, measure: str, n: int) -> tuple[list[str], list]:
-        return ([_m2o_name(r.get(field))[:40] for r in rows[:n]],
-                [round(r.get(measure) or 0) for r in rows[:n]])
+    monthly_blocks = []
+    if len(monthly) >= 2:  # bitta oy uchun grafik chizilmaydi — uni kartochkadagi son aytadi
+        monthly_blocks.append(rh.columns(
+            short[-12:], [("Sotuv", amounts[-12:])], titles=full[-12:], sublabels=years[-12:],
+            partial_last=_is_partial_month(keys[-1], date_to),
+        ))
+    monthly_blocks.append(rh.table(
+        ["Oy", "Buyurtmalar", "Sotuv summasi"],
+        [[label, _group_count(m, "date_order:month"), amount] for label, m, amount in zip(full, monthly, amounts)],
+    ))
 
-    partner_labels, partner_values = top(by_partner, "partner_id", "amount_total", 10)
-    product_labels, product_values = top(by_product, "product_id", "price_subtotal", 10)
-    seller_labels, seller_values = top(by_seller, "user_id", "amount_total", 8)
-
-    charts = rh.Charts()
     body = "\n".join([
-        rh.section(
-            "Oylik sotuv dinamikasi",
-            charts.add(month_labels, month_values, label="Sotuv"),
-            rh.table(["Oy", "Buyurtmalar", "Sotuv summasi"],
-                     [[lb, _group_count(m, "date_order:month"), val]
-                      for lb, m, val in zip(month_labels, monthly, month_values)]),
+        rh.card("Oylik sotuv dinamikasi", *monthly_blocks),
+        rh.grid(
+            rh.card("Eng yirik mijozlar", rh.table(
+                ["Mijoz", "Buyurtmalar", "Summa"],
+                [[_m2o_name(p.get("partner_id")), _group_count(p, "partner_id"),
+                  round(p.get("amount_total") or 0)] for p in by_partner],
+                numbered=True, bar_col=2), sub="sotuv summasi bo'yicha"),
+            rh.card("Eng ko'p sotilgan mahsulotlar", rh.table(
+                ["Mahsulot", "Miqdori", "Summa"],
+                [[_m2o_name(p.get("product_id")), round(p.get("product_uom_qty") or 0),
+                  round(p.get("price_subtotal") or 0)] for p in by_product],
+                numbered=True, bar_col=2), sub="sotuv summasi bo'yicha"),
         ),
-        rh.section(
-            "Top mijozlar",
-            charts.add(partner_labels, partner_values, horizontal=True, color="#f472b6", label="Summa"),
-            rh.table(["Mijoz", "Buyurtmalar", "Summa"],
-                     [[_m2o_name(p.get("partner_id")), _group_count(p, "partner_id"),
-                       round(p.get("amount_total") or 0)] for p in by_partner], numbered=True),
-        ),
-        rh.section(
-            "Top mahsulotlar",
-            charts.add(product_labels, product_values, horizontal=True, color="#22d3ee", label="Summa"),
-            rh.table(["Mahsulot", "Miqdori", "Summa"],
-                     [[_m2o_name(p.get("product_id")), round(p.get("product_uom_qty") or 0),
-                       round(p.get("price_subtotal") or 0)] for p in by_product], numbered=True),
-        ),
-        rh.section(
-            "Sotuvchilar reytingi",
-            charts.add(seller_labels, seller_values, kind="doughnut"),
-            rh.table(["Sotuvchi", "Buyurtmalar", "Summa"],
-                     [[_m2o_name(s.get("user_id"), "Biriktirilmagan"), _group_count(s, "user_id"),
-                       round(s.get("amount_total") or 0)] for s in by_seller], numbered=True),
-        ),
+        rh.card("Sotuvchilar reytingi", rh.table(
+            ["Sotuvchi", "Buyurtmalar", "Summa"],
+            [[_m2o_name(s.get("user_id"), "Biriktirilmagan"), _group_count(s, "user_id"),
+              round(s.get("amount_total") or 0)] for s in by_seller],
+            numbered=True, bar_col=2)),
         rh.note(currency_note),
     ])
 
+    title = "Sotuv hisoboti"
     page = rh.page(
-        title="Sotuv hisoboti", subtitle=_period_label(date_from, date_to),
-        cards=[rh.card("Jami buyurtmalar", rh.fmt_int(total_orders)),
-               rh.card("Jami sotuv", rh.fmt_num(total_amount)),
-               rh.card("O'rtacha buyurtma", rh.fmt_num(total_amount / total_orders if total_orders else 0)),
-               *([rh.card("Soliq", rh.fmt_num(total_tax))] if total_tax else [])],
-        body=body, charts=charts,
+        title=title, subtitle=_subtitle(date_from, date_to, currency),
+        tiles_html=rh.tiles(
+            rh.tile("Jami sotuv", rh.fmt_num(total_amount), currency, hero=True),
+            rh.tile("Buyurtmalar", rh.fmt_int(total_orders), "tasdiqlangan"),
+            rh.tile("O'rtacha buyurtma", rh.fmt_num(total_amount / total_orders if total_orders else 0), currency),
+            rh.tile("Soliq", rh.fmt_num(total_tax), currency) if total_tax else "",
+        ),
+        body=body,
     )
-    filename = f"sales_{uuid.uuid4().hex[:12]}.html"
+    filename = _report_file(title)
     (REPORTS_DIR / filename).write_text(page, encoding="utf-8")
     return _report_url(filename)
 
 
 async def generate_invoice_report(date_from: str = "", date_to: str = "") -> str:
     """Schyot-faktura hisoboti — HTML report."""
-    from app.services.claude_report import generate_report_link
-
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     domain = ([["move_type", "=", "out_invoice"], ["state", "=", "posted"]]
               + _date_bounds("invoice_date", date_from, date_to))
-    stats = await _rg("account.move", domain, ["amount_total", "amount_residual"], "invoice_date:month")
-
-    rows = []
-    for s in stats:
-        total = round(s.get("amount_total") or 0)
-        residual = round(s.get("amount_residual") or 0)
-        rows.append({
-            "oy": _month_label(s, "invoice_date:month"),
-            "soni": _group_count(s, "invoice_date:month"),
-            "jami": total,
-            "tolangan": total - residual,
-            "qarz": residual,
-        })
-    if not rows:
+    stats, (currency, currency_note) = await asyncio.gather(
+        _rg("account.move", domain, ["amount_total", "amount_residual"], "invoice_date:month"),
+        _currency_info("account.move", domain),
+    )
+    if not stats:
         return "Bu davr uchun faktura ma'lumotlari topilmadi."
 
-    link = generate_report_link(
-        title=f"Faktura hisoboti ({_period_label(date_from, date_to)})",
-        description="Mijozlarga yozilgan schyot-fakturalar, to'lovlar va qarzdorlik",
-        rows=rows,
-        columns=[("oy", "Oy"), ("soni", "Fakturalar soni"), ("jami", "Jami summa"),
-                 ("tolangan", "To'langan"), ("qarz", "Qarz")],
-        numeric=["soni", "jami", "tolangan", "qarz"],
+    keys = [_month_key(s, "invoice_date:month") for s in stats]
+    short, years, full = _month_axis(keys)
+    counts = [_group_count(s, "invoice_date:month") for s in stats]
+    totals = [round(s.get("amount_total") or 0) for s in stats]
+    debts = [round(s.get("amount_residual") or 0) for s in stats]
+    paid = [t - d for t, d in zip(totals, debts)]
+    total, debt = sum(totals), sum(debts)
+
+    charts = [rh.card("To'lov holati", rh.meter(total - debt, total, "To'langan", "Qarz"),
+                      sub="yozilgan fakturalardan")]
+    if len(stats) >= 2:
+        charts.append(rh.card("Oylar bo'yicha", rh.columns(
+            short[-12:], [("To'langan", paid[-12:]), ("Qarz", debts[-12:])],
+            titles=full[-12:], sublabels=years[-12:])))
+    body = "\n".join([
+        rh.grid(*charts),
+        rh.card("Oylar kesimida", rh.table(
+            ["Oy", "Fakturalar soni", "Jami summa", "To'langan", "Qarz"],
+            [list(row) for row in zip(full, counts, totals, paid, debts)])),
+        rh.note(currency_note),
+    ])
+
+    title = "Faktura hisoboti"
+    page = rh.page(
+        title=title, subtitle=_subtitle(date_from, date_to, currency),
+        tiles_html=rh.tiles(
+            rh.tile("Yozilgan fakturalar", rh.fmt_num(total), currency, hero=True),
+            rh.tile("Fakturalar soni", rh.fmt_int(sum(counts)), "mijozlarga yozilgan"),
+            rh.tile("To'langan", rh.fmt_num(total - debt), rh.fmt_pct(total - debt, total)),
+            rh.tile("Qarz", rh.fmt_num(debt), rh.fmt_pct(debt, total)),
+        ),
+        body=body,
     )
-    return link or "Hisobot yaratilmadi."
+    filename = _report_file(title)
+    (REPORTS_DIR / filename).write_text(page, encoding="utf-8")
+    return _report_url(filename)
 
 
 async def generate_task_report() -> str:
@@ -1482,7 +1699,8 @@ async def generate_task_report() -> str:
     link = generate_report_link(
         title="Vazifalar hisoboti",
         description="Vazifalar holatlari bo'yicha",
-        rows=rows, columns=[("holat", "Holat"), ("soni", "Soni")], numeric=["soni"],
+        rows=rows, columns=[("holat", "Holat"), ("soni", "Vazifalar soni")], numeric=["soni"],
+        count_rows=False,
     )
     return link or "Hisobot yaratilmadi."
 
@@ -1509,13 +1727,13 @@ async def generate_company_report(date_from: str = "", date_to: str = "") -> str
     invoice_domain = ([["move_type", "=", "out_invoice"], ["state", "=", "posted"]]
                       + _date_bounds("invoice_date", date_from, date_to))
 
-    sales, invoices, tasks, crm, emp_count, currency_note = await asyncio.gather(
+    sales, invoices, tasks, crm, emp_count, (currency, currency_note) = await asyncio.gather(
         _rg("sale.order", sales_domain, ["amount_total"], "date_order:month"),
         _rg("account.move", invoice_domain, ["amount_total", "amount_residual"], "invoice_date:month"),
         _task_state_groups(),
         _rg("crm.lead", [], ["id:count"], "stage_id"),
         _count("hr.employee", [["active", "=", True]]),
-        _single_currency_note("sale.order", sales_domain),
+        _currency_info("sale.order", sales_domain),
     )
 
     total_sales = sum(s.get("amount_total") or 0 for s in sales)
@@ -1523,57 +1741,68 @@ async def generate_company_report(date_from: str = "", date_to: str = "") -> str
     total_invoiced = sum(i.get("amount_total") or 0 for i in invoices)
     total_residual = sum(i.get("amount_residual") or 0 for i in invoices)
     total_crm = sum(_group_count(c, "stage_id") for c in crm)
+    open_tasks = sum(t["soni"] for t in tasks if t["holat"] not in ("1_done", "1_canceled"))
 
     # Oylar kesimi: sotuv va fakturalar bitta jadvalda
     months: dict[tuple, dict] = {}
     for s in sales:
         key = _month_key(s, "date_order:month") or (0, 0)
-        months.setdefault(key, {"label": _month_label(s, "date_order:month")}).update(
+        months.setdefault(key, {}).update(
             orders=_group_count(s, "date_order:month"), sales=round(s.get("amount_total") or 0))
     for i in invoices:
         key = _month_key(i, "invoice_date:month") or (0, 0)
-        months.setdefault(key, {"label": _month_label(i, "invoice_date:month")}).update(
+        months.setdefault(key, {}).update(
             invoiced=round(i.get("amount_total") or 0), residual=round(i.get("amount_residual") or 0))
-    ordered = [months[k] for k in sorted(months)]
+    keys = sorted(months)
+    short, years, full = _month_axis(keys)
+    ordered = [months[k] for k in keys]
 
-    charts = rh.Charts()
-    recent = ordered[-12:]
+    sales_keys = [k for k in keys if "sales" in months[k]]
+    sales_card = ""
+    if len(sales_keys) >= 2:  # bitta oy uchun grafik chizilmaydi — uni kartochkadagi son aytadi
+        chart_keys = sales_keys[-12:]
+        c_short, c_years, c_full = _month_axis(chart_keys)
+        sales_card = rh.card("Oylik sotuv", rh.columns(
+            c_short, [("Sotuv", [months[k]["sales"] for k in chart_keys])],
+            titles=c_full, sublabels=c_years,
+            partial_last=_is_partial_month(chart_keys[-1], date_to),
+        ), sub="tasdiqlangan buyurtmalar summasi")
+
     body = "\n".join([
-        rh.row(
-            rh.section("Oylik sotuv", charts.add([m["label"] for m in recent],
-                                                 [m.get("sales", 0) for m in recent], label="Sotuv")),
-            rh.section("Vazifalar holati (hozirgi)", charts.add([t["nomi"] for t in tasks],
-                                                                [t["soni"] for t in tasks], kind="doughnut")),
+        sales_card,
+        rh.grid(
+            rh.card("Fakturalar to'lovi",
+                    rh.meter(total_invoiced - total_residual, total_invoiced, "To'langan", "Qarz"),
+                    sub="davr ichida yozilgan fakturalardan"),
+            rh.card("Vazifalar holati", rh.hbars([t["nomi"] for t in tasks], [t["soni"] for t in tasks]),
+                    sub="hozirgi holat"),
+            rh.card("CRM bosqichlari",
+                    rh.hbars([_m2o_name(c.get("stage_id"), "Bosqichsiz") for c in crm[:8]],
+                             [_group_count(c, "stage_id") for c in crm[:8]]),
+                    sub=f"hozirgi holat · jami {rh.fmt_int(total_crm)} ta lid"),
         ),
-        rh.row(
-            rh.section("CRM bosqichlari (hozirgi)",
-                       charts.add([_m2o_name(c.get("stage_id"), "Bosqichsiz")[:30] for c in crm[:8]],
-                                  [_group_count(c, "stage_id") for c in crm[:8]],
-                                  horizontal=True, color="#a855f7", label="Soni")),
-            rh.section("Fakturalar", charts.add(["Jami yozilgan", "To'lanmagan qarz"],
-                                                [round(total_invoiced), round(total_residual)],
-                                                color="#34d399")),
-        ),
-        rh.section(
-            "Oylar kesimida",
-            rh.table(["Oy", "Buyurtmalar", "Sotuv", "Fakturalar", "Qarz"],
-                     [[m["label"], m.get("orders", 0), m.get("sales", 0),
-                       m.get("invoiced", 0), m.get("residual", 0)] for m in ordered]),
-            rh.note(currency_note),
-        ),
+        rh.card("Oylar kesimida", rh.table(
+            ["Oy", "Buyurtmalar", "Sotuv", "Fakturalar", "Qarz"],
+            [[label, m.get("orders", 0), m.get("sales", 0), m.get("invoiced", 0), m.get("residual", 0)]
+             for label, m in zip(full, ordered)])),
+        rh.note(currency_note),
     ])
 
+    title = "Kompaniya statistikasi"
     page = rh.page(
-        title="Kompaniya to'liq statistikasi", subtitle=_period_label(date_from, date_to),
-        cards=[rh.card("Jami sotuv", rh.fmt_num(total_sales)),
-               rh.card("Buyurtmalar", rh.fmt_int(total_orders)),
-               rh.card("Fakturalar", rh.fmt_num(total_invoiced)),
-               rh.card("Qarz", rh.fmt_num(total_residual)),
-               rh.card("CRM lidlar", rh.fmt_int(total_crm)),
-               rh.card("Xodimlar", rh.fmt_int(emp_count))],
-        body=body, charts=charts,
+        title=title, subtitle=_subtitle(date_from, date_to, currency),
+        tiles_html=rh.tiles(
+            rh.tile("Jami sotuv", rh.fmt_num(total_sales),
+                    f"{rh.fmt_int(total_orders)} ta buyurtma" + (f" · {currency}" if currency else ""), hero=True),
+            rh.tile("Fakturalar", rh.fmt_num(total_invoiced), "mijozlarga yozilgan"),
+            rh.tile("To'lanmagan qarz", rh.fmt_num(total_residual),
+                    f"yozilgan fakturalarning {rh.fmt_pct(total_residual, total_invoiced)}" if total_invoiced else ""),
+            rh.tile("Ochiq vazifalar", rh.fmt_int(open_tasks), f"jami {rh.fmt_int(sum(t['soni'] for t in tasks))} ta"),
+            rh.tile("Xodimlar", rh.fmt_int(emp_count), "faol"),
+        ),
+        body=body,
     )
-    filename = f"company_{uuid.uuid4().hex[:12]}.html"
+    filename = _report_file(title)
     (REPORTS_DIR / filename).write_text(page, encoding="utf-8")
     return _report_url(filename)
 
