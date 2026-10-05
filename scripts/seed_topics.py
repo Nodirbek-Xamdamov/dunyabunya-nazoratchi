@@ -9,6 +9,10 @@ YOKI mavjud "topics" qatorlarini UPDATE qilish uchun to'g'ridan-to'g'ri SQL (qay
 tushirishda INSERT unique constraint'ga urilib ketadi — 2026-09-22'dagi migratsiyada shunday
 qilingan, pastdagi SEED_TOPICS shunchaki HUJJAT sifatida saqlanadi).
 
+Odoo almashgandan keyin moslikni tekshirish va tuzatish uchun: `python scripts/check_topics.py`
+(`--fix` bilan — topiklarni o'z nomidagi Odoo loyihasiga qayta ulaydi). Bot ham har ishga
+tushganda shu moslikni tekshirib, xato bo'lsa logga ERROR yozadi.
+
 Tarix: 2026-08-26 — hasanxojayev-odoo-prod-35427738 (ID'lar 33-40).
        2026-09-22 — CEO PostgreSQL'ni qayta o'rnatib (v16→v17), Odoo'ni ham yangi
        instansiyaga (jonibekodoo-dunyabunya-prod-prod-26530779) ko'chirdi. Eski baza

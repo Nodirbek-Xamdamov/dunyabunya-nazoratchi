@@ -390,3 +390,14 @@ async def test_format_button_with_unreachable_odoo_shows_reason_once(monkeypatch
 
     texts = [m["text"] for m in bot.sent]
     assert len(texts) == 1 and "Sabab: DNS xatosi" in texts[0]
+
+
+async def test_send_result_keeps_the_rest_of_the_answer_when_link_is_removed(tmp_path):
+    """Havola olib tashlangach "Hisobot tayyorlandi:" yarim jumla bo'lib osilib qolmasligi kerak."""
+    f = _file(tmp_path)
+    result = AssistantResult(text=f"Hisobot tayyorlandi: {f.url}\n\nJami 188 ta xodim.", files=[f])
+    bot = _FakeBot()
+    await delivery.send_result(bot, 1, None, result)
+
+    assert [m["text"] for m in bot.sent] == ["Hisobot tayyorlandi.\n\nJami 188 ta xodim."]
+    assert len(bot.docs) == 1

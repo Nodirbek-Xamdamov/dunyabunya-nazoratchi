@@ -243,7 +243,13 @@ async def send_result(bot: Bot, chat_id: int, thread_id: int | None,
         if f.url and f.url in text:
             text = text.replace(f.url, "")
     if text != result.text:
-        text = re.sub(r"(Hisobot tayyorlandi:?\s*|Hisobot tayyor:?\s*)+$", "", text).strip(" \n\u2060")
+        # Havola olib tashlangach "Hisobot tayyorlandi:" yarim jumla bo'lib qoladi \u2014 matn
+        # o'rtasida bo'lsa nuqta bilan yakunlanadi, javob faqat shundan iborat bo'lsa
+        # umuman yuborilmaydi (fayl nomining o'zi yetarli)
+        text = re.sub(r"(Hisobot tayyor(?:landi)?)\s*:[ \t]*(?=\n|$)", r"\1.", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip(" \n\u2060")
+        if re.fullmatch(r"(?:Hisobot tayyor(?:landi)?\.?\s*)+", text):
+            text = ""
 
     markup_on_files = reply_markup if result.files else None
     markup_on_texts = reply_markup if result.texts and not result.files else None

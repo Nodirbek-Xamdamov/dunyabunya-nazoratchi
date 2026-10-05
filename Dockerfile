@@ -15,6 +15,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# PDF hisobotlar uchun Unicode shrift (kirill va o'zbek harflari) — app/services/pdf_documents.py
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core && \
+    rm -rf /var/lib/apt/lists/*
+
 # Create non-root user
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
 
@@ -28,8 +32,8 @@ COPY scripts ./scripts
 COPY tests ./tests
 COPY pytest.ini ./pytest.ini
 
-# Create storage directories
-RUN mkdir -p /app/storage/reports && chown -R appuser:appuser /app/storage
+# Create storage and log directories
+RUN mkdir -p /app/storage/reports /app/logs && chown -R appuser:appuser /app/storage /app/logs
 
 USER appuser
 

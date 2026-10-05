@@ -605,6 +605,18 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
         await _register_employee_by_name(message, user_id)
         return
 
+    # Kim yozayotgani ovozni matnga o'girishdan OLDIN aniqlanadi — begona odamning ovozli
+    # xabarlari uchun pullik transkripsiya (OpenAI) chaqirilmaydi
+    is_ceo = _is_ceo(user_id, message.from_user.username)
+    manager = None if is_ceo else await _resolve_manager(message)
+    if not is_ceo and manager is None:
+        # Yordamchi faqat CEO va menejerlar uchun. Ro'yxatdan o'tmagan odamga nima qilish
+        # kerakligi aytiladi (bot qayta ishga tushsa "ism kutilmoqda" holati unutiladi va
+        # ismini yozgan odam javobsiz qolib ketardi).
+        if await employee_store.get_employee_by_telegram_id(user_id) is None:
+            await message.answer("Ro'yxatdan o'tish uchun /start buyrug'ini yuboring.")
+        return
+
     text = await get_message_text(message, bot)
     if not text:
         if message.voice:
@@ -615,7 +627,7 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
         return
 
     # 2) CEO — to'liq yordamchi (barcha bo'limlar)
-    if _is_ceo(user_id, message.from_user.username):
+    if is_ceo:
         try:
             result = await _ask_assistant(message, text, Role.CEO)
         except Exception as e:
@@ -626,9 +638,6 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
         return
 
     # 3) Menejer — faqat o'z bo'limi (role-based assistant)
-    manager = await _resolve_manager(message)
-    if manager is None:
-        return
 
     role_map = {
         "Moliya": Role.MOLIYA,
