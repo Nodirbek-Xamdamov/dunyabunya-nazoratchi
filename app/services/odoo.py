@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import logging
+import random
 import socket
 import ssl
 import threading
@@ -46,8 +48,29 @@ _task_state_meta_cache: dict | None = None
 
 # Odoo'ga parallel so'rovlar chegarasi — server'ni urib yubormaslik uchun.
 # Har update alohida task bo'lgani uchun (parallel polling), XML-RPC chaqiruvlari
-# ham bir vaqtda ko'payishi mumkin — semaphore buni cheklaydi.
-_ODOO_MAX_CONCURRENCY = 8
+# ham bir vaqtda ko'payishi mumkin. Chegara BITTA Odoo manzili uchun umumiy (ilgari har
+# OdooClient nusxasining o'z chegarasi bor edi — amalda 8 emas, 40+ parallel so'rov ketardi;
+# yuklama testida Odoo 503 qaytara boshlagan).
+_semaphores: dict[tuple[str, int], asyncio.Semaphore] = {}
+
+# Faqat o'qiydigan metodlar — vaqtinchalik xatoda (503, uzilgan ulanish) xavfsiz qayta
+# uriniladi. Yozuvchi metodlar (create/write/unlink) qayta urinilmaydi: so'rov Odoo'ga
+# yetib borgan-bormagani noma'lum bo'lsa, takrorlash vazifani ikki marta yaratib qo'yishi mumkin.
+_READ_METHODS = frozenset({"search_read", "read", "read_group", "search_count", "search",
+                           "fields_get", "name_search", "name_get"})
+_READ_RETRIES = 2
+_RETRY_BASE_SECONDS = 0.6
+_TRANSIENT_HTTP = frozenset({429, 502, 503, 504})
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Birozdan keyin o'zi o'tib ketadigan xatomi (server band, ulanish uzildi)?
+    DNS, timeout, rad etilgan ulanish va 4xx bunga kirmaydi — ularni takrorlash foydasiz."""
+    if isinstance(exc, xmlrpc.client.ProtocolError):
+        return exc.errcode in _TRANSIENT_HTTP
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return True
+    return isinstance(exc, http.client.HTTPException)
 
 
 class OdooError(Exception):
@@ -58,9 +81,10 @@ class OdooError(Exception):
     qabul qilib, o'zi rad etgan bo'lsa (XML-RPC Fault — noto'g'ri field va h.k.) None.
     Xabar matni foydalanuvchiga ko'rsatishga yaroqli (aniq sabab, o'zbek tilida)."""
 
-    def __init__(self, message: str, *, kind: str | None = None):
+    def __init__(self, message: str, *, kind: str | None = None, transient: bool = False):
         super().__init__(message)
         self.kind = kind
+        self.transient = transient  # qayta urinish yordam berishi mumkin (server vaqtincha band)
 
 
 # Aloqa xatosi turiga qarab "nima qilish kerak" tavsiyasi (foydalanuvchiga ko'rsatiladi)
@@ -104,6 +128,9 @@ def _describe_connection_error(exc: BaseException, host: str, timeout: float) ->
         else:
             reason = f"Odoo serveri kutilmagan javob qaytardi (HTTP {code} {exc.errmsg})"
         return "http", reason
+    if isinstance(exc, http.client.HTTPException):
+        # BadStatusLine, RemoteDisconnected, IncompleteRead... — server javobni buzib/uzib yubordi
+        return "network", "Odoo serveri javobi uzilib qoldi — server band yoki qayta ishga tushmoqda"
     if isinstance(exc, socket.gaierror):
         return "dns", (f"Odoo manzili ({host}) internetda topilmadi (DNS xatosi) — server "
                        f"o'chirilgan, qayta qurilgan yoki manzili o'zgargan")
@@ -168,8 +195,6 @@ class OdooClient:
         self.api_key = api_key
         self.timeout = timeout
         self._local = threading.local()
-        # Barcha execute_kw chaqiruvlari orqali o'tadigan semaphore
-        self._semaphore = asyncio.Semaphore(_ODOO_MAX_CONCURRENCY)
 
     def _make_transport(self):
         # Timeout'ni haqiqiy socket ulanishiga o'rnatish uchun maxsus Transport kerak —
@@ -196,7 +221,13 @@ class OdooClient:
 
     def _connection_error(self, exc: BaseException) -> OdooError:
         kind, reason = _describe_connection_error(exc, self.host, self.timeout)
-        return OdooError(reason, kind=kind)
+        return OdooError(reason, kind=kind, transient=_is_transient(exc))
+
+    def _drop_connections(self) -> None:
+        """Shu oqimdagi ochiq ulanishlarni tashlaydi — buzilgan javobdan keyin eski ulanish
+        qayta ishlatilmasin (keyingi chaqiriq yangisini ochadi)."""
+        self._local.common_proxy = None
+        self._local.object_proxy = None
 
     def _get_uid(self) -> int:
         # UID thread-local — parallel to_thread chaqiruvlarida race bo'lmasligi uchun
@@ -204,7 +235,7 @@ class OdooClient:
         if uid is None:
             try:
                 uid = self._common_proxy().authenticate(self.db, self.login, self.api_key, {})
-            except (OSError, xmlrpc.client.ProtocolError) as exc:
+            except (OSError, xmlrpc.client.ProtocolError, http.client.HTTPException) as exc:
                 # OSError: DNS, timeout, rad etilgan ulanish, SSL... — har biri o'z sababi bilan
                 raise self._connection_error(exc) from exc
             except xmlrpc.client.Fault as exc:
@@ -217,25 +248,45 @@ class OdooClient:
         return uid
 
     def _execute_kw_sync(self, model: str, method: str, args: list, kwargs: dict | None = None) -> Any:
-        kwargs = kwargs or {}
+        """Bitta Odoo chaqiruvi. O'qish so'rovlari vaqtinchalik xatoda (server band — 503,
+        ulanish uzildi) qisqa tanaffus bilan qayta uriniladi; yozish so'rovlari — yo'q."""
+        retries = _READ_RETRIES if method in _READ_METHODS else 0
+        for attempt in range(retries + 1):
+            try:
+                return self._execute_once(model, method, args, kwargs or {})
+            except OdooError as exc:
+                if not exc.transient or attempt >= retries:
+                    raise
+                log.warning("Odoo %s.%s vaqtinchalik xato (%s) — %d-qayta urinish", model, method, exc, attempt + 1)
+                self._drop_connections()
+                time.sleep(_RETRY_BASE_SECONDS * (attempt + 1) + random.random() * _RETRY_BASE_SECONDS)
+
+    def _execute_once(self, model: str, method: str, args: list, kwargs: dict) -> Any:
         uid = self._get_uid()
         try:
             return self._object_proxy().execute_kw(self.db, uid, self.api_key, model, method, args, kwargs)
-        except OSError as exc:
-            # Ulanish xatosi (timeout, DNS...) — qayta urinish yordam bermaydi, darhol
-            # aniq sabab bilan chiqamiz (aks holda chaqiruvchi abadiy kutib qolardi)
+        except (OSError, http.client.HTTPException) as exc:
+            # Ulanish xatosi (timeout, DNS, uzilgan javob...) — aniq sabab bilan chiqamiz
+            # (aks holda chaqiruvchi abadiy kutib qolardi)
             raise self._connection_error(exc) from exc
-        except (xmlrpc.client.Fault, xmlrpc.client.ProtocolError):
-            # Autentifikatsiya eskirgan bo'lishi mumkin — qayta kirib urinamiz
-            self._local.uid = None
-            uid = self._get_uid()
-            try:
-                return self._object_proxy().execute_kw(self.db, uid, self.api_key, model, method, args, kwargs)
-            except (OSError, xmlrpc.client.ProtocolError) as exc2:
-                raise self._connection_error(exc2) from exc2
-            except xmlrpc.client.Fault as exc2:
-                # Fault matni — butun Python traceback; foydalanuvchiga faqat mazmunli oxirgi qatori
-                raise OdooError(f"Odoo so'rovni rad etdi: {_fault_summary(exc2)}") from exc2
+        except xmlrpc.client.ProtocolError as exc:
+            if exc.errcode in _TRANSIENT_HTTP:
+                raise self._connection_error(exc) from exc  # server band — tashqi tsikl qayta urinadi
+            return self._retry_after_login(model, method, args, kwargs)
+        except xmlrpc.client.Fault:
+            return self._retry_after_login(model, method, args, kwargs)
+
+    def _retry_after_login(self, model: str, method: str, args: list, kwargs: dict) -> Any:
+        # Autentifikatsiya eskirgan bo'lishi mumkin — qayta kirib bir marta urinamiz
+        self._local.uid = None
+        uid = self._get_uid()
+        try:
+            return self._object_proxy().execute_kw(self.db, uid, self.api_key, model, method, args, kwargs)
+        except (OSError, xmlrpc.client.ProtocolError, http.client.HTTPException) as exc2:
+            raise self._connection_error(exc2) from exc2
+        except xmlrpc.client.Fault as exc2:
+            # Fault matni — butun Python traceback; foydalanuvchiga faqat mazmunli oxirgi qatori
+            raise OdooError(f"Odoo so'rovni rad etdi: {_fault_summary(exc2)}") from exc2
 
     def _diagnose_sync(self) -> dict:
         """Odoo bilan aloqani JONLI tekshiradi — keshlangan uid/ulanish ishlatilmaydi,
@@ -247,7 +298,7 @@ class OdooClient:
                                                transport=self._make_transport())
             info["odoo_versiya"] = (common.version() or {}).get("server_version")
             uid = common.authenticate(self.db, self.login, self.api_key, {})
-        except (OSError, xmlrpc.client.ProtocolError) as exc:
+        except (OSError, xmlrpc.client.ProtocolError, http.client.HTTPException) as exc:
             kind, reason = _describe_connection_error(exc, self.host, self.timeout)
             info.update(xato_turi=kind, sabab=reason, tavsiya=connection_hint(kind))
             return info
@@ -266,8 +317,16 @@ class OdooClient:
     async def diagnose(self) -> dict:
         return await asyncio.to_thread(self._diagnose_sync)
 
+    def _shared_semaphore(self) -> asyncio.Semaphore:
+        """Shu Odoo manzili uchun umumiy chegara (har event loop'ga alohida — testlar uchun)."""
+        key = (self.url, id(asyncio.get_running_loop()))
+        semaphore = _semaphores.get(key)
+        if semaphore is None:
+            semaphore = _semaphores[key] = asyncio.Semaphore(max(1, settings.ODOO_MAX_CONCURRENCY))
+        return semaphore
+
     async def execute_kw(self, model: str, method: str, args: list, kwargs: dict | None = None) -> Any:
-        async with self._semaphore:
+        async with self._shared_semaphore():
             return await asyncio.to_thread(self._execute_kw_sync, model, method, args, kwargs)
 
     @staticmethod

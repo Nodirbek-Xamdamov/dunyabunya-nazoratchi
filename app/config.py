@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     ODOO_LOGIN: str = Field(validation_alias=AliasChoices("ODOO_LOGIN", "ODOO_USERNAME"))
     ODOO_API_KEY: str
     ODOO_TIMEOUT_SECONDS: int = 30
+    # Odoo'ga bir vaqtda yuboriladigan so'rovlar chegarasi (ortiqchasi navbatda kutadi).
+    # Yuklama testida 8 ta parallel so'rov Odoo.sh sinov bazasini 503 ga olib kelgan; 4 — xavfsiz.
+    ODOO_MAX_CONCURRENCY: int = 4
 
     # PostgreSQL
     DATABASE_URL: str

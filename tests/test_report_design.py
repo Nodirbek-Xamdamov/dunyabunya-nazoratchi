@@ -99,7 +99,7 @@ def test_generic_report_skips_the_lone_count_tile_and_names_the_file_readably(tm
                                              columns=[("name", "Xodim nomi"), ("phone", "Telefon")])
 
     filename = url.rsplit("/", 1)[-1]
-    assert re.fullmatch(r"xodimlar_royxati_[0-9a-f]{12}\.html", filename)
+    assert re.fullmatch(r"xodimlar_royxati_[0-9a-f]{16}\.html", filename)
     page = (tmp_path / filename).read_text(encoding="utf-8")
     assert 'class="tile' not in page  # yozuvlar soni sarlavha ostida — alohida kartochka kerak emas
     assert 'type="search"' in page

@@ -467,3 +467,106 @@ def test_status_text_warns_about_test_odoo_and_outages():
 
 def test_code_version_is_reported():
     assert isinstance(runtime.code_version(), str) and runtime.code_version()
+
+
+# ── Odoo vaqtincha band bo'lsa (yuklama testida topilgan: 30 parallel so'rovda HTTP 503) ──
+
+class _FlakyProxy:
+    """Birinchi `failures` ta chaqiriqda berilgan xatoni tashlaydi, keyin javob qaytaradi."""
+
+    def __init__(self, error, failures):
+        self.error, self.failures, self.calls = error, failures, 0
+
+    def execute_kw(self, *args):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.error
+        return [{"id": 1}]
+
+
+def _client_with(proxy, monkeypatch):
+    from app.services.odoo import OdooClient
+
+    client = OdooClient(url="https://odoo.example.com", db="db", login="u", api_key="k", timeout=5)
+    monkeypatch.setattr(client, "_get_uid", lambda: 2)
+    monkeypatch.setattr(client, "_object_proxy", lambda: proxy)
+    return client
+
+
+def _busy():
+    import xmlrpc.client
+    return xmlrpc.client.ProtocolError("odoo.example.com/xmlrpc/2/object", 503, "Service Unavailable", {})
+
+
+def test_read_is_retried_when_odoo_is_temporarily_busy(monkeypatch):
+    proxy = _FlakyProxy(_busy(), failures=2)
+    client = _client_with(proxy, monkeypatch)
+    assert client._execute_kw_sync("sale.order", "search_read", [[]]) == [{"id": 1}]
+    assert proxy.calls == 3
+
+
+def test_read_gives_a_clear_error_when_odoo_stays_busy(monkeypatch):
+    proxy = _FlakyProxy(_busy(), failures=99)
+    client = _client_with(proxy, monkeypatch)
+    with pytest.raises(OdooError) as info:
+        client._execute_kw_sync("sale.order", "read_group", [[]])
+    assert proxy.calls == 3 and info.value.kind == "http" and "HTTP 503" in str(info.value)
+
+
+def test_write_is_never_retried_automatically(monkeypatch):
+    """So'rov Odoo'ga yetib borgan-bormagani noma'lum — takrorlash vazifani ikki marta yaratishi mumkin."""
+    proxy = _FlakyProxy(_busy(), failures=1)
+    client = _client_with(proxy, monkeypatch)
+    with pytest.raises(OdooError):
+        client._execute_kw_sync("project.task", "create", [{"name": "Vazifa"}])
+    assert proxy.calls == 1
+
+
+def test_broken_http_response_is_reported_in_plain_words_and_retried(monkeypatch):
+    import http.client
+
+    proxy = _FlakyProxy(http.client.BadStatusLine("<!doctype html>"), failures=99)
+    client = _client_with(proxy, monkeypatch)
+    with pytest.raises(OdooError) as info:
+        client._execute_kw_sync("sale.order", "search_count", [[]])
+    assert proxy.calls == 3 and info.value.kind == "network"
+    assert "javobi uzilib qoldi" in str(info.value) and "doctype" not in str(info.value)
+
+
+def test_permanent_connection_errors_are_not_retried(monkeypatch):
+    import socket
+
+    proxy = _FlakyProxy(socket.gaierror(11001, "getaddrinfo failed"), failures=99)
+    client = _client_with(proxy, monkeypatch)
+    with pytest.raises(OdooError) as info:
+        client._execute_kw_sync("sale.order", "search_read", [[]])
+    assert proxy.calls == 1 and info.value.kind == "dns"
+
+
+async def test_all_clients_of_one_odoo_share_a_single_concurrency_limit(monkeypatch):
+    """Ilgari har OdooClient nusxasining o'z chegarasi bor edi — umumiy parallel so'rovlar
+    soni chegaradan bir necha baravar oshib ketardi."""
+    import asyncio
+    import threading
+
+    from app.services import odoo as odoo_module
+    from app.services.odoo import OdooClient
+
+    monkeypatch.setattr(odoo_module.settings, "ODOO_MAX_CONCURRENCY", 3)
+    state = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def slow_call(self, model, method, args, kwargs=None):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        import time as _time
+        _time.sleep(0.03)
+        with lock:
+            state["now"] -= 1
+        return 1
+
+    monkeypatch.setattr(OdooClient, "_execute_kw_sync", slow_call)
+    clients = [OdooClient(url="https://shared.example.com", db="db", login="u", api_key="k") for _ in range(4)]
+    await asyncio.gather(*(c.execute_kw("sale.order", "search_count", [[]]) for c in clients for _ in range(5)))
+    assert state["peak"] <= 3

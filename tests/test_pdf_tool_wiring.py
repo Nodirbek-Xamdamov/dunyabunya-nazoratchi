@@ -49,7 +49,7 @@ async def test_get_invoice_pdf_writes_real_file_and_returns_url(monkeypatch):
     assert calls == ["account.move", "account.move.line"]
     prefix = f"{odoo_tools.settings.PUBLIC_BASE_URL}/reports/invoice_1_"
     assert url.startswith(prefix) and url.endswith(".pdf")
-    assert re.fullmatch(r"[0-9a-f]{8}", url[len(prefix):-len(".pdf")])
+    assert re.fullmatch(r"[0-9a-f]{16}", url[len(prefix):-len(".pdf")])
     out_path = odoo_tools.REPORTS_DIR / url.rsplit("/", 1)[-1]
     assert out_path.exists()
     assert out_path.stat().st_size > 0

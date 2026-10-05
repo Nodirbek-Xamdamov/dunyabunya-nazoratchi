@@ -50,6 +50,13 @@ def _isolated_metrics(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_odoo_retry_delay(monkeypatch):
+    """Odoo'ning vaqtinchalik xatosida qayta urinishlar orasidagi tanaffus testlarda kutilmaydi."""
+    from app.services import odoo
+    monkeypatch.setattr(odoo, "_RETRY_BASE_SECONDS", 0)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_scheduler_state(tmp_path, monkeypatch):
     """Rejalashtiruvchi "oxirgi bajarilgan sana"si testlarda haqiqiy storage'ga yozilmaydi."""
     from app import scheduler_state

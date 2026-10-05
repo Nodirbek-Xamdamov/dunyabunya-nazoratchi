@@ -33,10 +33,10 @@ _CURRENCY_NAMES = {"UZS": "so'm"}
 
 
 def _unguessable_suffix() -> str:
-    """8 hex-belgili tasodifiy token — hisobot fayl nomlariga qo'shiladi (P0-2:
+    """16 hex-belgili (64 bit) tasodifiy token — hisobot fayl nomlariga qo'shiladi (P0-2:
     Odoo record ID'sini to'g'ridan-to'g'ri fayl nomiga yozish uni taxmin qilib
     topib bo'ladigan qiladi, masalan invoice_123.pdf, invoice_124.pdf, ...)."""
-    return uuid.uuid4().hex[:8]
+    return uuid.uuid4().hex[:16]
 
 
 def _report_url(filename: str) -> str:
@@ -983,7 +983,7 @@ async def export_excel(model: str = "", domain: list | None = None,
         return f"Excel kutubxonasi yo'q: {e}"
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{_export_slug(title)}_{uuid.uuid4().hex[:8]}.xlsx"
+    filename = f"{_export_slug(title)}_{_unguessable_suffix()}.xlsx"
     # Katta faylni yozish soniyalab davom etadi — boshqa foydalanuvchilar kutib qolmasligi uchun alohida oqimda
     await asyncio.to_thread(_write_xlsx, REPORTS_DIR / filename, title, rows, columns, types, total)
     return _export_result(filename, len(rows), total)
@@ -1114,7 +1114,7 @@ async def export_word(model: str = "", domain: list | None = None,
         return f"Word kutubxonasi yo'q: {e}"
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{_export_slug(title)}_{uuid.uuid4().hex[:8]}.docx"
+    filename = f"{_export_slug(title)}_{_unguessable_suffix()}.docx"
     subtitle = f"{len(rows)} ta yozuv • {datetime.now(_TZ).strftime('%Y-%m-%d %H:%M')}"
     await asyncio.to_thread(_write_docx, REPORTS_DIR / filename, title, subtitle, rows, columns)
     return _export_result(filename, len(rows), total)
@@ -1179,7 +1179,7 @@ async def export_pdf(model: str = "", domain: list | None = None,
         return f"PDF kutubxonasi yo'q: {e}"
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{_export_slug(title)}_{uuid.uuid4().hex[:8]}.pdf"
+    filename = f"{_export_slug(title)}_{_unguessable_suffix()}.pdf"
     await asyncio.to_thread(_write_pdf, REPORTS_DIR / filename, title, f"{len(rows)} ta yozuv", rows, columns)
     return _export_result(filename, len(rows), total)
 
@@ -1205,7 +1205,7 @@ async def export_csv(model: str = "", domain: list | None = None,
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{_export_slug(title)}_{uuid.uuid4().hex[:8]}.csv"
+    filename = f"{_export_slug(title)}_{_unguessable_suffix()}.csv"
     await asyncio.to_thread(_write_csv, REPORTS_DIR / filename, rows, columns)
     return _export_result(filename, len(rows), total)
 
@@ -1516,7 +1516,7 @@ _UZ_MONTHS_SHORT = ("Yan", "Fev", "Mar", "Apr", "May", "Iyn", "Iyl", "Avg", "Sen
 def _report_file(title: str) -> str:
     """Hisobot fayli nomi: o'qiladigan nom + taxmin qilib bo'lmaydigan qo'shimcha
     (Telegram'da "Kompaniya Statistikasi.html" bo'lib ko'rinadi)."""
-    return f"{_export_slug(title)}_{uuid.uuid4().hex[:12]}.html"
+    return f"{_export_slug(title)}_{_unguessable_suffix()}.html"
 
 
 async def _currency_info(model: str, domain: list) -> tuple[str, str]:
@@ -1588,15 +1588,25 @@ async def generate_sales_report(date_from: str = "", date_to: str = "") -> str:
     short, years, full = _month_axis(keys)
     amounts = [round(m.get("amount_total") or 0) for m in monthly]
 
+    partial_last = bool(keys) and _is_partial_month(keys[-1], date_to)
     monthly_blocks = []
     if len(monthly) >= 2:  # bitta oy uchun grafik chizilmaydi — uni kartochkadagi son aytadi
         monthly_blocks.append(rh.columns(
             short[-12:], [("Sotuv", amounts[-12:])], titles=full[-12:], sublabels=years[-12:],
-            partial_last=_is_partial_month(keys[-1], date_to),
+            partial_last=partial_last,
         ))
+    # Oldingi oyga nisbatan o'zgarish; tugamagan joriy oy uchun hisoblanmaydi (yolg'on "pasayish" bo'lardi)
+    changes = [""]
+    for i in range(1, len(amounts)):
+        if not amounts[i - 1] or (partial_last and i == len(amounts) - 1):
+            changes.append("oy tugamagan" if partial_last and i == len(amounts) - 1 else "")
+            continue
+        pct = (amounts[i] - amounts[i - 1]) / amounts[i - 1] * 100
+        changes.append(f"{'+' if pct >= 0 else '−'}{abs(pct):.1f}%")
     monthly_blocks.append(rh.table(
-        ["Oy", "Buyurtmalar", "Sotuv summasi"],
-        [[label, _group_count(m, "date_order:month"), amount] for label, m, amount in zip(full, monthly, amounts)],
+        ["Oy", "Buyurtmalar", "Sotuv summasi", "Oldingi oyga nisbatan"],
+        [[label, _group_count(m, "date_order:month"), amount, change]
+         for label, m, amount, change in zip(full, monthly, amounts, changes)],
     ))
 
     body = "\n".join([

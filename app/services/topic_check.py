@@ -58,8 +58,14 @@ async def find_topic_mismatches() -> list[dict]:
             "odoo_project_name": linked_name,
             # Bir xil nomli bir nechta loyiha bo'lsa — qaysi biri to'g'riligini taxmin qilmaymiz
             "correct_project_id": candidates[0] if len(candidates) == 1 else None,
+            "candidates": len(candidates),  # 0 — Odoo'da shu nomli loyiha umuman yo'q
         })
     return mismatches
+
+
+async def create_project(name: str) -> int:
+    """Odoo'da bo'lim loyihasini yaratadi (yangi Odoo bazasiga o'tilganda) va raqamini qaytaradi."""
+    return await _odoo.execute_kw("project.project", "create", [{"name": name}])
 
 
 async def verify_topic_projects(delay_seconds: float = 5.0) -> None:

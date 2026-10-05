@@ -96,6 +96,6 @@ def generate_report_link(*, title: str, description: str, rows: list[dict],
                    wide=len(keys) >= 6)
     # O'qiladigan nom + taxmin qilib bo'lmaydigan qo'shimcha (ilgari fayl Telegram'da
     # "98b45bd5f7714bc9….html" kabi ma'nosiz nom bilan ko'rinardi)
-    filename = f"{rh.slug(title)}_{uuid.uuid4().hex[:12]}.html"
+    filename = f"{rh.slug(title)}_{uuid.uuid4().hex[:16]}.html"
     (REPORTS_DIR / filename).write_text(page, encoding="utf-8")
     return f"{settings.PUBLIC_BASE_URL.rstrip('/')}/reports/{filename}"
