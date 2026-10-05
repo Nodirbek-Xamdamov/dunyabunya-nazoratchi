@@ -414,7 +414,10 @@ async def test_assistant_reply_list_request_offers_excel_html_and_text(monkeypat
 
     markup = bot.sent[-1]["reply_markup"]
     callback_datas = [b.callback_data for row in markup.inline_keyboard for b in row]
-    assert callback_datas == ["fmt:excel:grp-main", "fmt:html:grp-main", "fmt:text:grp-main"]
+    # Kalit: "grp-main-<tasodifiy>" — har javob ostidagi tugmalar o'z savoliga bog'langan
+    assert [c.split(":")[1] for c in callback_datas] == ["excel", "html", "text"]
+    assert len({c.split(":", 2)[2] for c in callback_datas}) == 1
+    assert all(c.split(":", 2)[2].startswith("grp-main-") for c in callback_datas)
 
 
 async def test_assistant_reply_odoo_unreachable_shows_reason_without_buttons(monkeypatch):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 
@@ -42,8 +43,18 @@ _STATS_KEYWORDS = (
     "vazifalar soni", "ochiq vazifa",
 )
 
-# Task selection state: telegram_topic_id -> {"result": AnalyzeResult, "topic": Topic, "users": [...], "reply_thread_id": int}
+# Task selection state: CEO xabarining message_id'si -> {"result": AnalyzeResult, "topic": Topic,
+# "users": [...], "reply_thread_id": int}. Kalit — XABAR (topik emas): ilgari topik bo'yicha
+# saqlanardi va bitta topikdagi ikkinchi vazifa birinchisining tanlovini bosib ketardi —
+# birinchi xabar ostidagi "Ha, topshirish" bosilsa IKKINCHI vazifa birinchi xodimga yozilardi.
 _pending_task_selections: dict[int, dict] = {}
+_PENDING_SELECTIONS_MAX = 200  # javobsiz qolgan tanlovlar xotirada to'planib qolmasligi uchun
+
+
+def _remember_selection(key: int, selection: dict) -> None:
+    while len(_pending_task_selections) >= _PENDING_SELECTIONS_MAX:
+        _pending_task_selections.pop(next(iter(_pending_task_selections)))
+    _pending_task_selections[key] = selection
 
 
 def _log_bg_exc(task: asyncio.Task) -> None:
@@ -177,9 +188,12 @@ async def _send_task_to_employee(bot: Bot, *, task_id: int, title: str, descript
     ])
 
     desc_short = description[:300] + "..." if len(description) > 300 else description
-    summary = f"📋 <b>Yangi vazifa</b>\n\n📌 {title}\n📂 Bo'lim: {topic_name}\n"
+    # Xabar HTML rejimida ketadi — vazifa matnidagi "<", "&" ekranlanmasa Telegram uni rad etadi
+    # va xodimga xabar umuman bormaydi ("botni bloklagan bo'lishi mumkin" degan noto'g'ri sabab bilan)
+    summary = (f"📋 <b>Yangi vazifa</b>\n\n📌 {html.escape(title)}\n"
+               f"📂 Bo'lim: {html.escape(topic_name)}\n")
     if desc_short:
-        summary += f"\n📝 {desc_short}\n"
+        summary += f"\n📝 {html.escape(desc_short)}\n"
 
     speech_text = f"Yangi vazifa. {title}. Bo'lim: {topic_name}."
     if desc_short:
@@ -258,6 +272,24 @@ async def _notify_assignee_or_warn(bot: Bot, *, task_id: int, title: str, descri
             pass
 
 
+async def _save_task_log(*, odoo_task_id: int, odoo_project_id: int, telegram_topic_id: int | None,
+                         telegram_message_id: int | None, title: str,
+                         created_by_telegram_user_id: int | None) -> None:
+    """Yaratilgan vazifani task_log jurnaliga yozadi. Jurnal yozuvi muvaffaqiyatsiz bo'lsa ham
+    (vazifa Odoo'da allaqachon yaratilgan) davom etiladi — ilgari bu yerdagi xato mas'ul
+    xodimga bildirishnoma yuborilishini ham to'xtatib qo'yardi."""
+    try:
+        async with SessionLocal() as s:
+            await repo.save_task_log(s, odoo_task_id=odoo_task_id, odoo_project_id=odoo_project_id,
+                                     telegram_chat_id=settings.TELEGRAM_GROUP_ID,
+                                     telegram_topic_id=telegram_topic_id,
+                                     telegram_message_id=telegram_message_id,
+                                     title=title or "Vazifa",
+                                     created_by_telegram_user_id=created_by_telegram_user_id)
+    except Exception:
+        log.exception("task_log yozib bo'lmadi (odoo_task_id=%s)", odoo_task_id)
+
+
 # ─── Asosiy guruh — topic xabarlari ───────────────────────────────────────
 
 @router.message(F.chat.id == settings.TELEGRAM_GROUP_ID, F.message_thread_id.is_not(None))
@@ -311,6 +343,15 @@ async def on_topic_message(message: Message, bot: Bot) -> None:
     # kutib turmasdan PARALLEL bajariladi.
     _, result = await asyncio.gather(_save_context(), analyze_message(text))
     log.info("on_topic: is_task=%s scores=%s", result.is_task, result.department_scores)
+    if result.analysis_failed:
+        # AI xizmatlari javob bermadi — xabar vazifami yoki savolmi, noma'lum. Ilgari bunday
+        # holatda HAR QANDAY xabar (salom ham) Odoo'ga vazifa bo'lib yozilib ketardi.
+        await bot.send_message(
+            chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=message.message_thread_id,
+            text="⚠️ Xabarni tahlil qilib bo'lmadi — AI xizmati hozir javob bermayapti. "
+                 "Odoo'ga hech narsa yozilmadi. Birozdan keyin xabarni qayta yuboring.",
+        )
+        return
     if not result.is_task:
         # Vazifa emas va boshqa odamga qaratilgan ("@kimdir ...") — bot aralashmaydi.
         # (Vazifa bo'lsa "@kimdir shuni qilsin" ham odatdagidek Odoo'ga yoziladi.)
@@ -346,22 +387,29 @@ async def on_topic_message(message: Message, bot: Bot) -> None:
                               created_by_telegram_user_id=message.from_user.id if message.from_user else None)
             return
 
+        # Tanlov shu XABARga bog'lanadi — tugmalar ham shu kalit bilan
+        selection_key = message.message_id
+        users = users[:8]  # tugmalar soni; tanlov faqat shu ko'rsatilganlar orasidan
+        _remember_selection(selection_key, {
+            "result": result,
+            "topic": topic,
+            "users": users,
+            "reply_thread_id": message.message_thread_id,
+            "telegram_topic_id": message.message_thread_id,
+            "telegram_message_id": message.message_id,
+            "created_by_telegram_user_id": message.from_user.id if message.from_user else None,
+        })
+        # Vazifa matni va ism — Odoo/LLM'dan kelgan erkin matn: HTML uchun ekranlanadi
+        # ("<", "&" bo'lsa Telegram xabarni rad etib, tugmalar umuman chiqmay qolardi)
+        task_title = html.escape(result.title or result.description[:80])
+
         if len(users) == 1:
             # 1 ta topildi — tasdiqlash so'raymiz
             user = users[0]
-            _pending_task_selections[message.message_thread_id] = {
-                "result": result,
-                "topic": topic,
-                "users": users,
-                "reply_thread_id": message.message_thread_id,
-                "telegram_topic_id": message.message_thread_id,
-                "telegram_message_id": message.message_id,
-                "created_by_telegram_user_id": message.from_user.id if message.from_user else None,
-            }
             buttons = InlineKeyboardMarkup(inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Ha, topshirish", callback_data=f"task_assign:{message.message_thread_id}:{user['id']}"),
-                    InlineKeyboardButton(text="❌ Yo'q", callback_data=f"task_skip:{message.message_thread_id}"),
+                    InlineKeyboardButton(text="✅ Ha, topshirish", callback_data=f"task_assign:{selection_key}:{user['id']}"),
+                    InlineKeyboardButton(text="❌ Yo'q", callback_data=f"task_skip:{selection_key}"),
                 ]
             ])
             no_login_hint = "\n⚠️ Diqqat: bu xodimda Odoo login hisobi yo'q — rasman biriktirib bo'lmaydi, shaxsiy xabar ham ketmaydi." \
@@ -370,8 +418,8 @@ async def on_topic_message(message: Message, bot: Bot) -> None:
                 chat_id=settings.TELEGRAM_GROUP_ID,
                 message_thread_id=message.message_thread_id,
                 text=(
-                    f"📋 <b>Vazifa:</b> {result.title or result.description[:80]}\n\n"
-                    f"👤 <b>Bajaruvchi:</b> {user['name']}\n"
+                    f"📋 <b>Vazifa:</b> {task_title}\n\n"
+                    f"👤 <b>Bajaruvchi:</b> {html.escape(str(user['name']))}\n"
                     f"{no_login_hint}\n"
                     f"Topshirasizmi?"
                 ),
@@ -380,27 +428,18 @@ async def on_topic_message(message: Message, bot: Bot) -> None:
             return
 
         # Bir nechta topildi — tanlash kerak
-        _pending_task_selections[message.message_thread_id] = {
-            "result": result,
-            "topic": topic,
-            "users": users,
-            "reply_thread_id": message.message_thread_id,
-            "telegram_topic_id": message.message_thread_id,
-            "telegram_message_id": message.message_id,
-            "created_by_telegram_user_id": message.from_user.id if message.from_user else None,
-        }
         buttons = [
-            [InlineKeyboardButton(text=u["name"], callback_data=f"task_assign:{message.message_thread_id}:{u['id']}")]
-            for u in users[:8]
+            [InlineKeyboardButton(text=str(u["name"])[:60], callback_data=f"task_assign:{selection_key}:{u['id']}")]
+            for u in users
         ]
-        buttons.append([InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"task_skip:{message.message_thread_id}")])
+        buttons.append([InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"task_skip:{selection_key}")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         await bot.send_message(
             chat_id=settings.TELEGRAM_GROUP_ID,
             message_thread_id=message.message_thread_id,
             text=(
-                f"📋 <b>Vazifa:</b> {result.title or result.description[:80]}\n\n"
-                f"👤 \"{result.assignee_name}\" bo'yicha {len(users)} ta hodim topildi.\n"
+                f"📋 <b>Vazifa:</b> {task_title}\n\n"
+                f"👤 \"{html.escape(result.assignee_name)}\" bo'yicha {len(users)} ta hodim topildi.\n"
                 f"Qaysi biriga topshirasiz?"
             ),
             reply_markup=keyboard, parse_mode="HTML",
@@ -422,42 +461,44 @@ async def on_task_assign(callback: CallbackQuery, bot: Bot) -> None:
     if not await _is_ceo_callback(callback):
         return
     await callback.answer()
-    _, thread_id_str, user_id_str = callback.data.split(":")
-    thread_id = int(thread_id_str)
+    _, selection_key_str, user_id_str = callback.data.split(":")
+    selection_key = int(selection_key_str)
     chosen_user_id = int(user_id_str)
 
-    sel = _pending_task_selections.get(thread_id)
-    if not sel:
+    sel = _pending_task_selections.get(selection_key)
+    # Tanlangan nomzod AYNAN shu vazifa uchun taklif qilinganlardan bo'lishi shart —
+    # aks holda (eskirgan/begona tugma) vazifa noto'g'ri odamga yozilib ketishi mumkin
+    chosen_candidate = next((u for u in (sel or {}).get("users", []) if u.get("id") == chosen_user_id), None)
+    if not sel or chosen_candidate is None:
         try:
-            await callback.message.edit_text("⏰ Muddati o'tgan.", reply_markup=None)
+            await callback.message.edit_text("⏰ Muddati o'tgan — vazifani qaytadan yozing.", reply_markup=None)
         except Exception:
             pass
         return
 
     result: AnalyzeResult = sel["result"]
     topic = sel["topic"]
-    users = sel.get("users", [])
     telegram_topic_id = sel["telegram_topic_id"]
     telegram_message_id = sel["telegram_message_id"]
-    reply_thread_id = sel["reply_thread_id"]
     created_by_telegram_user_id = sel.get("created_by_telegram_user_id")
-    del _pending_task_selections[thread_id]
+    # Tugma ikki marta bosilsa ikkita vazifa yaratilmasligi uchun tanlov darhol olib tashlanadi
+    del _pending_task_selections[selection_key]
 
     # Tanlangan nomzod res.users (login bor) yoki hr.employee (login yo'q) dan
     # kelganini _find_odoo_users bergan ro'yxatdan aniqlaymiz — bunga qarab Odoo'da
     # RASMAN biriktirish (user_ids) mumkinmi yo'qmi hal qilinadi (project.task.user_ids
     # faqat res.users yozuvlarini qabul qiladi, hr.employee ID'sini emas).
-    chosen_candidate = next((u for u in users if u.get("id") == chosen_user_id), None)
-    is_res_users = (chosen_candidate or {}).get("source", "res.users") == "res.users"
+    is_res_users = chosen_candidate.get("source", "res.users") == "res.users"
     # Ism allaqachon _find_odoo_users natijasida bor — qo'shimcha "res.users read"
     # so'rovi (Odoo'ga yana bir round-trip) ORTIQCHA edi, faqat javobni sekinlashtirardi.
-    user_name = (chosen_candidate or {}).get("name") or f"#{chosen_user_id}"
+    user_name = chosen_candidate.get("name") or f"#{chosen_user_id}"
+    task_title = result.title or result.description[:80] or "Vazifa"
 
     # Task yaratamiz Odoo'da
     try:
         task_id = await odoo.create_task(
             project_id=topic.odoo_project_id,
-            name=result.title or result.description[:80] or "Vazifa",
+            name=task_title,
             description=result.description,
             user_ids=[chosen_user_id] if is_res_users else None,
             date_deadline=result.deadline,
@@ -474,19 +515,17 @@ async def on_task_assign(callback: CallbackQuery, bot: Bot) -> None:
         return
 
     async def _log():
-        async with SessionLocal() as s:
-            await repo.save_task_log(s, odoo_task_id=task_id, odoo_project_id=topic.odoo_project_id,
-                                     telegram_chat_id=settings.TELEGRAM_GROUP_ID,
-                                     telegram_topic_id=telegram_topic_id,
-                                     telegram_message_id=telegram_message_id, title=result.title,
-                                     created_by_telegram_user_id=created_by_telegram_user_id)
+        await _save_task_log(odoo_task_id=task_id, odoo_project_id=topic.odoo_project_id,
+                             telegram_topic_id=telegram_topic_id,
+                             telegram_message_id=telegram_message_id, title=task_title,
+                             created_by_telegram_user_id=created_by_telegram_user_id)
 
     async def _edit():
         try:
             await callback.message.edit_text(
                 f"✅ <b>Vazifa topshirildi!</b>\n\n"
-                f"📌 {result.title or result.description[:80]}\n"
-                f"👤 Bajaruvchi: {user_name}",
+                f"📌 {html.escape(task_title)}\n"
+                f"👤 Bajaruvchi: {html.escape(str(user_name))}",
                 reply_markup=None, parse_mode="HTML",
             )
         except Exception:
@@ -504,7 +543,7 @@ async def on_task_assign(callback: CallbackQuery, bot: Bot) -> None:
         await _notify_assignee_or_warn(
             bot,
             task_id=task_id,
-            title=result.title or result.description[:80],
+            title=task_title,
             description=result.description or "",
             topic_name=topic.name,
             odoo_user_id=chosen_user_id if is_res_users else None,
@@ -519,7 +558,7 @@ async def on_task_assign(callback: CallbackQuery, bot: Bot) -> None:
     # PARALLEL yuboriladi.
     await asyncio.gather(
         _notify_assignee(),
-        _notify_general(bot, f"📋 Vazifa → {user_name}\n📌 {result.title or result.description[:80]}"),
+        _notify_general(bot, f"📋 Vazifa → {user_name}\n📌 {task_title}"),
     )
 
 
@@ -528,11 +567,8 @@ async def on_task_skip(callback: CallbackQuery) -> None:
     if not await _is_ceo_callback(callback):
         return
     await callback.answer()
-    _, thread_id_str = callback.data.split(":")
-    thread_id = int(thread_id_str)
-
-    if thread_id in _pending_task_selections:
-        del _pending_task_selections[thread_id]
+    _, selection_key_str = callback.data.split(":")
+    _pending_task_selections.pop(int(selection_key_str), None)
 
     try:
         await callback.message.edit_text("❌ Bekor qilindi.", reply_markup=None)
@@ -540,115 +576,89 @@ async def on_task_skip(callback: CallbackQuery) -> None:
         pass
 
 
-# ─── Callback: hodim "Bajarildi" bosdi ────────────────────────────────────
+# ─── Callback: hodim "Bajarildi" / "Bekor qilindi" bosdi ──────────────────
 
-@router.callback_query(F.data.startswith("task_done:"))
-async def on_task_done(callback: CallbackQuery, bot: Bot) -> None:
-    await callback.answer()
-    _, task_id_str = callback.data.split(":")
-    task_id = int(task_id_str)
+async def _mark_task_message(message: Message, suffix_html: str) -> None:
+    """Xodimga yuborilgan vazifa xabariga natijani qo'shib, tugmalarini olib tashlaydi.
 
+    Vazifa odatda OVOZLI xabar (matni — caption) bo'lib boradi. Ilgari har doim
+    `message.text + ...` qilinardi: ovozli xabarda `text` None bo'lgani uchun xato
+    jimgina yutilib, xabar o'zgarmas, tugmalar qolaverar va xodim ularni qayta-qayta
+    bosa olardi (har bosishda guruhga yana "bajarildi" xabari ketardi)."""
+    is_caption = not getattr(message, "text", None) and bool(getattr(message, "caption", None))
+    original = getattr(message, "html_text", None)
+    if not isinstance(original, str) or not original:
+        original = html.escape(getattr(message, "text", None) or getattr(message, "caption", None) or "")
     try:
-        await odoo.update_task_stage(task_id, done=True)
-    except Exception as e:
-        log.exception("task_done failed %s", task_id)
-        await callback.answer("⚠️ Xatolik yuz berdi", show_alert=True)
+        if is_caption:
+            await message.edit_caption(caption=original + suffix_html, reply_markup=None, parse_mode="HTML")
+        else:
+            await message.edit_text(original + suffix_html, reply_markup=None, parse_mode="HTML")
         return
-
-    # Xabarni yangilash
+    except Exception as e:  # noqa: BLE001
+        log.warning("vazifa xabarini yangilab bo'lmadi (%s) — faqat tugmalar olib tashlanadi", e)
     try:
-        await callback.message.edit_text(
-            callback.message.text + "\n\n✅ <b>Bajarildi deb belgilandi</b>",
-            reply_markup=None, parse_mode="HTML",
-        )
+        await message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
+
+
+async def _finish_task(callback: CallbackQuery, bot: Bot, *, done: bool) -> None:
+    """"Bajarildi"/"Bekor qilindi": Odoo'da holatni yozadi, xodim xabarini yangilaydi va
+    vazifa berilgan topikka xabar qiladi."""
+    # Tugma bosilganiga darhol javob beriladi (aks holda Telegram'da "yuklanmoqda" aylanib turadi);
+    # natija/xato alohida xabar bilan bildiriladi — callback'ga ikkinchi marta javob berib bo'lmaydi
+    await callback.answer()
+    task_id = int(callback.data.split(":")[1])
+    action = "task_done" if done else "task_cancel"
+
+    try:
+        await odoo.update_task_stage(task_id, done=done)
+    except Exception as e:
+        log.exception("%s failed %s", action, task_id)
+        try:
+            await bot.send_message(
+                chat_id=callback.from_user.id,
+                text=f"⚠️ Vazifa holatini Odoo'ga yozib bo'lmadi: {str(e)[:200]}\n"
+                     f"Birozdan keyin tugmani qayta bosing.",
+            )
+        except Exception:
+            pass
+        return
+
+    suffix = "\n\n✅ <b>Bajarildi deb belgilandi</b>" if done else "\n\n❌ <b>Bekor qilindi deb belgilandi</b>"
+    await _mark_task_message(callback.message, suffix)
 
     # Guruh topikiga xabarnoma: task qaysi guruh (chat_id) va mavzudan (message_thread_id)
     # ochilganini bazadagi task_log jadvalidan aniqlaymiz
-    from app.db.models import TaskLog
-    from sqlalchemy import select as sel
     async with SessionLocal() as session:
-        log_entry = (
-            await session.execute(
-                sel(TaskLog).where(TaskLog.odoo_task_id == task_id)
-                .order_by(TaskLog.id.desc()).limit(1)
-            )
-        ).scalar_one_or_none()
-
+        log_entry = await repo.get_task_log_by_odoo_task_id(session, task_id)
     if not (log_entry and log_entry.telegram_topic_id):
         return
 
-    chat_id = log_entry.telegram_chat_id or settings.TELEGRAM_GROUP_ID
-    thread_id = log_entry.telegram_topic_id
-
     # Xodim ismi: ro'yxatdan o'tgan ism, topilmasa Telegram nomi
-    emp_name = None
     emp = await employee_store.get_employee_by_telegram_id(callback.from_user.id)
-    if emp:
-        emp_name = emp.full_name
-    if not emp_name:
-        emp_name = callback.from_user.full_name or callback.from_user.username or str(callback.from_user.id)
-
+    emp_name = ((emp.full_name if emp else None) or callback.from_user.full_name
+                or callback.from_user.username or str(callback.from_user.id))
+    outcome = "✅ {} — bajarildi ({})" if done else "❌ {} — bekor qilindi ({})"
     try:
         await bot.send_message(
-            chat_id=chat_id,
-            message_thread_id=thread_id,
-            text=f"✅ {log_entry.title or 'Vazifa'} — bajarildi ({emp_name})",
+            chat_id=log_entry.telegram_chat_id or settings.TELEGRAM_GROUP_ID,
+            message_thread_id=log_entry.telegram_topic_id,
+            text=outcome.format(log_entry.title or "Vazifa", emp_name),
         )
     except Exception as e:
-        log.warning("task_done: guruhga xabarnoma yuborilmadi: %s", e)
+        log.warning("%s: guruhga xabarnoma yuborilmadi: %s", action, e)
 
 
-# ─── Callback: hodim "Bekor qilindi" bosdi ────────────────────────────────
+@router.callback_query(F.data.startswith("task_done:"))
+async def on_task_done(callback: CallbackQuery, bot: Bot) -> None:
+    await _finish_task(callback, bot, done=True)
+
 
 @router.callback_query(F.data.startswith("task_cancel:"))
 async def on_task_cancel(callback: CallbackQuery, bot: Bot) -> None:
-    await callback.answer()
-    _, task_id_str = callback.data.split(":")
-    task_id = int(task_id_str)
-
-    try:
-        await odoo.update_task_stage(task_id, done=False)
-    except Exception as e:
-        log.exception("task_cancel failed %s", task_id)
-        await callback.answer("⚠️ Xatolik yuz berdi", show_alert=True)
-        return
-
-    try:
-        await callback.message.edit_text(
-            callback.message.text + "\n\n❌ <b>Bekor qilindi deb belgilandi</b>",
-            reply_markup=None, parse_mode="HTML",
-        )
-    except Exception:
-        pass
-
-    # Guruh topikiga xabarnoma: task_log'dan guruh (chat_id) va mavzu (thread_id)
-    from app.db.models import TaskLog
-    from sqlalchemy import select as sel
-    async with SessionLocal() as session:
-        log_entry = (
-            await session.execute(
-                sel(TaskLog).where(TaskLog.odoo_task_id == task_id)
-                .order_by(TaskLog.id.desc()).limit(1)
-            )
-        ).scalar_one_or_none()
-
-    if not (log_entry and log_entry.telegram_topic_id):
-        return
-
-    chat_id = log_entry.telegram_chat_id or settings.TELEGRAM_GROUP_ID
-    thread_id = log_entry.telegram_topic_id
-
-    emp_name = callback.from_user.full_name or callback.from_user.username or str(callback.from_user.id)
-    try:
-        await bot.send_message(
-            chat_id=chat_id,
-            message_thread_id=thread_id,
-            text=f"❌ {log_entry.title or 'Vazifa'} — bekor qilindi ({emp_name})",
-        )
-    except Exception as e:
-        log.warning("task_cancel: guruhga xabarnoma yuborilmadi: %s", e)
+    await _finish_task(callback, bot, done=False)
 
 
 # ─── General topik ─────────────────────────────────────────────────────────
@@ -738,7 +748,7 @@ async def on_other_group(message: Message, bot: Bot) -> None:
         return
 
     result = await analyze_message(text)
-    if not result.is_task:
+    if not result.is_task or result.analysis_failed:
         return
 
     # Task ekaniga ishonch: is_task_confidence + eng yuqori bo'lim bahosi
@@ -824,10 +834,11 @@ async def _write_task(bot: Bot, result: AnalyzeResult, odoo_project_id: int,
                                text=f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {str(e)[:200]}")
         return
     log.info("_write_task: user_ids=%s unresolved=%s", user_ids, unresolved_name)
+    task_title = result.title or result.description[:80] or "Vazifa"
     try:
         task_id = await odoo.create_task(
             project_id=odoo_project_id,
-            name=result.title or result.description[:80] or "Vazifa",
+            name=task_title,
             description=result.description, user_ids=user_ids, date_deadline=result.deadline,
         )
     except Exception as e:
@@ -839,15 +850,13 @@ async def _write_task(bot: Bot, result: AnalyzeResult, odoo_project_id: int,
         return
 
     async def _log():
-        async with SessionLocal() as s:
-            await repo.save_task_log(s, odoo_task_id=task_id, odoo_project_id=odoo_project_id,
-                                     telegram_chat_id=settings.TELEGRAM_GROUP_ID,
-                                     telegram_topic_id=telegram_topic_id,
-                                     telegram_message_id=telegram_message_id, title=result.title,
-                                     created_by_telegram_user_id=created_by_telegram_user_id)
+        await _save_task_log(odoo_task_id=task_id, odoo_project_id=odoo_project_id,
+                             telegram_topic_id=telegram_topic_id,
+                             telegram_message_id=telegram_message_id, title=task_title,
+                             created_by_telegram_user_id=created_by_telegram_user_id)
 
     assignee = result.assignee_name if user_ids else None
-    text = replies.success_reply_text(result.title, department_label, assignee, result.deadline)
+    text = replies.success_reply_text(task_title, department_label, assignee, result.deadline)
     await asyncio.gather(_log(), bot.send_message(
         chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=reply_thread_id, text=text))
     if user_ids:
@@ -859,7 +868,7 @@ async def _write_task(bot: Bot, result: AnalyzeResult, odoo_project_id: int,
         await _notify_assignee_or_warn(
             bot,
             task_id=task_id,
-            title=result.title or result.description[:80],
+            title=task_title,
             description=result.description or "",
             topic_name=department_label,
             odoo_user_id=user_ids[0],
@@ -875,7 +884,7 @@ async def _write_task(bot: Bot, result: AnalyzeResult, odoo_project_id: int,
         await _notify_assignee_or_warn(
             bot,
             task_id=task_id,
-            title=result.title or result.description[:80],
+            title=task_title,
             description=result.description or "",
             topic_name=department_label,
             odoo_user_id=None,
@@ -894,7 +903,7 @@ async def _write_task(bot: Bot, result: AnalyzeResult, odoo_project_id: int,
             await _send_task_to_employee(
                 bot,
                 task_id=task_id,
-                title=result.title or result.description[:80],
+                title=task_title,
                 description=result.description or "",
                 topic_name=department_label,
                 telegram_user_id=emp.telegram_user_id,

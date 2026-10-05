@@ -234,3 +234,38 @@ async def test_user_text_is_wrapped_before_sending_to_openai(monkeypatch):
     assert "<user_input>" in user_content
     assert "</user_input>" in user_content
     assert injection_attempt in user_content
+
+
+# ── Kutilmagan model javoblari va to'liq uzilish ────────────────────────────
+
+async def test_malformed_model_values_do_not_crash_the_analysis(monkeypatch):
+    """Model "high" kabi matnli ishonch, noto'g'ri sana yoki ro'yxat ko'rinishidagi baholar
+    qaytarsa — ilgari float()/pydantic xatosi butun xabarni qayta ishlashni yiqitardi."""
+    _patch_openai_success(monkeypatch, {
+        "is_task": True, "is_task_confidence": "high", "title": "", "description": "",
+        "assignee_name": "null", "deadline": "ertaga", "department_scores": ["Sotuv"],
+    })
+    result = await llm_module.analyze_message("Sardorga hisobotni topshirsin")
+
+    assert result.is_task is True and result.analysis_failed is False
+    assert result.is_task_confidence == 0.8
+    assert result.assignee_name is None and result.deadline is None
+    # Bo'sh nom/tavsif o'rniga asl xabar — Odoo'ga bo'sh vazifa tushmaydi
+    assert result.title == "Sardorga hisobotni topshirsin" == result.description
+    assert set(result.department_scores) == set(DEPARTMENT_NAMES)
+
+
+async def test_both_models_down_is_reported_as_failed_analysis(monkeypatch, caplog):
+    _patch_openai_failure(monkeypatch, RuntimeError("insufficient_quota"))
+
+    async def fake_claude_create(**kwargs):
+        raise RuntimeError("overloaded")
+
+    monkeypatch.setattr(llm_module._client.messages, "create", fake_claude_create)
+    with caplog.at_level("WARNING", logger="app.services.llm"):
+        result = await llm_module.analyze_message("salom")
+
+    assert result.analysis_failed is True
+    # P1-3: zaxira modelga o'tish va to'liq uzilish logda ko'rinadi
+    assert "insufficient_quota" in caplog.text and "Claude'ga o'tiladi" in caplog.text
+    assert "xabar tahlil qilinmadi" in caplog.text

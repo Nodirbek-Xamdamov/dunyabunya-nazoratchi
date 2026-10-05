@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import io
+import logging
 
 from aiogram import Bot
 from aiogram.types import Message
 
 from app.services.audio_service import transcribe_audio_bytes
+
+log = logging.getLogger(__name__)
 
 
 async def get_message_text(message: Message, bot: Bot) -> str | None:
@@ -20,6 +23,12 @@ async def get_message_text(message: Message, bot: Bot) -> str | None:
         return message.caption
     if message.voice:
         buf = io.BytesIO()
-        await bot.download(message.voice, destination=buf)
+        try:
+            await bot.download(message.voice, destination=buf)
+        except Exception:
+            # Yuklab bo'lmadi (Telegram/tarmoq) — bo'sh matn qaytadi va chaqiruvchi "ovozli
+            # xabarni tushunolmadim" deb javob beradi; ilgari xato handler'ni jimgina to'xtatardi
+            log.warning("ovozli xabarni Telegram'dan yuklab bo'lmadi", exc_info=True)
+            return ""
         return await transcribe_audio_bytes(buf.getvalue(), mime_type="audio/ogg")
     return None

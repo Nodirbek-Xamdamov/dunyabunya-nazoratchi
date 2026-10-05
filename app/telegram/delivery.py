@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import uuid
 
 from aiogram import Bot, F, Router
 from aiogram.types import (
@@ -27,6 +28,7 @@ from aiogram.types import (
     Message,
 )
 
+from app import ceo_state
 from app.rbac import Role
 from app.services.assistant import FILE_TOOLS, AssistantResult, ask_with_files
 from app.telegram.tg_format import TG_LIMIT, split_message, to_telegram_html
@@ -120,18 +122,20 @@ def offer_formats(scope: str, question: str, result: AssistantResult, *,
 
     - Odoo bilan aloqa yo'q bo'lsa — tugma yo'q (qaysi format tanlanmasin, natija bir xil xato);
     - ro'yxat/jadval so'rovi — Excel / HTML / Matn;
-    - boshqa so'rov, lekin fayl yuborilgan (masalan avtomatik HTML hisobot) — faqat "Matn"."""
+    - boshqa so'rov, lekin fayl yuborilgan (masalan avtomatik HTML hisobot) — faqat "Matn".
+
+    Har bir javob O'Z kaliti bilan eslab qolinadi (`scope` + tasodifiy qo'shimcha). Ilgari
+    kalit faqat chat edi: yangi savol eskisini bosib ketar va OLDINGI javob ostidagi
+    "Excel" tugmasi bosilganda KEYINGI savolning ma'lumoti kelardi."""
     if result.odoo_error:
         return None
-    if wants_format_buttons(question) or wants_format_buttons(result.text):
-        keyboard = format_keyboard(scope)
-    elif result.files:
-        keyboard = text_keyboard(scope)
-    else:
+    wants_table = wants_format_buttons(question) or wants_format_buttons(result.text)
+    if not wants_table and not result.files:
         return None
-    remember(scope, chat_id=chat_id, thread_id=thread_id, question=question,
+    key = f"{scope}-{uuid.uuid4().hex[:8]}"
+    remember(key, chat_id=chat_id, thread_id=thread_id, question=question,
              user_key=user_key, role=role, group_chat_id=group_chat_id)
-    return keyboard
+    return format_keyboard(key) if wants_table else text_keyboard(key)
 
 
 def _clean_stem(filename: str) -> str:
@@ -266,11 +270,21 @@ async def _safe_edit_markup(message: Message | None, markup=None) -> None:
 @router.callback_query(F.data.startswith("fmt:"))
 async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
     """Excel, HTML yoki Matn tugmasi bosilganda — so'rovni shu formatda qayta bajarish."""
-    await callback.answer()
     parts = callback.data.split(":", 2)
     if len(parts) != 3:
+        await callback.answer()
         return
     _, fmt, scope = parts
+
+    # Guruhda bot faqat CEO'ga xizmat qiladi — tugmani boshqa a'zo bossa hisobot
+    # (CEO huquqi bilan) qayta yaratilib, guruhga yuborilmasligi kerak
+    pending = _entries.get(scope)
+    if pending is not None and pending["chat_id"] < 0:
+        user = getattr(callback, "from_user", None)
+        if user is None or not ceo_state.is_ceo(user.id, user.username):
+            await callback.answer("Bu tugma faqat CEO uchun.", show_alert=True)
+            return
+    await callback.answer()
 
     entry = _entries.pop(scope, None)
     # Tugmalarni darhol o'chiramiz (ikki marta bosilishining oldini olish)

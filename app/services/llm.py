@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import date
 
@@ -10,6 +11,8 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.constants import DEPARTMENT_NAMES, DEPARTMENTS
 from app.prompt_guard import DATA_ONLY_NOTE, wrap_user_input
+
+log = logging.getLogger(__name__)
 
 _extra_headers = {}
 if settings.ANTHROPIC_WORKSPACE_ID:
@@ -41,6 +44,58 @@ class AnalyzeResult(BaseModel):
     assignee_name: str | None = None
     deadline: str | None = None
     department_scores: dict[str, float] = Field(default_factory=dict)
+    # Ikkala model ham javob bermadi — xabar tahlil QILINMAGAN (vazifami-yo'qmi noma'lum)
+    analysis_failed: bool = False
+
+
+def _as_score(value, default: float) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _valid_deadline(value) -> str | None:
+    """Faqat haqiqiy YYYY-MM-DD sana o'tadi — model "ertaga" yoki "05.10.2026" qaytarsa
+    Odoo vazifani umuman yaratmay, xato bilan rad etardi."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value.strip()[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def _clean_name(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    return None if name.casefold() in ("", "null", "none", "yo'q", "-") else name
+
+
+def _build_result(data: dict, text: str) -> AnalyzeResult:
+    """Model qaytargan JSON'dan natija yasaydi — kutilmagan turdagi qiymatlar (matnli
+    ishonch darajasi, ro'yxat ko'rinishidagi baholar...) xabarni qayta ishlashni yiqitmaydi."""
+    scores = data.get("department_scores")
+    is_task = bool(data.get("is_task", data.get("task", True)))
+    title = str(data.get("title") or "").strip()
+    description = str(data.get("description") or "").strip()
+    if is_task:
+        # Vazifa Odoo'ga bo'sh nom/tavsif bilan tushmasligi uchun — asl xabar matni
+        description = description or text.strip()
+        title = title or description[:80]
+    result = AnalyzeResult(
+        is_task=is_task,
+        is_task_confidence=_as_score(data.get("is_task_confidence"), 0.8),
+        title=title,
+        description=description,
+        assignee_name=_clean_name(data.get("assignee_name")),
+        deadline=_valid_deadline(data.get("deadline")),
+        department_scores={str(k): _as_score(v, 0.0) for k, v in scores.items()} if isinstance(scores, dict) else {},
+    )
+    for name in DEPARTMENT_NAMES:
+        result.department_scores.setdefault(name, 0.0)
+    return result
 
 
 _DEPARTMENTS_JSON = json.dumps(DEPARTMENTS, ensure_ascii=False, indent=2)
@@ -129,7 +184,14 @@ async def analyze_message(text: str) -> AnalyzeResult:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):
                 data = parsed
-        except Exception:
+            else:
+                log.warning("analyze_message: OpenAI (%s) JSON obyekt qaytarmadi — Claude'ga o'tiladi",
+                            settings.OPENAI_CHAT_MODEL)
+        except Exception as e:  # noqa: BLE001
+            # P1-3: zaxira modelga o'tish logda ko'rinishi shart (limit/kalit/tarmoq muammosi
+            # shu yerdan bilinadi — ilgari bu holat hech qayerda qayd etilmasdi)
+            log.warning("analyze_message: OpenAI (%s) ishlamadi (%s: %s) — Claude'ga o'tiladi",
+                        settings.OPENAI_CHAT_MODEL, type(e).__name__, str(e)[:200])
             data = None
 
     if data is None:
@@ -146,25 +208,17 @@ async def analyze_message(text: str) -> AnalyzeResult:
             if json_match:
                 raw = json_match.group()
             data = json.loads(raw)
-        except Exception:
+            if not isinstance(data, dict):
+                raise ValueError("Claude JSON obyekt qaytarmadi")
+        except Exception as e:  # noqa: BLE001
+            log.error("analyze_message: OpenAI ham, Claude (%s) ham ishlamadi (%s: %s) — xabar tahlil qilinmadi",
+                      settings.ANTHROPIC_MODEL, type(e).__name__, str(e)[:200])
             return AnalyzeResult(
                 is_task=True, is_task_confidence=0.7,
                 title=text[:80] if text else "",
                 description=text or "",
                 department_scores={name: 0.0 for name in DEPARTMENT_NAMES},
+                analysis_failed=True,
             )
 
-    result = AnalyzeResult(
-        is_task=bool(data.get("is_task", data.get("task", True))),
-        is_task_confidence=float(data.get("is_task_confidence") or 0.8),
-        title=str(data.get("title") or ""),
-        description=str(data.get("description") or ""),
-        assignee_name=data.get("assignee_name") or None,
-        deadline=data.get("deadline") or None,
-        department_scores=data.get("department_scores") or {},
-    )
-
-    for name in DEPARTMENT_NAMES:
-        result.department_scores.setdefault(name, 0.0)
-
-    return result
+    return _build_result(data, text)

@@ -31,6 +31,8 @@ from app.telegram.text_extract import get_message_text
 
 _PLAIN_MESSAGE = (F.text & ~F.text.startswith("/")) | F.voice
 
+_NOT_YOUR_BUTTON = "⚠️ Bu tugma siz uchun emas."
+
 log = logging.getLogger(__name__)
 
 router = Router()
@@ -181,13 +183,15 @@ async def on_unlink_cmd(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("unlink:"))
 async def on_unlink(callback: CallbackQuery) -> None:
-    await callback.answer()
     _, user_id_str = callback.data.split(":")
     target_id = int(user_id_str)
 
+    # Callback'ga faqat BIR MARTA javob berish mumkin — ogohlantirish avval tekshiriladi
+    # (ilgari avval bo'sh javob berilib, ogohlantirish foydalanuvchiga ko'rinmay qolardi)
     if callback.from_user.id != target_id:
-        await callback.answer("⚠️ Bu sizning gatingiz emas!", show_alert=True)
+        await callback.answer(_NOT_YOUR_BUTTON, show_alert=True)
         return
+    await callback.answer()
 
     employee = await employee_store.unlink_employee(target_id)
     if employee:
@@ -224,15 +228,15 @@ async def on_cancel(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("confirm:"))
 async def on_confirm(callback: CallbackQuery, bot: Bot) -> None:
-    await callback.answer()
     parts = callback.data.split(":")
     # confirm:yes:user_id  or  confirm:no:user_id
     action = parts[1]
     user_id = int(parts[2])
 
     if callback.from_user.id != user_id:
-        await callback.answer("⚠️ Bu sizning gatingiz emas!", show_alert=True)
+        await callback.answer(_NOT_YOUR_BUTTON, show_alert=True)
         return
+    await callback.answer()
 
     info = _pending_confirm.get(user_id)
     if not info:
@@ -312,14 +316,14 @@ async def on_confirm(callback: CallbackQuery, bot: Bot) -> None:
 
 @router.callback_query(F.data.startswith("emp:"))
 async def on_emp_pick(callback: CallbackQuery, bot: Bot) -> None:
-    await callback.answer()
     _, requester_id_str, chosen_id_str = callback.data.split(":")
     requester_id = int(requester_id_str)
     chosen_id = int(chosen_id_str)
 
     if callback.from_user.id != requester_id:
-        await callback.answer("⚠️ Bu sizning gatingiz emas!", show_alert=True)
+        await callback.answer(_NOT_YOUR_BUTTON, show_alert=True)
         return
+    await callback.answer()
 
     pending = _pending_choices.get(requester_id, [])
     chosen_info = next((c for c in pending if c["id"] == chosen_id), None)

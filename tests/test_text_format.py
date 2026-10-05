@@ -210,13 +210,20 @@ def _clean_entries(monkeypatch):
     monkeypatch.setattr(delivery, "_entries", {})
 
 
+def _keys(markup) -> list[str]:
+    """Tugmalardagi (format, kalit) juftliklaridan kalitlar — har javobning o'z kaliti bor."""
+    return [c.split(":", 2)[2] for c in _callbacks(markup)]
+
+
 def test_list_question_offers_all_three_formats():
     markup = delivery.offer_formats(
         "dm-1", "xodimlar ro'yxatini ber", AssistantResult(text="Jami 187 ta."),
         chat_id=1, thread_id=None, user_key=1,
     )
-    assert _callbacks(markup) == ["fmt:excel:dm-1", "fmt:html:dm-1", "fmt:text:dm-1"]
-    assert delivery._entries["dm-1"]["question"] == "xodimlar ro'yxatini ber"
+    (key,) = set(_keys(markup))
+    assert key.startswith("dm-1-")
+    assert _callbacks(markup) == [f"fmt:excel:{key}", f"fmt:html:{key}", f"fmt:text:{key}"]
+    assert delivery._entries[key]["question"] == "xodimlar ro'yxatini ber"
 
 
 def test_file_answer_offers_text_version(tmp_path):
@@ -224,7 +231,56 @@ def test_file_answer_offers_text_version(tmp_path):
     result = AssistantResult(text="Hisobot tayyorlandi", files=[_file(tmp_path)])
     markup = delivery.offer_formats("grp-main", "kompaniya statistikasi", result,
                                     chat_id=-100, thread_id=None, user_key=-100)
-    assert _callbacks(markup) == ["fmt:text:grp-main"]
+    (callback_data,) = _callbacks(markup)
+    assert callback_data.startswith("fmt:text:grp-main-")
+
+
+async def test_button_under_an_older_answer_reruns_that_older_question(monkeypatch):
+    """Ilgari kalit faqat chat edi: ikkinchi savol birinchisini bosib ketar va BIRINCHI javob
+    ostidagi "Excel" bosilganda IKKINCHI savolning ma'lumoti kelardi."""
+    kw = dict(chat_id=1, thread_id=None, user_key=1)
+    first = delivery.offer_formats("dm-1", "xodimlar ro'yxati", AssistantResult(text="Jami 187 ta."), **kw)
+    second = delivery.offer_formats("dm-1", "mahsulotlar ro'yxati", AssistantResult(text="Jami 31 678 ta."), **kw)
+    assert _keys(first)[0] != _keys(second)[0]
+
+    asked = []
+
+    async def fake_ask_with_files(user_key, question, **kwargs):
+        asked.append(question)
+        return AssistantResult(text="Tayyor.")
+
+    monkeypatch.setattr(delivery, "ask_with_files", fake_ask_with_files)
+    callback, _ = _callback(_callbacks(first)[0])
+    await delivery.on_format_choice(callback, _FakeBot())
+    assert asked == ["xodimlar ro'yxati"]
+
+
+async def test_group_format_button_is_ceo_only(monkeypatch):
+    """Guruhda bot faqat CEO'ga xizmat qiladi — boshqa a'zo tugmani bossa hech narsa qayta yaratilmaydi."""
+    monkeypatch.setattr(delivery.ceo_state.settings, "CEO_TELEGRAM_USER_ID", 777)
+    monkeypatch.setattr(delivery.ceo_state.settings, "CEO_TELEGRAM_USERNAME", "")
+
+    async def fail_ask(*a, **kw):
+        raise AssertionError("CEO bo'lmagan bosuvchi uchun so'rov bajarilmasligi kerak")
+
+    monkeypatch.setattr(delivery, "ask_with_files", fail_ask)
+    markup = delivery.offer_formats("grp-main", "xodimlar ro'yxati", AssistantResult(text="Jami 187 ta."),
+                                    chat_id=-100123, thread_id=None, user_key=-100123)
+    key = _keys(markup)[0]
+
+    alerts = []
+
+    async def answer(*a, **kw):
+        alerts.append((a, kw))
+
+    stranger = types.SimpleNamespace(
+        data=f"fmt:excel:{key}", answer=answer, message=None,
+        from_user=types.SimpleNamespace(id=5, username="someone"),
+    )
+    await delivery.on_format_choice(stranger, _FakeBot())
+
+    assert alerts and alerts[0][1].get("show_alert") is True
+    assert key in delivery._entries  # tanlov CEO uchun saqlanib qoladi
 
 
 def test_plain_chat_and_odoo_failure_get_no_buttons(tmp_path):
