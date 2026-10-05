@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.config import settings
+
 
 def assistant_thinking_text() -> str:
     return "⏳ So'rovingiz tayyorlanmoqda, biroz kuting..."
@@ -20,13 +22,36 @@ def task_status_suffix(done: bool) -> str:
     return f"\n\n{'✅ Bajarildi deb belgilandi.' if done else '❌ Bekor qilindi deb belgilandi.'}"
 
 
-def success_reply_text(title: str, department: str, assignee_name: str | None, deadline: str | None) -> str:
+def success_reply_text(title: str, department: str, assignee_name: str | None, deadline: str | None,
+                       task_id: int | None = None) -> str:
     lines = [f"✅ Odooga yozildi — {department}", f"📌 {title}"]
     if assignee_name:
         lines.append(f"👤 Mas'ul: {assignee_name}")
     if deadline:
         lines.append(f"🗓 Muddat: {deadline}")
+    if task_id:
+        lines.append(f"🆔 #{task_id}")
     return "\n".join(lines)
+
+
+def task_url(task_id: int) -> str:
+    """Vazifaning Odoo'dagi sahifasi (eski ko'rinishdagi havola — barcha versiyalarda ochiladi)."""
+    return f"{settings.ODOO_URL.rstrip('/')}/web#id={task_id}&model=project.task&view_type=form"
+
+
+def created_task_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """Yaratilgan vazifa ostidagi tugmalar: Odoo'da ochish va (xato yozilgan bo'lsa) o'chirish."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔗 Odoo'da ochish", url=task_url(task_id)),
+        InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"task_del:{task_id}"),
+    ]])
+
+
+def delete_confirm_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Ha, o'chirilsin", callback_data=f"task_delok:{task_id}"),
+        InlineKeyboardButton(text="Yo'q, qolsin", callback_data=f"task_delno:{task_id}"),
+    ]])
 
 
 def assignee_not_found_text(name: str) -> str:

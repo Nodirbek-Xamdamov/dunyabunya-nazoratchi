@@ -8,6 +8,7 @@ from datetime import date
 import anthropic
 from pydantic import BaseModel, Field
 
+from app import metrics
 from app.config import settings
 from app.constants import DEPARTMENT_NAMES, DEPARTMENTS
 from app.prompt_guard import DATA_ONLY_NOTE, wrap_user_input
@@ -192,6 +193,7 @@ async def analyze_message(text: str) -> AnalyzeResult:
             # shu yerdan bilinadi — ilgari bu holat hech qayerda qayd etilmasdi)
             log.warning("analyze_message: OpenAI (%s) ishlamadi (%s: %s) — Claude'ga o'tiladi",
                         settings.OPENAI_CHAT_MODEL, type(e).__name__, str(e)[:200])
+            metrics.inc("triage_fallbacks")
             data = None
 
     if data is None:

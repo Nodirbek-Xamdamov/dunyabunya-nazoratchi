@@ -1807,7 +1807,15 @@ async def generate_company_report(date_from: str = "", date_to: str = "") -> str
     return _report_url(filename)
 
 
+async def get_daily_briefing() -> dict:
+    """Kunlik xulosa: bugun va kechagi sotuv, to'lovlar, mijozlar qarzi, ochiq vazifalar."""
+    from app.services.briefing import collect_briefing  # briefing shu modulga tayanadi — aylanma import bo'lmasin
+
+    return await collect_briefing()
+
+
 STATS_TOOLS = {
+    "get_daily_briefing": get_daily_briefing,
     "generate_company_report": generate_company_report,
     "generate_sales_report": generate_sales_report,
     "generate_invoice_report": generate_invoice_report,
@@ -1822,6 +1830,14 @@ STATS_TOOLS = {
 }
 
 STATS_TOOL_SCHEMAS = {
+    "get_daily_briefing": {
+        "name": "get_daily_briefing",
+        "description": "Kunlik xulosa (brifing): bugun va kechagi sotuv, oy boshidan sotuv va o'tgan oyning shu "
+                       "davri, bugun/kechagi to'lovlar (kirim-chiqim), mijozlar qarzi va muddati o'tgani, ochiq "
+                       "va muddati o'tgan vazifalar soni. 'Bugun nima gap?', 'kunlik xulosa', 'brifing', "
+                       "'umumiy ahvol qanday?' kabi savollarda shu toolni chaqiring.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
     "generate_company_report": {
         "name": "generate_company_report",
         "description": "Kompaniyaning to'liq statistikasi — barcha bo'limlar, vazifalar, CRM, fakturalar. "

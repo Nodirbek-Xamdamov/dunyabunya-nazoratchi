@@ -55,7 +55,24 @@ class Settings(BaseSettings):
 
     # Tizim xatolari haqida ogohlantirish yuboriladigan Telegram chat (P1-2) — dasturchining
     # shaxsiy chat_id'si yoki alohida "tizim-xato" guruhi. 0 = o'chirilgan.
+    # (Chat ID'ni bilish uchun botga /id deb yozing.)
     ALERT_CHAT_ID: int = 0
+
+    # Kunlik zaxira nusxalar papkasi (scripts/backup_db.ps1 yozadi) — /status va monitoring
+    # oxirgi nusxa yangiligini shu yerdan tekshiradi
+    BACKUP_DIR: str = r"E:\Backups\dunyabunya_db"
+
+    # Suhbat tarixi necha kundan keyin o'chiriladi (P3-4, saqlash muddati). 0 = o'chirilmaydi
+    # (sukut). Yordamchi faqat oxirgi bir necha xabarni ishlatadi; masalan 90 qo'yish mumkin.
+    CONVERSATION_RETENTION_DAYS: int = 0
+
+    # CEO'larga kunlik xulosa (brifing) yuboriladigan vaqt, "HH:MM" (Toshkent). Bo'sh = yuborilmaydi;
+    # /brifing buyrug'i istalgan payt ishlaydi.
+    DAILY_BRIEFING_TIME: str = ""
+
+    # HTTP (/health, /reports) qaysi manzilda tinglaydi. Hisobotlar Telegram orqali fayl bo'lib
+    # yuboriladi, shuning uchun tashqi tarmoqqa ochish shart emas; LAN yoki tunnel uchun 0.0.0.0.
+    APP_HOST: str = "0.0.0.0"
 
 
     @property

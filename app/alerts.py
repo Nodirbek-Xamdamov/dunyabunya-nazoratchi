@@ -57,7 +57,7 @@ class TelegramAlertHandler(logging.Handler):
         """Yig'ilgan xatolardan bitta xabar matni (bo'lmasa None)."""
         if not self._pending:
             return None
-        lines = ["⚠️ dunyabunya bot — tizim xatosi:", ""] + [f"• {t}" for t in self._pending]
+        lines = ["⚠️ dunyabunya bot — tizim xabari:", ""] + [f"• {t}" for t in self._pending]
         if self._dropped:
             lines.append(f"... va yana {self._dropped} ta xato (logs/bot.log ga qarang)")
         self._pending.clear()
@@ -80,12 +80,24 @@ class TelegramAlertHandler(logging.Handler):
                 log.warning("ogohlantirishni Telegram'ga yuborib bo'lmadi: %s", e)
 
 
+_active: TelegramAlertHandler | None = None
+
+
+def notify(text: str) -> None:
+    """Xato bo'lmagan muhim xabarni (masalan "Odoo bilan aloqa tiklandi") ogohlantirish
+    chatiga navbatga qo'yadi. Ogohlantirishlar o'chiq bo'lsa — hech narsa qilmaydi."""
+    if _active is not None and len(_active._pending) < _MAX_PENDING:
+        _active._pending.append(text[:800])
+
+
 def start_alerts(bot) -> asyncio.Task | None:
     """main.py lifespan ichida chaqiriladi. ALERT_CHAT_ID sozlanmagan bo'lsa None."""
+    global _active
     if not settings.ALERT_CHAT_ID:
         log.info("alerts: ALERT_CHAT_ID sozlanmagan — xato ogohlantirishlari Telegram'ga yuborilmaydi")
         return None
     handler = TelegramAlertHandler()
     logging.getLogger().addHandler(handler)
+    _active = handler
     log.info("alerts: xato ogohlantirishlari %s chatiga yuboriladi", settings.ALERT_CHAT_ID)
     return asyncio.create_task(handler.run(bot))

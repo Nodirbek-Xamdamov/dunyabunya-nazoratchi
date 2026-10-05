@@ -102,6 +102,21 @@ async def add_conversation_message(session: AsyncSession, telegram_user_id: int,
     await session.commit()
 
 
+async def delete_old_conversation_messages(session: AsyncSession, days: int) -> int:
+    """P3-4 (saqlash muddati): `days` kundan eski suhbat xabarlarini o'chiradi. Yordamchi
+    faqat oxirgi bir necha xabarni kontekst sifatida ishlatadi — eskisi kerak emas."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import delete as sql_delete
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    result = await session.execute(
+        sql_delete(ConversationMessage).where(ConversationMessage.created_at < cutoff)
+    )
+    await session.commit()
+    return result.rowcount or 0
+
+
 async def save_task_log(
     session: AsyncSession,
     *,

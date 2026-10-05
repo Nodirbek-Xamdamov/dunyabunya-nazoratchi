@@ -17,7 +17,7 @@ from aiogram.types import (
     Message,
 )
 
-from app import employee_store
+from app import employee_store, metrics
 from app.config import settings
 from app.db import repo
 from app.db.session import SessionLocal
@@ -521,13 +521,16 @@ async def on_task_assign(callback: CallbackQuery, bot: Bot) -> None:
                              telegram_message_id=telegram_message_id, title=task_title,
                              created_by_telegram_user_id=created_by_telegram_user_id)
 
+    metrics.inc("tasks_created")
+
     async def _edit():
         try:
             await callback.message.edit_text(
                 f"✅ <b>Vazifa topshirildi!</b>\n\n"
                 f"📌 {html.escape(task_title)}\n"
-                f"👤 Bajaruvchi: {html.escape(str(user_name))}",
-                reply_markup=None, parse_mode="HTML",
+                f"👤 Bajaruvchi: {html.escape(str(user_name))}\n"
+                f"🆔 #{task_id}",
+                reply_markup=replies.created_task_keyboard(task_id), parse_mode="HTML",
             )
         except Exception:
             pass
@@ -575,6 +578,59 @@ async def on_task_skip(callback: CallbackQuery) -> None:
         await callback.message.edit_text("❌ Bekor qilindi.", reply_markup=None)
     except Exception:
         pass
+
+
+# ─── Callback: yaratilgan vazifani o'chirish (CEO, ikki bosqichli) ─────────
+# Bot oddiy gapni vazifa deb tushunib Odoo'ga yozib qo'yishi mumkin — CEO uni shu
+# xabarning o'zidan o'chira oladi (ilgari buning uchun shaxsiy chatda /otask <raqam>
+# yozish kerak edi, raqam esa hech qayerda ko'rsatilmasdi).
+
+async def _set_markup(callback: CallbackQuery, markup: InlineKeyboardMarkup | None) -> None:
+    try:
+        await callback.message.edit_reply_markup(reply_markup=markup)
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("task_del:"))
+async def on_task_delete_ask(callback: CallbackQuery) -> None:
+    if not await _is_ceo_callback(callback):
+        return
+    await callback.answer()
+    task_id = int(callback.data.split(":")[1])
+    await _set_markup(callback, replies.delete_confirm_keyboard(task_id))
+
+
+@router.callback_query(F.data.startswith("task_delno:"))
+async def on_task_delete_cancel(callback: CallbackQuery) -> None:
+    if not await _is_ceo_callback(callback):
+        return
+    await callback.answer()
+    task_id = int(callback.data.split(":")[1])
+    await _set_markup(callback, replies.created_task_keyboard(task_id))
+
+
+@router.callback_query(F.data.startswith("task_delok:"))
+async def on_task_delete_confirm(callback: CallbackQuery, bot: Bot) -> None:
+    if not await _is_ceo_callback(callback):
+        return
+    await callback.answer()
+    task_id = int(callback.data.split(":")[1])
+    try:
+        await odoo.delete_task(task_id)
+    except Exception as e:
+        log.exception("task_delete failed %s", task_id)
+        await _set_markup(callback, replies.created_task_keyboard(task_id))
+        try:
+            await bot.send_message(
+                chat_id=callback.message.chat.id, message_thread_id=callback.message.message_thread_id,
+                text=f"⚠️ #{task_id} vazifani o'chirib bo'lmadi: {friendly_error(e)}",
+            )
+        except Exception:
+            pass
+        return
+    metrics.inc("tasks_deleted")
+    await _mark_task_message(callback.message, "\n\n🗑 <b>Vazifa Odoo'dan o'chirildi</b>")
 
 
 # ─── Callback: hodim "Bajarildi" / "Bekor qilindi" bosdi ──────────────────
@@ -856,10 +912,12 @@ async def _write_task(bot: Bot, result: AnalyzeResult, odoo_project_id: int,
                              telegram_message_id=telegram_message_id, title=task_title,
                              created_by_telegram_user_id=created_by_telegram_user_id)
 
+    metrics.inc("tasks_created")
     assignee = result.assignee_name if user_ids else None
-    text = replies.success_reply_text(task_title, department_label, assignee, result.deadline)
+    text = replies.success_reply_text(task_title, department_label, assignee, result.deadline, task_id)
     await asyncio.gather(_log(), bot.send_message(
-        chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=reply_thread_id, text=text))
+        chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=reply_thread_id, text=text,
+        reply_markup=replies.created_task_keyboard(task_id)))
     if user_ids:
         # Bu yo'l odatda tasdiqlash tugmasi (on_task_assign) orqali o'tadi, lekin
         # _resolve_assignee shu yerda ham to'g'ridan-to'g'ri bitta aniq nomzod topib

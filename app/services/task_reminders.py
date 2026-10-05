@@ -28,7 +28,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from app import ceo_state
+from app import ceo_state, scheduler_state
 from app.config import settings
 from app.db.repo import get_recent_task_logs
 from app.db.session import SessionLocal
@@ -280,13 +280,27 @@ async def run_daily_checks(bot) -> None:
             log.error("task_reminders: kunlik eslatma yuborilmadi: %s", result)
 
 
+_JOB = "task_reminders"
+_CATCH_UP_UNTIL_HOUR = 20  # bot kechikib tursa ham shu soatgacha o'sha kungi eslatma yuboriladi
+
+
+def is_due(now: datetime, last_run_day: str | None) -> bool:
+    """Bugungi eslatma hali yuborilmagan va vaqti kelganmi?
+
+    Ilgari tsikl "09:00 gacha kut" deb uxlardi: bot aynan shu paytda o'chiq yoki qayta
+    ishga tushayotgan bo'lsa, o'sha kungi eslatma butunlay o'tkazib yuborilardi."""
+    return (last_run_day != now.date().isoformat()
+            and now.time() >= _REMINDER_TIME and now.hour < _CATCH_UP_UNTIL_HOUR)
+
+
 async def _reminder_loop(bot) -> None:
     log.info("task_reminders: rejalashtiruvchi ishga tushdi (har kuni %s, Asia/Tashkent)", _REMINDER_TIME)
     while True:
-        target = _next_run(_REMINDER_TIME)
         try:
-            await asyncio.sleep(max(0.0, (target - datetime.now(_TZ)).total_seconds()))
-            await run_daily_checks(bot)
+            now = datetime.now(_TZ)
+            if is_due(now, scheduler_state.last_run(_JOB)):
+                scheduler_state.mark_run(_JOB, now.date().isoformat())
+                await run_daily_checks(bot)
         except asyncio.CancelledError:
             raise
         except Exception:

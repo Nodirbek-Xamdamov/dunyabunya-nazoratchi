@@ -14,18 +14,22 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import ceo_state
+from app import ceo_state, metrics, runtime
 from app.alerts import start_alerts
 from app.config import settings
 from app.db.session import init_db
 from app.rate_limiter import claim_throttle_notice, is_rate_limited
+from app.services.briefing import start_briefing_scheduler
 from app.services.claude_report import REPORTS_DIR
 from app.services.memory_digest import start_memory_scheduler
+from app.services.monitor import start_monitor
 from app.services.reports_cleanup import start_reports_cleanup_scheduler
+from app.services.status import is_test_odoo
 from app.services.task_reminders import start_task_reminder_scheduler
 from app.services.topic_check import verify_topic_projects
 from app.telegram.delivery import router as delivery_router
 from app.telegram.handlers import router as group_router
+from app.telegram.handlers_commands import publish_commands, router as commands_router
 from app.telegram.handlers_manager import router as manager_router
 
 # Vaqt belgisi bilan — so'rovlar ketma-ketligi va uzilish qachon boshlanganini logdan ko'rish uchun
@@ -52,6 +56,7 @@ def _setup_file_logging() -> None:
 
 bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
+dp.include_router(commands_router)  # birinchi: guruhdagi buyruqlar oddiy xabar sifatida tahlilga tushmasin
 dp.include_router(manager_router)
 dp.include_router(delivery_router)
 dp.include_router(group_router)
@@ -133,6 +138,7 @@ async def _run_update(update: Update) -> None:
     if sender_id is not None and not _is_backlog(update) and is_rate_limited(sender_id):
         log.warning("update %s: foydalanuvchi %s uchun rate limit — e'tiborsiz qoldirildi",
                     update.update_id, sender_id)
+        metrics.inc("throttled")
         await _notify_throttled(update, sender)
         return
     try:
@@ -210,6 +216,10 @@ def _polling_health() -> tuple[bool, dict]:
     return True, info
 
 
+# /status buyrug'i polling holatini shu funksiya orqali oladi (aylanma importsiz)
+runtime.polling_health = lambda: _polling_health()  # noqa: E731 — testlar _polling_health'ni almashtira olishi uchun
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _setup_file_logging()
@@ -220,8 +230,17 @@ async def lifespan(app: FastAPI):
     memory_tasks = start_memory_scheduler(settings.TELEGRAM_GROUP_ID)
     reports_cleanup_task = start_reports_cleanup_scheduler()
     task_reminder_task = start_task_reminder_scheduler(bot)
-    background = [t for t in (start_alerts(bot), asyncio.create_task(verify_topic_projects())) if t]
-    log.info("app.started port=%s", settings.APP_PORT)
+    background = [t for t in (
+        start_alerts(bot),
+        start_monitor(bot),
+        start_briefing_scheduler(bot),
+        asyncio.create_task(verify_topic_projects()),
+        asyncio.create_task(publish_commands(bot)),
+    ) if t]
+    log.info("app.started port=%s versiya=%s", settings.APP_PORT, runtime.code_version())
+    if is_test_odoo():
+        log.warning("Odoo SINOV bazasiga ulangan (%s) — bu baza qayta qurilganda manzili almashadi va bot "
+                    "yozgan vazifalar yo'qoladi; production uchun asosiy bazaga ulang", settings.ODOO_URL)
     yield
     polling_task.cancel()
     reports_cleanup_task.cancel()
@@ -231,6 +250,7 @@ async def lifespan(app: FastAPI):
     # Faol update tasklarini kutib olamiz (yopilayotganda qolib ketmasin)
     if _ACTIVE_UPDATES:
         await asyncio.gather(*_ACTIVE_UPDATES, return_exceptions=True)
+    metrics.flush()
     await bot.session.close()
 
 
@@ -249,4 +269,4 @@ async def health():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=settings.APP_PORT)
+    uvicorn.run(app, host=settings.APP_HOST, port=settings.APP_PORT)

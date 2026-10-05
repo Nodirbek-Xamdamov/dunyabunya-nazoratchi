@@ -26,6 +26,7 @@ ROLE_TOOLS: dict[Role, list[str]] = {
         "get_sales_by_seller", "get_employees_by_department",
         "get_upcoming_deadlines", "get_crm_funnel", "get_profit_summary",
         # Statistics
+        "get_daily_briefing",
         "generate_company_report", "generate_sales_report", "generate_invoice_report", "generate_task_report",
         # Manager stats (CEO superset bo'lishi uchun)
         "get_sales_stats", "get_invoice_stats", "get_sales_by_partner", "get_sales_by_product",

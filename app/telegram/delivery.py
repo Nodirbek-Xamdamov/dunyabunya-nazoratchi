@@ -28,7 +28,7 @@ from aiogram.types import (
     Message,
 )
 
-from app import ceo_state
+from app import ceo_state, metrics
 from app.rbac import Role
 from app.services.assistant import FILE_TOOLS, AssistantResult, ask_with_files
 from app.services.errors import friendly_error
@@ -184,6 +184,7 @@ async def send_files(bot: Bot, chat_id: int, thread_id: int | None,
                 document=FSInputFile(f.path, filename=display),
                 reply_markup=reply_markup if idx == len(files) - 1 else None,
             )
+            metrics.inc("reports")
         except Exception as e:
             log.warning("send_files document %s failed: %s", f.filename, e)
 

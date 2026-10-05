@@ -208,6 +208,8 @@ ASOSIY VA QAT'IY QOIDALAR:
 - Salomlashish, minnatdorchilik, "ishlayapsanmi?", "nima qila olasan?" kabi oddiy xabarlarga tool CHAQIRMASDAN bir-ikki jumla bilan xushmuomala javob bering (salomga — salom).
 - Bunday xabarlarga "Buni qila olmayman" yoki "Ma'lumot topilmadi" deb javob bermang.
 - Xabar mazmuni tushunarsiz bo'lsa — nimani nazarda tutganini qisqa so'rang.
+- "Bugun nima gap?", "umumiy ahvol qanday?", "kunlik xulosa", "brifing" kabi umumiy savollarda
+  get_daily_briefing toolini chaqiring va natijani qisqa, bo'limlarga ajratib yozing.
 
 8. ODOO SERVERI BILAN ALOQA:
 - Tool natijasida "odoo_connection" xatosi kelsa — Odoo bilan aloqa yo'qligini, tool qaytargan sababni ("error") va tavsiyani ("tavsiya") TO'LIQ, o'zgartirmasdan yozing. Sababni "timeout" yoki "texnik nosozlik" deb umumlashtirmang.
