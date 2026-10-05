@@ -13,3 +13,4 @@ run.pid.txt
 _deprecated_unused/
 tools/cloudflared.exe
 tools/cloudflared.log
+logs/

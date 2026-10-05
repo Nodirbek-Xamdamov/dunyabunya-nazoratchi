@@ -17,6 +17,9 @@ $ErrLog = Join-Path $ProjectDir "run.err.log"
 $HealthUrl = "http://127.0.0.1:8002/health"
 
 try {
+    # /health 200 qaytarsa — jarayon ham, Telegram'dan xabar olish (polling) ham ishlayapti.
+    # Polling to'xtab/osilib qolgan bo'lsa bot 503 qaytaradi (Invoke-WebRequest xato tashlaydi)
+    # va pastda qayta ishga tushiriladi.
     $resp = Invoke-WebRequest -Uri $HealthUrl -TimeoutSec 5 -UseBasicParsing
     if ($resp.StatusCode -eq 200) {
         exit 0  # Bot ishlab turibdi — hech narsa qilinmaydi
@@ -34,6 +37,22 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
     Where-Object { $_.CommandLine -match '-m\s+app\.main\s*$' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 2
+
+# Start-Process log faylini har safar YANGIDAN boshlaydi — bot nega to'xtaganini ko'rsatadigan
+# oxirgi yozuvlar (masalan Python traceback) yo'qolmasligi uchun avvalgisini arxivlaymiz.
+# So'nggi 20 ta arxiv saqlanadi. (Ilova loglarining o'zi logs\bot.log da aylanib turadi.)
+try {
+    $LogDir = Join-Path $ProjectDir "logs"
+    New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+    if ((Test-Path $ErrLog) -and (Get-Item $ErrLog).Length -gt 0) {
+        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        Move-Item -Path $ErrLog -Destination (Join-Path $LogDir "run.err.$stamp.log") -Force
+    }
+    Get-ChildItem -Path $LogDir -Filter "run.err.*.log" | Sort-Object LastWriteTime -Descending |
+        Select-Object -Skip 20 | Remove-Item -Force -ErrorAction SilentlyContinue
+} catch {
+    # Arxivlab bo'lmasa ham bot baribir ishga tushirilishi kerak
+}
 
 Start-Process -FilePath $Python -ArgumentList "-m", "app.main" -WorkingDirectory $ProjectDir `
     -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog -WindowStyle Hidden

@@ -172,8 +172,8 @@ async def save_group_message(session: AsyncSession, *, chat_id: int, topic_id: i
 async def get_group_messages_last_24h(session: AsyncSession, chat_id: int, limit: int = 50) -> list:
     """Oxirgi 24 soatdagi guruh xabarlarini olish — AI kontekst uchun."""
     from app.db.models import GroupMessage
-    from datetime import datetime, timedelta
-    since = datetime.utcnow() - timedelta(hours=24)
+    from datetime import datetime, timedelta, timezone
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
     result = await session.execute(
         select(GroupMessage)
         .where(GroupMessage.telegram_chat_id == chat_id)
@@ -196,14 +196,16 @@ async def get_all_group_messages(session: AsyncSession, chat_id: int) -> list:
     return list(result.scalars().all())
 
 
-async def delete_group_messages(session: AsyncSession, chat_id: int) -> int:
-    """Shu chat uchun BARCHA guruh xabarlarini o'chiradi — kunlik xulosa
-    yozilgach xom xabarlar jadvali cheksiz o'smasligi uchun (memory_digest.py)."""
+async def delete_group_messages(session: AsyncSession, chat_id: int, *, up_to_id: int | None = None) -> int:
+    """Shu chat uchun guruh xabarlarini o'chiradi — kunlik xulosa yozilgach xom xabarlar
+    jadvali cheksiz o'smasligi uchun (memory_digest.py). `up_to_id` berilsa faqat shu
+    id'gacha bo'lganlar (ya'ni xulosaga kirganlar) o'chiriladi."""
     from sqlalchemy import delete as sql_delete
     from app.db.models import GroupMessage
-    result = await session.execute(
-        sql_delete(GroupMessage).where(GroupMessage.telegram_chat_id == chat_id)
-    )
+    statement = sql_delete(GroupMessage).where(GroupMessage.telegram_chat_id == chat_id)
+    if up_to_id is not None:
+        statement = statement.where(GroupMessage.id <= up_to_id)
+    result = await session.execute(statement)
     await session.commit()
     return result.rowcount or 0
 

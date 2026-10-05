@@ -86,7 +86,10 @@ async def _openai_text(system: str, content: str) -> str:
 def _format_messages(messages: list[GroupMessage]) -> str:
     lines = []
     for m in messages:
-        ts = m.created_at.strftime("%H:%M") if m.created_at else "?"
+        created = m.created_at
+        if created is not None and created.tzinfo is not None:
+            created = created.astimezone(_TZ)  # bazada UTC — xulosada Toshkent vaqti
+        ts = created.strftime("%H:%M") if created else "?"
         lines.append(f"[{ts}] {m.from_user_name}: {m.text}")
     return "\n".join(lines)
 
@@ -106,13 +109,22 @@ async def run_daily_digest(chat_id: int) -> str | None:
         log.info("run_daily_digest: chat=%s uchun xabar yo'q, o'tkazib yuborildi", chat_id)
         return None
 
-    summary = await _openai_text(_DAILY_SYSTEM, _format_messages(messages)) or "(xulosa tayyorlab bo'lmadi)"
+    transcript = _format_messages(messages)
+    summary = await _openai_text(_DAILY_SYSTEM, transcript)
+    if not summary:
+        # Xulosa chiqmadi, xom xabarlar esa pastda o'chiriladi — kun mazmuni yo'qolmasligi
+        # uchun ularning o'zi yozib qo'yiladi (ilgari faqat "tayyorlab bo'lmadi" qolardi)
+        summary = "(xulosa tayyorlab bo'lmadi — xom xabarlar:)\n" + transcript[:6000]
 
-    today = date.today().isoformat()
-    _append(DAILY_MEMORY_PATH, f"## {today}\n\n{summary}\n{_ENTRY_SEP}")
+    # 00:10 da ishga tushadi — yozuv O'TGAN kunga tegishli
+    day = (datetime.now(_TZ) - timedelta(hours=1)).date().isoformat()
+    _append(DAILY_MEMORY_PATH, f"## {day}\n\n{summary}\n{_ENTRY_SEP}")
 
+    # Faqat xulosalangan xabarlar o'chiriladi: xulosa tayyorlanayotgan soniyalarda kelgan
+    # yangi xabarlar keyingi kunga qoladi (ilgari ular xulosasiz o'chib ketardi)
+    ids = [i for i in (getattr(m, "id", None) for m in messages) if i is not None]
     async with SessionLocal() as session:
-        deleted = await delete_group_messages(session, chat_id)
+        deleted = await delete_group_messages(session, chat_id, up_to_id=max(ids) if ids else None)
     log.info("run_daily_digest: chat=%s — %d xabar xulosalandi, %d ta o'chirildi",
               chat_id, len(messages), deleted)
     return summary

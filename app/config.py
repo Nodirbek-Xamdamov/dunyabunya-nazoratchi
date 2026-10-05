@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # Muddatsiz vazifa nechchi kundan keyin "eskirgan" deb CEOga eslatiladi (P1-6)
     TASK_REMINDER_STALE_DAYS: int = 3
 
+    # Tizim xatolari haqida ogohlantirish yuboriladigan Telegram chat (P1-2) — dasturchining
+    # shaxsiy chat_id'si yoki alohida "tizim-xato" guruhi. 0 = o'chirilgan.
+    ALERT_CHAT_ID: int = 0
+
 
     @property
     def ceo_usernames(self) -> set[str]:

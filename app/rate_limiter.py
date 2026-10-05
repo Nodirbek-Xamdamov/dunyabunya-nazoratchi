@@ -29,3 +29,17 @@ def is_rate_limited(user_id: int, *, max_messages: int = _MAX_MESSAGES,
         return True
     dq.append(now)
     return False
+
+
+_last_notice: dict[int, float] = {}
+
+
+def claim_throttle_notice(user_id: int, *, window_seconds: float = _WINDOW_SECONDS) -> bool:
+    """Limit oshgani haqida foydalanuvchiga xabar berish navbati: bir oynada faqat
+    birinchi chaqiruv True qaytaradi (har tashlab yuborilgan xabarga alohida javob ketmasin)."""
+    now = time.monotonic()
+    last = _last_notice.get(user_id)
+    if last is not None and now - last < window_seconds:
+        return False
+    _last_notice[user_id] = now
+    return True

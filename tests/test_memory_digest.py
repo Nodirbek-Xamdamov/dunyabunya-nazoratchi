@@ -78,7 +78,7 @@ async def test_daily_digest_no_messages_returns_none_and_writes_nothing(monkeypa
 
     called = {"delete": False}
 
-    async def fake_delete(session, chat_id):
+    async def fake_delete(session, chat_id, **kw):
         called["delete"] = True
         return 0
 
@@ -103,7 +103,7 @@ async def test_daily_digest_summarizes_writes_file_and_clears_messages(monkeypat
 
     deleted = {}
 
-    async def fake_delete(session, chat_id):
+    async def fake_delete(session, chat_id, **kw):
         deleted["chat_id"] = chat_id
         return len(messages)
 
@@ -125,7 +125,7 @@ async def test_daily_digest_openai_failure_still_writes_fallback_text(monkeypatc
     async def fake_get_all(session, chat_id):
         return [_FakeMsg("Nodir", "Salom")]
 
-    async def fake_delete(session, chat_id):
+    async def fake_delete(session, chat_id, **kw):
         return 1
 
     monkeypatch.setattr(memory_digest, "get_all_group_messages", fake_get_all)
