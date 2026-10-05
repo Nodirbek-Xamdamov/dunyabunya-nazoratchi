@@ -231,7 +231,8 @@ async def lifespan(app: FastAPI):
     await bot.session.close()
 
 
-app = FastAPI(lifespan=lifespan)
+# Avtomatik API hujjat sahifalari (/docs, /openapi.json) kerak emas — port tarmoqqa ochiq
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/reports", StaticFiles(directory=REPORTS_DIR), name="reports")
