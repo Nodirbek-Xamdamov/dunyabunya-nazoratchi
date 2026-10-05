@@ -2,15 +2,34 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
+import html as _html
+import re
+import shutil
+import time
 import uuid
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.services.odoo import OdooClient
+from app.services import report_html as rh
+from app.services.odoo import OdooClient, OdooError
 
 _odoo = OdooClient()
 REPORTS_DIR = Path(settings.STORAGE_DIR) / "reports"
+
+_TZ = ZoneInfo("Asia/Tashkent")
+# Hisobot/eksportlarda maydon nomlari, tanlov (selection) qiymatlari o'zbekcha chiqishi va
+# sanalar Toshkent vaqti bo'yicha guruhlanishi uchun. O'rnatilmagan tilni Odoo e'tiborsiz qoldiradi.
+_UZ_CTX = {"lang": "uz_UZ", "tz": "Asia/Tashkent"}
+_UZ_MONTHS = ("Yanvar", "Fevral", "Mart", "Aprel", "May", "Iyun",
+              "Iyul", "Avgust", "Sentabr", "Oktabr", "Noyabr", "Dekabr")
+
+# Odoo 18: account.payment holati 'draft/in_process/paid/canceled/rejected' ('posted' yo'q —
+# u bilan filtrlangan har qanday so'rov bo'sh qaytardi). 'posted' eski versiyalar uchun qoldirilgan.
+_PAYMENT_DONE_STATES = ["in_process", "paid", "posted"]
+_CURRENCY_NAMES = {"UZS": "so'm"}
 
 
 def _unguessable_suffix() -> str:
@@ -20,38 +39,388 @@ def _unguessable_suffix() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def _report_url(filename: str) -> str:
+    return f"{settings.PUBLIC_BASE_URL.rstrip('/')}/reports/{filename}"
+
+
+# ─── Umumiy yordamchilar ───────────────────────────────────────────────────
+
+def _today() -> date:
+    return datetime.now(_TZ).date()
+
+
+def _m2o_name(value, default: str = "Noma'lum") -> str:
+    """many2one qiymatidan ([id, nom]) nomni oladi."""
+    if isinstance(value, (list, tuple)) and len(value) > 1 and value[1]:
+        return str(value[1])
+    return default
+
+
+def _currency_label(value) -> str:
+    name = _m2o_name(value, "")
+    return _CURRENCY_NAMES.get(name, name)
+
+
+def _group_count(row: dict, groupby: str) -> int:
+    """read_group guruhidagi yozuvlar soni.
+
+    Odoo bu sonni so'ralgan "id:count" kalitida EMAS, `<maydon>_count` (yoki lazy=False
+    bo'lsa `__count`) kalitida qaytaradi. Ilgari kod `row.get("id:count")` deb o'qigani
+    uchun hisobotlarda "Buyurtmalar: 0", "CRM lidlar: 0" chiqardi."""
+    field = groupby.split(":")[0]
+    for key in ("__count", f"{field}_count", "id"):
+        value = row.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return 0
+
+
+def _month_key(row: dict, groupby: str) -> tuple[int, int] | None:
+    """"date_order:month" guruhining (yil, oy) kaliti — `__range`dan olinadi."""
+    start = ((row.get("__range") or {}).get(groupby) or {}).get("from")
+    if not start:
+        return None
+    try:
+        # Guruh Toshkent vaqti bo'yicha, chegara esa UTC'da kelishi mumkin ("...-28 19:00:00")
+        moment = datetime.fromisoformat(str(start).replace(" ", "T")) + timedelta(hours=12)
+    except ValueError:
+        return None
+    return moment.year, moment.month
+
+
+def _month_label(row: dict, groupby: str) -> str:
+    key = _month_key(row, groupby)
+    if key is None:
+        return str(row.get(groupby) or "Sanasi yo'q")
+    return f"{_UZ_MONTHS[key[1] - 1]} {key[0]}"
+
+
+def _dt_bounds(field: str, date_from: str = "", date_to: str = "") -> list:
+    """Sana-VAQT (datetime) maydoni uchun oraliq — Toshkent kuni bo'yicha, UTC'ga o'girilgan.
+
+    Ilgari `date_order <= '2026-10-05'` yozilardi: bu 5-oktabr 00:00 (UTC) gacha degani,
+    ya'ni oxirgi kunning deyarli barcha buyurtmalari hisobotdan tushib qolardi."""
+    bounds = []
+    midnight = datetime.min.time()
+    if date_from:
+        start = datetime.combine(date.fromisoformat(date_from[:10]), midnight, _TZ)
+        bounds.append([field, ">=", start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")])
+    if date_to:
+        end = datetime.combine(date.fromisoformat(date_to[:10]) + timedelta(days=1), midnight, _TZ)
+        bounds.append([field, "<", end.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")])
+    return bounds
+
+
+def _date_bounds(field: str, date_from: str = "", date_to: str = "") -> list:
+    """Faqat sana (date) maydoni uchun oraliq (ikkala chegara ham kiradi)."""
+    bounds = []
+    if date_from:
+        bounds.append([field, ">=", date.fromisoformat(date_from[:10]).isoformat()])
+    if date_to:
+        bounds.append([field, "<=", date.fromisoformat(date_to[:10]).isoformat()])
+    return bounds
+
+
+def _period_label(date_from: str, date_to: str) -> str:
+    return f"{date_from or 'Boshidan'} — {date_to or 'Hozirgacha'}"
+
+
+async def _rg(model: str, domain: list, fields: list, groupby, **kwargs) -> list[dict]:
+    """read_group (o'zbekcha kontekst bilan; bir nechta guruh bo'lsa lazy=False)."""
+    groupby = [groupby] if isinstance(groupby, str) else list(groupby)
+    kw = {"context": _UZ_CTX, **kwargs}
+    if len(groupby) > 1:
+        kw.setdefault("lazy", False)
+    return await _odoo.execute_kw(model, "read_group", [domain, fields, groupby], kw)
+
+
+def _clean_groups(rows: list[dict], groupby: str) -> list[dict]:
+    """read_group natijasini model o'qishi oson ko'rinishga keltiradi: guruh nomi, soni va
+    jamlangan maydonlar (`__domain`, `__range` kabi texnik kalitlarsiz)."""
+    out = []
+    for r in rows:
+        value = r.get(groupby)
+        item: dict = {}
+        if groupby.endswith(":month"):
+            item["davr"] = _month_label(r, groupby)
+        elif isinstance(value, (list, tuple)):
+            item["id"], item["nomi"] = value[0], _m2o_name(value)
+        else:
+            item["nomi"] = "Ko'rsatilmagan" if value in (False, None) else value
+        item["soni"] = _group_count(r, groupby)
+        for key, val in r.items():
+            if key.startswith("__") or key in (groupby, "id") or key.endswith("_count"):
+                continue
+            item[key] = val
+        out.append(item)
+    return out
+
+
+# ── Maydonlar sxemasi (nomi, turi, tanlov qiymatlari) ──
+
+_FIELDS_META_TTL = 600
+_fields_meta_cache: dict[str, tuple[float, dict]] = {}
+
+_TECHNICAL_FIELD_RE = re.compile(
+    r"^(message_|activity_|website_|rating_|access_|__)|^(create_uid|write_uid|write_date|"
+    r"has_message|my_activity_date_deadline|display_name)$"
+)
+
+
+async def _fields_meta(model: str) -> dict:
+    """Model maydonlari sxemasi — 10 daqiqa keshlanadi (har eksportda qayta so'ralmaydi)."""
+    now = time.monotonic()
+    cached = _fields_meta_cache.get(model)
+    if cached and now - cached[0] < _FIELDS_META_TTL:
+        return cached[1]
+    try:
+        meta = await _odoo.execute_kw(
+            model, "fields_get", [],
+            {"attributes": ["string", "type", "selection", "relation"], "context": _UZ_CTX},
+        )
+    except OdooError as e:
+        if e.kind:  # Odoo'ga yetib bo'lmadi — chaqiruvchi aniq sababni ko'rsatadi
+            raise
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if meta:
+        _fields_meta_cache[model] = (now, meta)
+    return meta
+
+
+def _field_label(field: str, meta: dict) -> str:
+    return str((meta.get(field) or {}).get("string") or field)
+
+
+async def _selection_labels(model: str, field: str) -> dict:
+    """Tanlov (selection) maydonining qiymat -> ko'rinadigan nom lug'ati."""
+    selection = ((await _fields_meta(model)).get(field) or {}).get("selection") or []
+    return {key: label for key, label in selection}
+
+
+def _local_datetime(value: str) -> str:
+    """Odoo datetime'ni (UTC) Toshkent vaqtiga o'girib, daqiqagacha yozadi."""
+    try:
+        moment = datetime.fromisoformat(value.replace(" ", "T")).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return value
+    return moment.astimezone(_TZ).strftime("%Y-%m-%d %H:%M")
+
+
+def _strip_tags(value: str) -> str:
+    text = re.sub(r"<br\s*/?>|</p>|</div>|</li>", "\n", value, flags=re.IGNORECASE)
+    return _html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+
+
+def _clean_cell_value(val):
+    """Odoo qiymatlarini o'qilishi oson formatga o'tkazish.
+    (id, name) m2o/m2m tuple'larini nomga aylantiradi."""
+    if isinstance(val, (list, tuple)) and len(val) == 2 and isinstance(val[0], (int, float)) \
+            and not isinstance(val[1], (int, float)):
+        # many2one: [id, name]
+        return val[1] if val[1] else str(val[0])
+    if isinstance(val, (list, tuple)):
+        # many2many: [[id, name], ...]
+        cleaned = [_clean_cell_value(v) for v in val]
+        return ", ".join(str(v) for v in cleaned)
+    return val
+
+
+def _display_cell(val, fmeta: dict, names: dict | None = None):
+    """Bitta katak qiymatini ko'rsatishga tayyorlaydi (maydon turiga qarab).
+
+    Odoo bo'sh maydon uchun ham False qaytaradi — u "False"/0 bo'lib emas, bo'sh katak
+    bo'lib chiqishi kerak; faqat haqiqiy mantiqiy maydon "Ha"/"Yo'q" bo'ladi."""
+    ftype = fmeta.get("type")
+    if ftype == "boolean":
+        return "Ha" if val else "Yo'q"
+    if val is None or val is False:
+        return ""
+    if ftype == "selection":
+        return dict(fmeta.get("selection") or []).get(val, val)
+    if ftype == "datetime" and isinstance(val, str):
+        return _local_datetime(val)
+    if ftype == "html" and isinstance(val, str):
+        return _strip_tags(val)
+    if ftype in ("many2many", "one2many") and isinstance(val, list):
+        if names is not None:
+            return ", ".join(str(names.get(i, i)) for i in val)
+        return f"{len(val)} ta" if val else ""
+    return _clean_cell_value(val)
+
+
+async def _resolve_x2many_names(raw: list[dict], fields: list[str], meta: dict) -> dict[str, dict]:
+    """Ko'p-qiymatli maydonlardagi (masalan vazifaning user_ids) ID'larni nomlarga o'giradi —
+    aks holda ro'yxatda mas'ullar o'rnida "87, 112" kabi raqamlar chiqardi."""
+    resolved: dict[str, dict] = {}
+    for field in fields:
+        fmeta = meta.get(field) or {}
+        relation = fmeta.get("relation")
+        if fmeta.get("type") not in ("many2many", "one2many") or not relation:
+            continue
+        ids = sorted({i for r in raw for i in (r.get(field) or []) if isinstance(i, int)})
+        if not ids or len(ids) > 3000:
+            continue
+        try:
+            records = await _odoo.execute_kw(relation, "read", [ids, ["display_name"]], {"context": _UZ_CTX})
+        except OdooError as e:
+            if e.kind:
+                raise
+            continue  # bu modelni o'qishga ruxsat yo'q — ID'lar soni ko'rsatiladi
+        resolved[field] = {r["id"]: r.get("display_name") or str(r["id"]) for r in records}
+    return resolved
+
+
+_READ_PAGE_SIZE = 2000
+
+
+async def _read_rows(model: str, domain: list | None = None, fields: list | None = None,
+                     limit: int = 1000, *, keep_id: bool = False) -> tuple[list[dict], list[tuple[str, str]], dict]:
+    """Yozuvlarni o'qib, ko'rsatishga tayyor holga keltiradi.
+
+    Qaytadi: (qatorlar {maydon: qiymat}, ustunlar [(maydon, sarlavha)], maydonlar sxemasi).
+    Sarlavhalar Odoo'dagi maydon nomi ("Bo'lim", "Ish telefoni"), texnik nom (department_id) emas.
+    Texnik "id" ustuni faqat `keep_id` bilan va aniq so'ralganda qoladi."""
+    meta = await _fields_meta(model)
+    flds = [f for f in (fields or []) if f != "id" or keep_id]
+    if not flds:
+        skip = {"one2many", "many2many", "binary", "text", "html", "json", "properties"}
+        flds = [f for f, m in meta.items()
+                if m.get("type") not in skip and f != "id" and not _TECHNICAL_FIELD_RE.search(f)][:25]
+        flds = flds or ["display_name"]
+
+    limit = max(1, int(limit or 1000))
+    raw: list[dict] = []
+    while len(raw) < limit:
+        kwargs = {"limit": min(_READ_PAGE_SIZE, limit - len(raw)), "context": _UZ_CTX}
+        if raw or limit > _READ_PAGE_SIZE:
+            # Bir nechta sahifa — tartib barqaror bo'lishi shart (aks holda qatorlar takrorlanadi)
+            kwargs.update(offset=len(raw), order="id")
+        page = await _odoo.execute_kw(model, "search_read", [domain or [], flds], kwargs)
+        raw.extend(page)
+        if len(page) < kwargs["limit"]:
+            break
+
+    names = await _resolve_x2many_names(raw, flds, meta)
+    rows = [{f: _display_cell(r.get(f), meta.get(f) or {}, names.get(f)) for f in flds} for r in raw]
+    return rows, [(f, _field_label(f, meta)) for f in flds], meta
+
+
+def _numeric_fields(columns: list[tuple[str, str]], meta: dict) -> list[str]:
+    """Jamlash ma'noga ega son ustunlar (summa, miqdor) — tartib raqami/rang kabi emas."""
+    skip = {"sequence", "color", "priority"}
+    return [f for f, _ in columns
+            if (meta.get(f) or {}).get("type") in ("float", "monetary", "integer") and f not in skip]
+
+
+async def _search_read_clean(model: str, domain: list | None = None,
+                             fields: list | None = None, limit: int = 1000) -> list[dict]:
+    """Odoo'dan yozuvlarni o'qib, nomlarini ochib beradi (kalitlar — maydon nomlari)."""
+    rows, _columns, _meta = await _read_rows(model, domain, fields, limit)
+    return rows
+
+
+async def _count(model: str, domain: list | None = None) -> int:
+    return await _odoo.execute_kw(model, "search_count", [domain or []])
+
+
+_storable_domain_cache: list | None = None
+
+
+async def _storable_domain() -> list:
+    """Omborda hisobga olinadigan mahsulotlar filtri. Odoo 18'da bu `is_storable=True`
+    (`type='product'` qiymati endi yo'q — u bilan qidiruv har doim 0 ta natija berardi)."""
+    global _storable_domain_cache
+    if _storable_domain_cache is None:
+        meta = await _fields_meta("product.product")
+        if not meta:
+            return [["type", "in", ["product", "consu"]]]
+        _storable_domain_cache = ([["is_storable", "=", True]] if "is_storable" in meta
+                                  else [["type", "=", "product"]])
+    return _storable_domain_cache
+
+
+async def _save_pdf(render, data: dict, filename: str) -> str:
+    """PDF'ni (reportlab — bloklovchi) alohida oqimda yasab, hisobotlar papkasiga ko'chiradi."""
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = await asyncio.to_thread(render, data)
+    shutil.move(tmp_path, str(REPORTS_DIR / filename))
+    return _report_url(filename)
+
+
 # ─── MOLIYA TOOLS ──────────────────────────────────────────────────────────
 
-async def search_kassa_chiqim(domain: list | None = None, limit: int = 50) -> list[dict]:
-    """Kassa chiqimlarini qidirish (account.move, out_invoice)."""
-    domain = domain or [["move_type", "=", "out_invoice"], ["state", "=", "posted"]]
-    return await _odoo.execute_kw(
-        "account.move", "search_read",
-        [domain, ["id", "name", "invoice_date", "amount_total", "partner_id", "state"]],
-        {"limit": limit, "order": "invoice_date desc"},
+# "Kassa chiqim" — shu kompaniya Odoo'sidagi alohida (Studio) hujjat: pul bir hisobdan
+# ("Chiqim") ikkinchisiga ("Kirim") o'tkaziladi. Ilgari bu tool mijozga yozilgan
+# hisob-fakturalarni (account.move, out_invoice) "kassa chiqimi" deb qaytarardi.
+_KASSA_MODEL = "x_kassa_chiqim"
+_KASSA_STATUS_FIELD = "x_studio_selection_field_8t_1je44ddti"
+_KASSA_STATUS_KEYS = {"new": "status1", "done": "status2", "cancel": "status3"}
+_KASSA_STATUS_LABELS = {"status1": "Yangi", "status2": "Bajarilgan", "status3": "Bekor qilingan"}
+
+
+async def search_kassa_chiqim(domain: list | None = None, limit: int = 50, status: str = "",
+                              date_from: str = "", date_to: str = "") -> dict:
+    """Kassa chiqimlari (Odoo'dagi "Kassa chiqim" hujjatlari): ro'yxat + valyuta bo'yicha jami."""
+    domain = list(domain or [])
+    if status:
+        domain.append([_KASSA_STATUS_FIELD, "=", _KASSA_STATUS_KEYS.get(status, status)])
+    domain += _dt_bounds("create_date", date_from, date_to)
+    limit = max(1, min(int(limit or 50), 200))
+
+    rows, total, sums = await asyncio.gather(
+        _odoo.execute_kw(
+            _KASSA_MODEL, "search_read",
+            [domain, ["x_name", "x_studio_amount", "x_studio_currency_id", "x_studio_chiqim",
+                      "x_studio_kirim", _KASSA_STATUS_FIELD, "x_studio_note_selection",
+                      "create_date", "create_uid"]],
+            {"limit": limit, "order": "id desc"},
+        ),
+        _count(_KASSA_MODEL, domain),
+        _rg(_KASSA_MODEL, domain, ["x_studio_amount"], ["x_studio_currency_id"]),
     )
-
-
-async def create_kassa_chiqim(partner_id: int, amount: float, description: str = "") -> int:
-    """Kassa chiqimi uchun qoralama (draft) yaratish."""
-    vals = {
-        "move_type": "out_invoice",
-        "partner_id": partner_id,
-        "invoice_line_ids": [(0, 0, {
-            "name": description or "Kassa chiqimi",
-            "quantity": 1,
-            "price_unit": amount,
-        })],
+    return {
+        "jami_soni": total,
+        "korsatilgan": len(rows),
+        "jami_summa": [
+            {"valyuta": _m2o_name(s.get("x_studio_currency_id"), "ko'rsatilmagan"),
+             "summa": s.get("x_studio_amount") or 0, "soni": _group_count(s, "x_studio_currency_id")}
+            for s in sums
+        ],
+        "yozuvlar": [
+            {"id": r["id"],
+             "sana": _local_datetime(r["create_date"]) if r.get("create_date") else "",
+             "summa": r.get("x_studio_amount") or 0,
+             "valyuta": _m2o_name(r.get("x_studio_currency_id"), ""),
+             "chiqim_hisobi": _m2o_name(r.get("x_studio_chiqim"), ""),
+             "kirim_hisobi": _m2o_name(r.get("x_studio_kirim"), ""),
+             "holat": _KASSA_STATUS_LABELS.get(r.get(_KASSA_STATUS_FIELD), r.get(_KASSA_STATUS_FIELD) or ""),
+             "turi": r.get("x_studio_note_selection") or "",
+             "izoh": r.get("x_name") or "",
+             "kiritgan": _m2o_name(r.get("create_uid"), "")}
+            for r in rows
+        ],
     }
-    return await _odoo.execute_kw("account.move", "create", [vals])
+
+
+async def create_kassa_chiqim(partner_id: int = 0, amount: float = 0, description: str = "") -> dict:
+    """Bot orqali kassa chiqimi yaratilmaydi.
+
+    Ilgari bu tool "kassa chiqimi" o'rniga mijozga HISOB-FAKTURA qoralamasini
+    (account.move, out_invoice) yaratardi — buxgalteriyada mutlaqo boshqa hujjat."""
+    return {"error": "Kassa chiqimini bot orqali yaratib bo'lmaydi: Odoo'dagi \"Kassa chiqim\" hujjati "
+                     "chiqim va kirim hisoblarini talab qiladi va tasdiqlanganda buxgalteriya "
+                     "o'tkazmasini yaratadi. Uni Odoo'ning o'zida kiriting. Mavjud chiqimlarni "
+                     "ko'rish uchun search_kassa_chiqim ishlatiladi."}
 
 
 async def search_payments(domain: list | None = None, limit: int = 50) -> list[dict]:
-    """To'lovlarni qidirish (account.payment)."""
-    domain = domain or [["state", "=", "posted"]]
+    """To'lovlarni qidirish (account.payment) — sukut bo'yicha o'tkazilgan to'lovlar."""
+    domain = domain or [["state", "in", _PAYMENT_DONE_STATES]]
     return await _odoo.execute_kw(
         "account.payment", "search_read",
-        [domain, ["id", "name", "date", "amount", "partner_id", "payment_type", "state"]],
+        [domain, ["id", "name", "date", "amount", "currency_id", "partner_id", "payment_type", "state"]],
         {"limit": limit, "order": "date desc"},
     )
 
@@ -66,115 +435,151 @@ async def create_payment_draft(partner_id: int, amount: float, payment_type: str
     return await _odoo.execute_kw("account.payment", "create", [vals])
 
 
-async def create_currency_exchange(from_currency_id: int, to_currency_id: int,
-                                    amount: float, rate: float) -> int:
-    """Valyuta ayirboshlash amaliyotini kiritish."""
-    vals = {
-        "currency_from_id": from_currency_id,
-        "currency_to_id": to_currency_id,
-        "amount": amount,
-        "rate": rate,
-    }
-    return await _odoo.execute_kw("res.currency.rate", "create", [vals])
+async def create_currency_exchange(from_currency_id: int = 0, to_currency_id: int = 0,
+                                    amount: float = 0, rate: float = 0) -> dict:
+    """Bot orqali valyuta ayirboshlash kiritilmaydi.
+
+    Ilgari bu tool valyuta KURSLARI jadvaliga (res.currency.rate) mavjud bo'lmagan
+    maydonlar bilan yozishga urinardi va har doim Odoo xatosi bilan tugardi."""
+    return {"error": "Valyuta ayirboshlashni bot orqali kiritib bo'lmaydi: Odoo'dagi \"Currency Exchange\" "
+                     "hujjati mijoz, kurs va buxgalteriya hisoblarini talab qiladi. Uni Odoo'ning "
+                     "o'zida kiriting. Mavjud ayirboshlashlarni ko'rish uchun odoo_search_read "
+                     "(model: account.currency.exchange) ishlatiladi."}
 
 
 async def get_invoice_pdf(invoice_id: int) -> str | None:
     """Schyot-faktura PDF hujjatini (reportlab bilan) generatsiya qilib, faylni
     REPORTS_DIR'ga saqlaydi va havolasini qaytaradi."""
-    try:
-        invoices = await _odoo.execute_kw(
-            "account.move", "search_read",
-            [[["id", "=", invoice_id]]],
-            {"fields": ["name", "invoice_date", "partner_id", "payment_state",
-                        "amount_total", "amount_tax", "amount_residual"], "limit": 1},
-        )
-        if not invoices:
-            return None
-        lines = await _odoo.execute_kw(
-            "account.move.line", "search_read",
-            [[["move_id", "=", invoice_id], ["display_type", "=", False]]],
-            {"fields": ["name", "quantity", "price_unit", "price_subtotal"]},
-        )
-        import asyncio
-        import shutil
-        from app.services.pdf_documents import render_invoice_pdf
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        tmp_path = await asyncio.to_thread(render_invoice_pdf, {"invoice": invoices[0], "lines": lines})
-        filename = f"invoice_{invoice_id}_{_unguessable_suffix()}.pdf"
-        out_path = REPORTS_DIR / filename
-        shutil.move(tmp_path, str(out_path))
-        return f"{settings.PUBLIC_BASE_URL}/reports/{filename}"
-    except Exception:
+    invoices = await _odoo.execute_kw(
+        "account.move", "search_read",
+        [[["id", "=", invoice_id]]],
+        {"fields": ["name", "invoice_date", "partner_id", "payment_state", "currency_id",
+                    "amount_total", "amount_tax", "amount_residual"], "limit": 1},
+    )
+    if not invoices:
         return None
+    lines = await _odoo.execute_kw(
+        "account.move.line", "search_read",
+        # Odoo 16+: mahsulot qatorlari display_type='product' (ilgari False edi — o'sha
+        # filtr bilan faktura PDF'i qatorlarsiz chiqardi)
+        [[["move_id", "=", invoice_id], ["display_type", "in", ["product", False]]]],
+        {"fields": ["name", "quantity", "price_unit", "price_subtotal"]},
+    )
+    from app.services.pdf_documents import render_invoice_pdf
+    return await _save_pdf(
+        render_invoice_pdf,
+        {"invoice": invoices[0], "lines": lines, "currency": _currency_label(invoices[0].get("currency_id"))},
+        f"invoice_{invoice_id}_{_unguessable_suffix()}.pdf",
+    )
 
 
 async def get_payment_receipt_pdf(payment_id: int) -> str | None:
     """To'lov kvitansiyasi PDF hujjatini generatsiya qilib, havolasini qaytaradi."""
-    try:
-        payments = await _odoo.execute_kw(
-            "account.payment", "search_read",
-            [[["id", "=", payment_id]]],
-            {"fields": ["name", "date", "partner_id", "payment_type", "amount", "state"], "limit": 1},
-        )
-        if not payments:
-            return None
-        import asyncio
-        import shutil
-        from app.services.pdf_documents import render_payment_receipt_pdf
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        tmp_path = await asyncio.to_thread(render_payment_receipt_pdf, {"payment": payments[0]})
-        filename = f"payment_{payment_id}_{_unguessable_suffix()}.pdf"
-        out_path = REPORTS_DIR / filename
-        shutil.move(tmp_path, str(out_path))
-        return f"{settings.PUBLIC_BASE_URL}/reports/{filename}"
-    except Exception:
+    payments = await _odoo.execute_kw(
+        "account.payment", "search_read",
+        [[["id", "=", payment_id]]],
+        {"fields": ["name", "date", "partner_id", "payment_type", "amount", "currency_id", "state"], "limit": 1},
+    )
+    if not payments:
         return None
+    from app.services.pdf_documents import render_payment_receipt_pdf
+    return await _save_pdf(
+        render_payment_receipt_pdf,
+        {"payment": payments[0], "currency": _currency_label(payments[0].get("currency_id"))},
+        f"payment_{payment_id}_{_unguessable_suffix()}.pdf",
+    )
 
 
 # ─── OMBOR TOOLS ───────────────────────────────────────────────────────────
 
 async def find_product(query: str, limit: int = 20) -> list[dict]:
-    """Mahsulotlarni qidirish."""
+    """Mahsulotlarni nomi, artikuli yoki shtrix-kodi bo'yicha qidirish."""
     return await _odoo.execute_kw(
         "product.product", "search_read",
-        [[["name", "ilike", query], ["type", "=", "product"]],
-         ["id", "name", "list_price", "qty_available", "categ_id"]],
+        [["|", "|", ["name", "ilike", query], ["default_code", "ilike", query], ["barcode", "ilike", query]],
+         ["id", "name", "default_code", "list_price", "qty_available", "uom_id", "categ_id"]],
         {"limit": limit},
     )
 
 
-async def check_stock_quant(product_id: int) -> dict | None:
-    """Mahsulotning ombordagi qoldig'ini tekshirish."""
-    result = await _odoo.execute_kw(
+async def check_stock_quant(product_id: int) -> dict:
+    """Mahsulotning ombordagi qoldig'i: jami va har bir ombor joyi bo'yicha.
+
+    Faqat ichki (internal) joylar hisoblanadi — ilgari birinchi uchragan bitta yozuv
+    qaytarilardi (u mijoz/ta'minotchi "joyi"dagi manfiy qoldiq bo'lishi ham mumkin edi)."""
+    quants = await _odoo.execute_kw(
         "stock.quant", "search_read",
-        [[["product_id", "=", product_id]],
-         ["id", "product_id", "location_id", "quantity", "reserved_quantity"]],
-        {"limit": 10},
-    )
-    return result[0] if result else None
-
-
-async def check_low_stock(threshold: float = 10.0) -> list[dict]:
-    """Kam qoldiqdagi mahsulotlarni aniqlash."""
-    all_products = await _odoo.execute_kw(
-        "product.product", "search_read",
-        [[["type", "=", "product"]],
-         ["id", "name", "qty_available", "list_price"]],
+        [[["product_id", "=", product_id], ["location_id.usage", "=", "internal"]],
+         ["product_id", "location_id", "quantity", "reserved_quantity"]],
         {"limit": 500},
     )
-    return [p for p in all_products if (p.get("qty_available") or 0) <= threshold]
+    total = sum(q.get("quantity") or 0 for q in quants)
+    reserved = sum(q.get("reserved_quantity") or 0 for q in quants)
+    return {
+        "product_id": product_id,
+        "mahsulot": _m2o_name(quants[0].get("product_id"), "") if quants else "",
+        "jami_qoldiq": total,
+        "band_qilingan": reserved,
+        "mavjud": total - reserved,
+        "joylar": [
+            {"joy": _m2o_name(q.get("location_id"), ""), "qoldiq": q.get("quantity") or 0,
+             "band_qilingan": q.get("reserved_quantity") or 0}
+            for q in quants if q.get("quantity")
+        ],
+    }
+
+
+async def check_low_stock(threshold: float = 10.0, include_zero: bool = False, limit: int = 100) -> dict:
+    """Kam qoldiqdagi mahsulotlar (0 < qoldiq <= chegara); tugaganlari alohida sanaladi."""
+    storable = await _storable_domain()
+    low = storable + [["qty_available", "<=", threshold]]
+    if not include_zero:
+        low = low + [["qty_available", ">", 0]]
+    limit = max(1, min(int(limit or 100), 300))
+    rows, total, out_of_stock = await asyncio.gather(
+        _odoo.execute_kw(
+            "product.product", "search_read",
+            [low, ["id", "name", "default_code", "qty_available", "uom_id", "categ_id"]],
+            {"limit": limit},
+        ),
+        _count("product.product", low),
+        _count("product.product", storable + [["qty_available", "<=", 0]]),
+    )
+    return {
+        "chegara": threshold,
+        "kam_qolgan_soni": total,
+        "tugagan_soni": out_of_stock,
+        "korsatilgan": len(rows),
+        "mahsulotlar": sorted(rows, key=lambda p: p.get("qty_available") or 0),
+    }
 
 
 async def create_internal_transfer(product_id: int, quantity: float,
                                     from_location_id: int, to_location_id: int) -> int:
-    """Ichki ko'chirish (transfer) hujjati yaratish."""
+    """Ichki ko'chirish (transfer) hujjati qoralamasini yaratish."""
+    # Operatsiya turi (picking_type_id) Odoo'da majburiy — ichki ko'chirish turi topiladi,
+    # imkon bo'lsa aynan shu manba joyiga biriktirilgani
+    types = await _odoo.execute_kw(
+        "stock.picking.type", "search_read",
+        [[["code", "=", "internal"]], ["id", "default_location_src_id"]],
+        {"limit": 50},
+    )
+    if not types:
+        raise OdooError("Odoo'da ichki ko'chirish (internal) operatsiya turi topilmadi")
+    picking_type = next(
+        (t for t in types if (t.get("default_location_src_id") or [None])[0] == from_location_id),
+        types[0],
+    )
     vals = {
+        "picking_type_id": picking_type["id"],
         "location_id": from_location_id,
         "location_dest_id": to_location_id,
         "move_ids": [(0, 0, {
             "product_id": product_id,
             "product_uom_qty": quantity,
             "name": f"Transfer #{product_id}",
+            "location_id": from_location_id,
+            "location_dest_id": to_location_id,
         })],
     }
     return await _odoo.execute_kw("stock.picking", "create", [vals])
@@ -182,41 +587,34 @@ async def create_internal_transfer(product_id: int, quantity: float,
 
 async def get_delivery_slip_pdf(picking_id: int) -> str | None:
     """Nakladnoy/transfer akti PDF hujjatini generatsiya qilib, havolasini qaytaradi."""
-    try:
-        pickings = await _odoo.execute_kw(
-            "stock.picking", "search_read",
-            [[["id", "=", picking_id]]],
-            {"fields": ["name", "location_id", "location_dest_id", "scheduled_date", "note"], "limit": 1},
-        )
-        if not pickings:
-            return None
-        raw_moves = await _odoo.execute_kw(
-            "stock.move", "search_read",
-            [[["picking_id", "=", picking_id]]],
-            # Bu Odoo versiyasida "quantity_done" mavjud emas — "quantity" ishlatiladi
-            {"fields": ["product_id", "product_uom_qty", "quantity"]},
-        )
-        moves = [{**m, "quantity_done": m.get("quantity", 0)} for m in raw_moves]
-        import asyncio
-        import shutil
-        from app.services.pdf_documents import render_delivery_slip_pdf
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        tmp_path = await asyncio.to_thread(render_delivery_slip_pdf, {"picking": pickings[0], "moves": moves})
-        filename = f"delivery_{picking_id}_{_unguessable_suffix()}.pdf"
-        out_path = REPORTS_DIR / filename
-        shutil.move(tmp_path, str(out_path))
-        return f"{settings.PUBLIC_BASE_URL}/reports/{filename}"
-    except Exception:
+    pickings = await _odoo.execute_kw(
+        "stock.picking", "search_read",
+        [[["id", "=", picking_id]]],
+        {"fields": ["name", "location_id", "location_dest_id", "scheduled_date", "note"], "limit": 1},
+    )
+    if not pickings:
         return None
+    raw_moves = await _odoo.execute_kw(
+        "stock.move", "search_read",
+        [[["picking_id", "=", picking_id]]],
+        # Bu Odoo versiyasida "quantity_done" mavjud emas — "quantity" ishlatiladi
+        {"fields": ["product_id", "product_uom_qty", "quantity"]},
+    )
+    moves = [{**m, "quantity_done": m.get("quantity", 0)} for m in raw_moves]
+    from app.services.pdf_documents import render_delivery_slip_pdf
+    return await _save_pdf(
+        render_delivery_slip_pdf, {"picking": pickings[0], "moves": moves},
+        f"delivery_{picking_id}_{_unguessable_suffix()}.pdf",
+    )
 
 
 # ─── SOTUV TOOLS ───────────────────────────────────────────────────────────
 
 async def find_partner(query: str, limit: int = 20) -> list[dict]:
-    """Mijozlarni qidirish."""
+    """Mijozlarni nomi yoki telefoni bo'yicha qidirish."""
     return await _odoo.execute_kw(
         "res.partner", "search_read",
-        [[["name", "ilike", query]],
+        [["|", ["name", "ilike", query], ["phone", "ilike", query]],
          ["id", "name", "email", "phone", "category_id"]],
         {"limit": limit},
     )
@@ -227,7 +625,7 @@ async def search_crm_leads(domain: list | None = None, limit: int = 50) -> list[
     domain = domain or []
     return await _odoo.execute_kw(
         "crm.lead", "search_read",
-        [domain, ["id", "name", "partner_name", "stage_id", "create_date", "user_id"]],
+        [domain, ["id", "name", "partner_name", "stage_id", "expected_revenue", "create_date", "user_id"]],
         {"limit": limit, "order": "create_date desc"},
     )
 
@@ -238,14 +636,14 @@ async def create_crm_lead(name: str, partner_name: str = "", planned_revenue: fl
     if partner_name:
         vals["partner_name"] = partner_name
     if planned_revenue:
-        vals["planned_revenue"] = planned_revenue
+        # Maydon nomi Odoo'da expected_revenue (planned_revenue eski versiyalarda edi)
+        vals["expected_revenue"] = planned_revenue
     return await _odoo.execute_kw("crm.lead", "create", [vals])
 
 
 async def find_stale_leads(days: int = 30) -> list[dict]:
     """Harakatsiz (eski) CRM lidlarni aniqlash."""
-    from datetime import datetime, timedelta
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    cutoff = (_today() - timedelta(days=days)).isoformat()
     leads = await _odoo.execute_kw(
         "crm.lead", "search_read",
         [[["create_date", "<", cutoff], ["stage_id.is_won", "=", False]],
@@ -261,11 +659,14 @@ async def create_sale_order_draft(partner_id: int, order_lines: list[dict]) -> i
     """
     line_vals = []
     for line in order_lines:
-        line_vals.append((0, 0, {
+        vals = {
             "product_id": line["product_id"],
-            "price_unit": line.get("price_unit", 0.0),
             "product_uom_qty": line.get("product_uom_qty", 1.0),
-        }))
+        }
+        # Narx berilmagan bo'lsa Odoo narxlar ro'yxatidan o'zi qo'yadi (0 yozib yuborilmaydi)
+        if line.get("price_unit") is not None:
+            vals["price_unit"] = line["price_unit"]
+        line_vals.append((0, 0, vals))
     vals = {
         "partner_id": partner_id,
         "order_line": line_vals,
@@ -274,87 +675,132 @@ async def create_sale_order_draft(partner_id: int, order_lines: list[dict]) -> i
 
 
 async def check_partner_debt(partner_id: int) -> dict:
-    """Mijozning qarzdorligini tekshirish."""
-    invoices = await _odoo.execute_kw(
-        "account.move", "search_read",
-        [[["partner_id", "=", partner_id], ["move_type", "=", "out_invoice"],
-          ["state", "=", "posted"], ["amount_residual", ">", 0]],
-         ["id", "name", "invoice_date", "amount_total", "amount_residual"]],
-        {"limit": 50, "order": "invoice_date desc"},
+    """Mijozning qarzdorligini tekshirish (jami — barcha to'lanmagan fakturalar bo'yicha)."""
+    domain = [["partner_id", "=", partner_id], ["move_type", "=", "out_invoice"],
+              ["state", "=", "posted"], ["amount_residual", ">", 0]]
+    invoices, totals = await asyncio.gather(
+        _odoo.execute_kw(
+            "account.move", "search_read",
+            [domain, ["id", "name", "invoice_date", "invoice_date_due", "amount_total",
+                      "amount_residual", "currency_id"]],
+            {"limit": 50, "order": "invoice_date desc"},
+        ),
+        _rg("account.move", domain, ["amount_residual"], ["currency_id"]),
     )
-    total_debt = sum(inv.get("amount_residual", 0) for inv in invoices)
+    debts = [
+        {"valyuta": _m2o_name(t.get("currency_id"), ""), "qarz": t.get("amount_residual") or 0,
+         "fakturalar_soni": _group_count(t, "currency_id")}
+        for t in totals
+    ]
     return {
         "partner_id": partner_id,
-        "total_debt": total_debt,
-        "unpaid_invoices": len(invoices),
+        "total_debt": sum(d["qarz"] for d in debts) if len(debts) <= 1 else None,
+        "qarz_valyuta_boyicha": debts,
+        "unpaid_invoices": sum(d["fakturalar_soni"] for d in debts),
         "invoices": invoices,
     }
 
 
 async def get_sale_order_pdf(order_id: int) -> str | None:
     """Sotuv buyurtmasi PDF hujjatini generatsiya qilib, havolasini qaytaradi."""
-    try:
-        orders = await _odoo.execute_kw(
-            "sale.order", "search_read",
-            [[["id", "=", order_id]]],
-            {"fields": ["name", "date_order", "partner_id", "user_id", "amount_total", "note"], "limit": 1},
-        )
-        if not orders:
-            return None
-        lines = await _odoo.execute_kw(
-            "sale.order.line", "search_read",
-            [[["order_id", "=", order_id], ["display_type", "=", False]]],
-            {"fields": ["product_id", "product_uom_qty", "price_unit", "price_subtotal"]},
-        )
-        import asyncio
-        import shutil
-        from app.services.pdf_documents import render_sale_order_pdf
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        tmp_path = await asyncio.to_thread(render_sale_order_pdf, {"order": orders[0], "lines": lines})
-        filename = f"sale_order_{order_id}_{_unguessable_suffix()}.pdf"
-        out_path = REPORTS_DIR / filename
-        shutil.move(tmp_path, str(out_path))
-        return f"{settings.PUBLIC_BASE_URL}/reports/{filename}"
-    except Exception:
+    orders = await _odoo.execute_kw(
+        "sale.order", "search_read",
+        [[["id", "=", order_id]]],
+        {"fields": ["name", "date_order", "partner_id", "user_id", "amount_total", "currency_id", "note"],
+         "limit": 1},
+    )
+    if not orders:
         return None
+    lines = await _odoo.execute_kw(
+        "sale.order.line", "search_read",
+        [[["order_id", "=", order_id], ["display_type", "=", False]]],
+        {"fields": ["product_id", "product_uom_qty", "price_unit", "price_subtotal"]},
+    )
+    from app.services.pdf_documents import render_sale_order_pdf
+    return await _save_pdf(
+        render_sale_order_pdf,
+        {"order": orders[0], "lines": lines, "currency": _currency_label(orders[0].get("currency_id"))},
+        f"sale_order_{order_id}_{_unguessable_suffix()}.pdf",
+    )
 
 
 # ─── CEO ANALYTICS TOOLS ───────────────────────────────────────────────────
 
+EXPORT_MAX_ROWS = 50000  # bitta faylga sig'adigan eng ko'p yozuv
 
-def _clean_cell_value(val):
-    """Odoo qiymatlarini o'qilishi oson formatga o'tkazish.
-    (id, name) m2o/m2m tuple'larini nomga aylantiradi."""
-    if isinstance(val, (list, tuple)) and len(val) == 2 and isinstance(val[0], (int, float)):
-        # many2one: [id, name]
-        return val[1] if val[1] else str(val[0])
-    if isinstance(val, (list, tuple)):
-        # many2many: [[id, name], ...]
-        cleaned = [_clean_cell_value(v) for v in val]
-        return ", ".join(str(v) for v in cleaned)
+
+def _export_slug(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9Ѐ-ӿ]+", "_", str(title).lower().replace("'", "")).strip("_") or "export"
+    return re.sub(r"_+", "_", slug)[:40]
+
+
+async def _export_rows(model: str, domain: list | None = None, fields: list | None = None,
+                       limit: int = 10000) -> tuple[list[dict], list[tuple[str, str]], int]:
+    """Eksport uchun tayyor qatorlar, ustunlar [(maydon, sarlavha)] va bazadagi JAMI soni."""
+    limit = max(1, min(int(limit or 10000), EXPORT_MAX_ROWS))
+    (rows, columns, _meta), total = await asyncio.gather(
+        _read_rows(model, domain, fields, limit, keep_id=True),
+        _count(model, domain),
+    )
+    return rows, columns, max(total, len(rows))
+
+
+def _export_result(filename: str, shown: int, total: int) -> dict | str:
+    """Fayl havolasi; yozuvlar sig'may qolgan bo'lsa — model buni foydalanuvchiga aytishi uchun
+    aniq sonlar bilan (ilgari 10 000 dan ortig'i hech qanday ogohlantirishsiz tushib qolardi)."""
+    url = _report_url(filename)
+    if total <= shown:
+        return url
+    return {
+        "url": url, "rows_in_file": shown, "rows_total": total,
+        "note": f"Faylga jami {total:,} ta yozuvdan dastlabki {shown:,} tasi kirdi — buni "
+                f"foydalanuvchiga ayting; to'liq ma'lumot uchun filtrni (davr, bo'lim) toraytirish kerak.",
+    }
+
+
+def _display_value(val) -> str:
+    """Katakka yoziladigan qiymat — 0 bo'lsa bo'sh qoldiriladi."""
+    if isinstance(val, bool):
+        return "Ha" if val else ""
+    if isinstance(val, (int, float)) and val == 0:
+        return ""
     return val
 
 
-async def _search_read_clean(model: str, domain: list | None = None,
-                             fields: list | None = None, limit: int = 1000) -> list[dict]:
-    """Odoo'dan yozuvlarni o'qib, nomlarini ochib beradi."""
-    flds = fields or []
-    if not flds:
-        # Model maydonlarini avtomatik aniqlash
-        meta = await _odoo.execute_kw(
-            model, "fields_get", [], {"attributes": ["string", "type"]}
-        )
-        skip = {"one2many", "many2many", "binary", "text"}
-        flds = [f for f, m in meta.items() if m.get("type") not in skip][:25]
-    rows = await _odoo.execute_kw(
-        model, "search_read", [domain or [], flds], {"limit": limit}
-    )
-    return [{k: _clean_cell_value(v) for k, v in r.items()} for r in rows]
+def _write_xlsx(path: Path, title: str, rows: list[dict], columns: list[tuple[str, str]]) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = re.sub(r"[\[\]:*?/\\]", " ", title or "Hisobot")[:31] or "Hisobot"
+
+    header_fill = PatternFill("solid", fgColor="1A1A2E")
+    header_font = Font(bold=True, color="FFFFFF")
+    for ci, (_field, label) in enumerate(columns, start=1):
+        cell = ws.cell(row=1, column=ci, value=str(label))
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    # Ma'lumotlar — 0 qiymatlar bo'sh (blank) qoldiriladi
+    for ri, row in enumerate(rows, start=2):
+        for ci, (field, _label) in enumerate(columns, start=1):
+            ws.cell(row=ri, column=ci, value=_display_value(row.get(field)))
+
+    for ci, (field, label) in enumerate(columns, start=1):
+        widest = max([len(str(label))] + [len(str(row.get(field, ""))) for row in rows[:200]])
+        ws.column_dimensions[get_column_letter(ci)].width = min(widest + 2, 45)
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    wb.save(path)
 
 
 async def export_excel(model: str = "", domain: list | None = None,
                        fields: list | None = None, title: str = "Hisobot",
-                       limit: int = 10000) -> str:
+                       limit: int = 10000) -> dict | str:
     """Odoo ma'lumotlarini haqiqiy Excel (.xlsx) faylga eksport qiladi.
 
     Foydalanuvchi excel/xlsx fayl so'raganda shu toolni chaqiring.
@@ -362,78 +808,30 @@ async def export_excel(model: str = "", domain: list | None = None,
     domain/fields: qidiruv shartlari — avvalgi tool natijasiga mos bo'lsin.
     Fayl diskka yoziladi va havola qaytariladi (bot faylni ham yuboradi).
     """
-    import re as _re
-    import uuid
-    from datetime import datetime
-
     if not model:
         return "Excel uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
 
-    rows = await _search_read_clean(model, domain, fields, limit=limit)
+    rows, columns, total = await _export_rows(model, domain, fields, limit)
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
-
     try:
-        from openpyxl import Workbook
-        from openpyxl.styles import Alignment, Font, PatternFill
-        from openpyxl.utils import get_column_letter
+        import openpyxl  # noqa: F401
     except Exception as e:
         return f"Excel kutubxonasi yo'q: {e}"
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{_export_slug(title)}_{uuid.uuid4().hex[:8]}.xlsx"
+    # Katta faylni yozish soniyalab davom etadi — boshqa foydalanuvchilar kutib qolmasligi uchun alohida oqimda
+    await asyncio.to_thread(_write_xlsx, REPORTS_DIR / filename, title, rows, columns)
+    return _export_result(filename, len(rows), total)
 
-    # Ustunlarni tartiblash: birinchi qator kalitlari + keyin qo'shimchalari
-    cols: list[str] = []
-    for row in rows:
-        for k in row.keys():
-            if k not in cols:
-                cols.append(k)
-    if not cols:
-        return "Eksport uchun ustunlar topilmadi."
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = (title or "Hisobot")[:31]
-
-    # Sarlavha
-    header_fill = PatternFill("solid", fgColor="1A1A2E")
-    header_font = Font(bold=True, color="FFFFFF")
-    for ci, col in enumerate(cols, start=1):
-        cell = ws.cell(row=1, column=ci, value=str(col))
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center")
-
-    # Ma'lumotlar — 0 qiymatlar bo'sh (blank) qoldiriladi
-    for ri, row in enumerate(rows, start=2):
-        for ci, col in enumerate(cols, start=1):
-            val = row.get(col)
-            if isinstance(val, (int, float)) and val == 0:
-                val = ""
-            ws.cell(row=ri, column=ci, value=val)
-
-    # Ustun kengliklari
-    for ci, col in enumerate(cols, start=1):
-        letter = get_column_letter(ci)
-        max_len = max([len(str(col))] + [len(str(row.get(col, ""))) for row in rows[:200]])
-        ws.column_dimensions[letter].width = min(max_len + 2, 45)
-
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-
-    slug = _re.sub(r"[^a-z0-9\u0400-\u04ff]+", "_", str(title).lower().replace("'", "")).strip("_") or "export"
-    slug = _re.sub(r"_+", "_", slug)
-    filename = f"{slug[:40]}_{uuid.uuid4().hex[:8]}.xlsx"
-    out_path = REPORTS_DIR / filename
-    wb.save(out_path)
-
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}/reports/{filename}"
+_HTML_REPORT_MAX_ROWS = 1000
 
 
 async def generate_html_report(model: str = "", domain: list | None = None,
                                fields: list | None = None,
-                               title: str = "Hisobot") -> str:
+                               title: str = "Hisobot") -> dict | str:
     """Har qanday Odoo model ma'lumotlaridan HTML hisobot (jadval + grafik) yaratadi.
 
     Foydalanuvchi HTML/grafik/jadval ko'rinishida so'raganda ishlatiladi.
@@ -444,19 +842,36 @@ async def generate_html_report(model: str = "", domain: list | None = None,
     if not model:
         return "HTML hisobot uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
 
-    rows = await _search_read_clean(model, domain, fields, limit=1000)
+    (rows, columns, meta), total = await asyncio.gather(
+        _read_rows(model, domain, fields, _HTML_REPORT_MAX_ROWS),
+        _count(model, domain),
+    )
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
 
-    # id ustunini olib tashlash (keraksiz)
-    for row in rows:
-        row.pop("id", None)
-
+    total = max(total, len(rows))
+    numeric = _numeric_fields(columns, meta)
+    totals = None
+    description = f"{total:,} ta yozuv"
+    if total > len(rows):
+        description = f"jami {total:,} ta yozuvdan dastlabki {len(rows):,} tasi (to'liq ro'yxat uchun Excel)"
+        if numeric:
+            # Jadvalga sig'magan qatorlar ham hisobga kirishi uchun yig'indini Odoo'ning o'zi hisoblaydi
+            try:
+                grouped = await _odoo.execute_kw(model, "read_group", [domain or [], numeric, []])
+                totals = grouped[0] if grouped else None
+            except OdooError as e:
+                if e.kind:
+                    raise
+                # Bazada saqlanmaydigan maydonni Odoo jamlay olmaydi — yig'indi kartochkasisiz davom etamiz
     link = generate_report_link(
-        title=title,
-        description=f"{model} — {len(rows)} ta yozuv",
-        rows=rows,
+        title=title, description=description.replace(",", " "), rows=rows,
+        columns=columns, numeric=numeric, totals=totals, total_rows=total,
     )
+    if link and total > len(rows):
+        return {"url": link, "rows_in_file": len(rows), "rows_total": total,
+                "note": f"Hisobotga jami {total:,} ta yozuvdan dastlabki {len(rows):,} tasi sig'di — buni "
+                        f"foydalanuvchiga ayting (to'liq ro'yxat uchun Excel)."}
     return link or "Hisobot yaratilmadi."
 
 
@@ -472,12 +887,10 @@ async def aggregate_data(model: str, group_by: str, fields: list[str],
 
 async def growth_dynamics(model: str, date_field: str, value_field: str,
                            domain: list | None = None) -> list[dict]:
-    """O'sish dinamikasini hisoblash."""
-    domain = domain or []
-    return await _odoo.execute_kw(
-        model, "read_group",
-        [domain, [value_field], [f"{date_field}:month"]],
-    )
+    """O'sish dinamikasini hisoblash (oylar kesimida)."""
+    groupby = f"{date_field}:month"
+    rows = await _rg(model, domain or [], [value_field], groupby)
+    return _clean_groups(rows, groupby)
 
 
 async def search_employees_readonly(query: str = "") -> list[dict]:
@@ -487,181 +900,151 @@ async def search_employees_readonly(query: str = "") -> list[dict]:
         domain.append(["name", "ilike", query])
     return await _odoo.execute_kw(
         "hr.employee", "search_read",
-        [domain, ["id", "name", "job_id", "department_id", "work_email"]],
-        {"limit": 50},
+        [domain, ["id", "name", "job_id", "department_id", "work_email", "work_phone", "mobile_phone"]],
+        {"limit": 1000},
     )
 
 
 # ─── FORMAT EXPORTS (Word/PDF/CSV) ──────────────────────────────────────────
 
-def _export_slug(title: str) -> str:
-    import re as _re
-    slug = _re.sub(r"[^a-z0-9\u0400-\u04ff]+", "_", str(title).lower().replace("'", "")).strip("_") or "export"
-    return _re.sub(r"_+", "_", slug)[:40]
+def _write_docx(path: Path, title: str, subtitle: str, rows: list[dict],
+                columns: list[tuple[str, str]]) -> None:
+    import docx
+    from docx.enum.table import WD_TABLE_ALIGNMENT
 
+    doc = docx.Document()
+    doc.add_heading(title or "Hisobot", level=1)
+    doc.add_paragraph().add_run(subtitle).italic = True
 
-async def _export_rows(model: str, domain: list | None = None,
-                       fields: list | None = None, limit: int = 10000):
-    """Eksport uchun tozalangan qatorlar + ustunlar ro'yxati."""
-    rows = await _search_read_clean(model, domain, fields, limit=limit)
-    if not rows:
-        return [], []
-    cols: list[str] = []
+    tbl = doc.add_table(rows=1, cols=len(columns))
+    tbl.style = "Light Grid Accent 1"
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for cell, (_field, label) in zip(tbl.rows[0].cells, columns):
+        cell.text = str(label)
+        for para in cell.paragraphs:
+            for run in para.runs:
+                run.bold = True
     for row in rows:
-        for k in row.keys():
-            if k not in cols:
-                cols.append(k)
-    return rows, cols
-
-
-def _display_value(val) -> str:
-    """Katakka yoziladigan qiymat — 0 bo'lsa bo'sh qoldiriladi."""
-    if isinstance(val, (int, float)) and val == 0:
-        return ""
-    if isinstance(val, bool):
-        return "Ha" if val else "Yo'q"
-    return val
+        cells = tbl.add_row().cells
+        for cell, (field, _label) in zip(cells, columns):
+            val = _display_value(row.get(field))
+            cell.text = "" if val is None else str(val)
+    doc.save(path)
 
 
 async def export_word(model: str = "", domain: list | None = None,
                       fields: list | None = None, title: str = "Hisobot",
-                      limit: int = 10000) -> str:
+                      limit: int = 10000) -> dict | str:
     """Odoo ma'lumotlaridan Word (.docx) hujjat yaratadi.
     Foydalanuvchi 'word', 'docx', 'hujjat qilib ber' so'rasa ishlatiladi.
     model: qaysi Odoo model (masalan hr.employee, sale.order)
     """
-    import uuid
-    from datetime import datetime
-
     if not model:
         return "Word uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
-    rows, cols = await _export_rows(model, domain, fields, limit=limit)
+    # Word jadvali minglab qatorda juda sekin va og'ir — 2000 qator bilan cheklanadi
+    rows, columns, total = await _export_rows(model, domain, fields, min(int(limit or 2000), 2000))
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
-
     try:
-        import docx
-        from docx.enum.table import WD_TABLE_ALIGNMENT
-        from docx.shared import Pt
+        import docx  # noqa: F401
     except Exception as e:
         return f"Word kutubxonasi yo'q: {e}"
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    doc = docx.Document()
-    doc.add_heading(title or "Hisobot", level=1)
-    p = doc.add_paragraph()
-    p.add_run(f"{model} — {len(rows)} ta yozuv • {datetime.now().strftime('%Y-%m-%d %H:%M')}").italic = True
-
-    table = doc.add_table(rows=1, cols=len(cols))
-    table.style = "Light Grid Accent 1"
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    hdr = table.rows[0].cells
-    for i, col in enumerate(cols):
-        hdr[i].text = str(col)
-        for para in hdr[i].paragraphs:
-            for run in para.runs:
-                run.bold = True
-
-    for row in rows:
-        cells = table.add_row().cells
-        for ci, col in enumerate(cols):
-            val = _display_value(row.get(col))
-            cells[ci].text = str(val) if val is not None else ""
-
     filename = f"{_export_slug(title)}_{uuid.uuid4().hex[:8]}.docx"
-    out_path = REPORTS_DIR / filename
-    doc.save(out_path)
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}/reports/{filename}"
+    subtitle = f"{len(rows)} ta yozuv • {datetime.now(_TZ).strftime('%Y-%m-%d %H:%M')}"
+    await asyncio.to_thread(_write_docx, REPORTS_DIR / filename, title, subtitle, rows, columns)
+    return _export_result(filename, len(rows), total)
 
 
-async def export_pdf(model: str = "", domain: list | None = None,
-                     fields: list | None = None, title: str = "Hisobot",
-                     limit: int = 10000) -> str:
-    """Odoo ma'lumotlaridan PDF hisobot yaratadi.
-    Foydalanuvchi 'pdf', 'pdf qilib ber' so'rasa ishlatiladi.
-    """
-    import uuid
+def _write_pdf(path: Path, title: str, subtitle: str, rows: list[dict],
+               columns: list[tuple[str, str]]) -> None:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-    if not model:
-        return "PDF uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
-    rows, cols = await _export_rows(model, domain, fields, limit=limit)
-    if not rows:
-        return "Bu so'rov bo'yicha ma'lumot topilmadi."
-
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.units import mm
-        from reportlab.platypus import (
-            Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
-        )
-    except Exception as e:
-        return f"PDF kutubxonasi yo'q: {e}"
-
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{_export_slug(title)}_{uuid.uuid4().hex[:8]}.pdf"
-    out_path = REPORTS_DIR / filename
+    from app.services.pdf_documents import FONT, FONT_BOLD
 
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("TitleX", parent=styles["Title"], fontSize=16)
-    head_style = ParagraphStyle("HeadX", parent=styles["Heading3"], fontSize=9, textColor=colors.white)
-    cell_style = ParagraphStyle("CellX", parent=styles["BodyText"], fontSize=7.5, leading=9)
+    title_style = ParagraphStyle("TitleX", parent=styles["Title"], fontName=FONT_BOLD, fontSize=16)
+    sub_style = ParagraphStyle("SubX", parent=styles["Normal"], fontName=FONT)
+    head_style = ParagraphStyle("HeadX", parent=styles["BodyText"], fontName=FONT_BOLD, fontSize=8.5,
+                                leading=10, textColor=colors.white)
+    cell_style = ParagraphStyle("CellX", parent=styles["BodyText"], fontName=FONT, fontSize=7.5, leading=9)
 
-    doc = SimpleDocTemplate(str(out_path), pagesize=landscape(A4),
+    def para(value, style):
+        # Paragraph matnni XML sifatida o'qiydi — "&", "<" ekranlanmasa PDF yaratilmay qoladi
+        text = "" if value is None else str(value)
+        return Paragraph(_html.escape(text, quote=False), style)
+
+    doc = SimpleDocTemplate(str(path), pagesize=landscape(A4),
                             leftMargin=10 * mm, rightMargin=10 * mm,
                             topMargin=12 * mm, bottomMargin=12 * mm,
                             title=title or "Hisobot")
-
-    story = [Paragraph(str(title or "Hisobot"), title_style),
-             Spacer(1, 4 * mm),
-             Paragraph(f"{model} — {len(rows)} ta yozuv", styles["Normal"])]
-
-    data = [[Paragraph(f"<b>{col}</b>", head_style) for col in cols]]
+    data = [[para(label, head_style) for _field, label in columns]]
     for row in rows:
-        data.append([Paragraph(str(_display_value(row.get(col)) or ""), cell_style) for col in cols])
+        data.append([para(_display_value(row.get(field)), cell_style) for field, _label in columns])
 
-    t = Table(data, repeatRows=1)
-    t.setStyle(TableStyle([
+    tbl = Table(data, repeatRows=1)
+    tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A1A2E")),
         ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cccccc")),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f4f8")]),
     ]))
-    story.append(Spacer(1, 4 * mm))
-    story.append(t)
-    doc.build(story)
+    doc.build([para(title or "Hisobot", title_style), Spacer(1, 4 * mm),
+               para(subtitle, sub_style), Spacer(1, 4 * mm), tbl])
 
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}/reports/{filename}"
+
+async def export_pdf(model: str = "", domain: list | None = None,
+                     fields: list | None = None, title: str = "Hisobot",
+                     limit: int = 10000) -> dict | str:
+    """Odoo ma'lumotlaridan PDF hisobot yaratadi.
+    Foydalanuvchi 'pdf', 'pdf qilib ber' so'rasa ishlatiladi.
+    """
+    if not model:
+        return "PDF uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
+    # PDF jadvali sahifalab teriladi — 5000 qatordan ortig'i daqiqalab ketadi
+    rows, columns, total = await _export_rows(model, domain, fields, min(int(limit or 5000), 5000))
+    if not rows:
+        return "Bu so'rov bo'yicha ma'lumot topilmadi."
+    try:
+        import reportlab  # noqa: F401
+    except Exception as e:
+        return f"PDF kutubxonasi yo'q: {e}"
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{_export_slug(title)}_{uuid.uuid4().hex[:8]}.pdf"
+    await asyncio.to_thread(_write_pdf, REPORTS_DIR / filename, title, f"{len(rows)} ta yozuv", rows, columns)
+    return _export_result(filename, len(rows), total)
+
+
+def _write_csv(path: Path, rows: list[dict], columns: list[tuple[str, str]]) -> None:
+    import csv
+
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow([label for _field, label in columns])
+        for row in rows:
+            writer.writerow([_display_value(row.get(field)) for field, _label in columns])
 
 
 async def export_csv(model: str = "", domain: list | None = None,
                      fields: list | None = None, title: str = "Hisobot",
-                     limit: int = 10000) -> str:
+                     limit: int = 10000) -> dict | str:
     """Odoo ma'lumotlaridan CSV fayl yaratadi (Excel ocha oladi)."""
-    import csv
-    import uuid
-
     if not model:
         return "CSV uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
-    rows, cols = await _export_rows(model, domain, fields, limit=limit)
+    rows, columns, total = await _export_rows(model, domain, fields, limit)
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{_export_slug(title)}_{uuid.uuid4().hex[:8]}.csv"
-    out_path = REPORTS_DIR / filename
-
-    with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerow(cols)
-        for row in rows:
-            writer.writerow([str(_display_value(row.get(c)) or "") for c in cols])
-
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}/reports/{filename}"
+    await asyncio.to_thread(_write_csv, REPORTS_DIR / filename, rows, columns)
+    return _export_result(filename, len(rows), total)
 
 
 # ─── MATN (TELEGRAM CHATIGA) EKSPORT ────────────────────────────────────────
@@ -672,6 +1055,7 @@ TEXT_EXPORT_MAX_ROWS = 300  # bundan ko'pi chatda o'qib bo'lmaydi — Excel tavs
 # olib ketadi: ro'yxatni model qayta yozmaydi (qisqartirmaydi, xato qilmaydi) — bot
 # o'zi to'liq yuboradi.
 _text_exports: dict[str, str] = {}
+_TEXT_EXPORTS_MAX = 50  # olib ketilmagan (masalan javob yo'lda uzilgan) matnlar to'planib qolmasligi uchun
 
 
 def pop_text_export(token: str) -> str | None:
@@ -698,9 +1082,6 @@ async def export_text(model: str = "", domain: list | None = None,
     tayyorlaydi (foydalanuvchi "matn", "shu yerga yoz" desa). Birinchi field — asosiy
     (qalin) ustun, qolganlari "Nomi: qiymat" ko'rinishida; group_by berilsa yozuvlar
     shu field bo'yicha guruhlab chiqariladi."""
-    import asyncio
-    import html
-
     if not model:
         return "Matn uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
     limit = max(1, min(int(limit or TEXT_EXPORT_MAX_ROWS), TEXT_EXPORT_MAX_ROWS))
@@ -708,31 +1089,27 @@ async def export_text(model: str = "", domain: list | None = None,
     if group_by and group_by not in flds:
         flds.append(group_by)
 
-    rows, total = await asyncio.gather(
-        _search_read_clean(model, domain, flds, limit=limit),
-        _odoo.execute_kw(model, "search_count", [domain or []]),
+    (rows, columns, _meta), total = await asyncio.gather(
+        _read_rows(model, domain, flds, limit),
+        _count(model, domain),
     )
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
-
-    try:
-        meta = await _odoo.execute_kw(model, "fields_get", [flds], {"attributes": ["string"]})
-    except Exception:
-        meta = {}  # nomlarsiz ham chiqaveradi — texnik field nomi ishlatiladi
-    labels = {f: (meta.get(f) or {}).get("string") or f for f in flds}
+    labels = dict(columns)
 
     main, *rest = [f for f in flds if f != group_by] or flds
 
     def _line(n: int, row: dict) -> str:
-        head = html.escape(_text_value(row.get(main)) or "—", quote=False)
+        head = _html.escape(_text_value(row.get(main)) or "—", quote=False)
         details = [
-            f"{html.escape(str(labels[f]), quote=False)}: {html.escape(v, quote=False)}"
+            f"{_html.escape(str(labels[f]), quote=False)}: {_html.escape(v, quote=False)}"
             for f in rest if (v := _text_value(row.get(f)))
         ]
         return f"{n}. <b>{head}</b>" + (" — " + "; ".join(details) if details else "")
 
     shown = len(rows)
-    safe_title = html.escape(str(title or "Ro'yxat"), quote=False)
+    total = max(total, shown)
+    safe_title = _html.escape(str(title or "Ro'yxat"), quote=False)
     header = f"<b>{safe_title}</b> — {shown:,} ta yozuv"
     if total > shown:
         header += (f"\nJami {total:,} ta yozuvdan dastlabki {shown:,} tasi ko'rsatildi — "
@@ -745,13 +1122,15 @@ async def export_text(model: str = "", domain: list | None = None,
         # Guruhsiz ("") yozuvlar oxirida
         for name in sorted(groups, key=lambda g: (g == "", g.casefold())):
             members = groups[name]
-            group_title = html.escape(name or "Ko'rsatilmagan", quote=False)
+            group_title = _html.escape(name or "Ko'rsatilmagan", quote=False)
             out.append(f"<b>{group_title}</b> ({len(members)} ta)")
             out.extend(_line(n, row) for n, row in enumerate(members, start=1))
             out.append("")
     else:
         out.extend(_line(n, row) for n, row in enumerate(rows, start=1))
 
+    while len(_text_exports) >= _TEXT_EXPORTS_MAX:
+        _text_exports.pop(next(iter(_text_exports)))
     token = uuid.uuid4().hex[:12]
     _text_exports[token] = "\n".join(out).strip()
     return {
@@ -765,495 +1144,328 @@ async def export_text(model: str = "", domain: list | None = None,
 
 # ─── CEO EXTRA ANALYTICS ───────────────────────────────────────────────────
 
+_UNPAID_INVOICE_DOMAIN = [["move_type", "=", "out_invoice"], ["state", "=", "posted"],
+                          ["amount_residual", ">", 0]]
+
+
 async def get_top_debtors(limit: int = 10) -> list[dict]:
-    """Eng katta qarzdor mijozlar (to'lanmagan fakturalar bo'yicha)."""
-    return await _odoo.execute_kw(
-        "account.move", "search_read",
-        [[["move_type", "in", ["out_invoice", "out_refund"]], ["state", "=", "posted"],
-          ["amount_residual", ">", 0]],
-         ["id", "name", "partner_id", "invoice_date", "invoice_date_due", "amount_total", "amount_residual"]],
-        {"limit": limit, "order": "amount_residual desc"},
+    """Eng katta qarzdor MIJOZLAR — har bir mijozning barcha to'lanmagan fakturalari jami.
+
+    Ilgari eng katta alohida FAKTURALAR qaytarilardi: 179 ta mayda qarzi bor mijoz
+    ro'yxatga kirmay, bitta katta fakturali mijoz birinchi bo'lib chiqardi."""
+    rows = await _rg(
+        "account.move", _UNPAID_INVOICE_DOMAIN, ["amount_residual"], ["partner_id", "currency_id"],
+        limit=max(1, min(int(limit or 10), 100)), orderby="amount_residual desc",
     )
+    return [
+        {"mijoz": _m2o_name(r.get("partner_id")),
+         "partner_id": (r.get("partner_id") or [None])[0],
+         "qarz": r.get("amount_residual") or 0,
+         "valyuta": _m2o_name(r.get("currency_id"), ""),
+         "tolanmagan_fakturalar": _group_count(r, "partner_id")}
+        for r in rows
+    ]
 
 
-async def get_overdue_invoices(days: int = 30) -> list[dict]:
-    """Muddati o'tgan to'lanmagan fakturalar."""
-    from datetime import datetime, timedelta
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    return await _odoo.execute_kw(
-        "account.move", "search_read",
-        [[["move_type", "in", ["out_invoice", "out_refund"]], ["state", "=", "posted"],
-          ["amount_residual", ">", 0], ["invoice_date_due", "<", cutoff]],
-         ["id", "name", "partner_id", "invoice_date", "invoice_date_due", "amount_total", "amount_residual"]],
-        {"limit": 100, "order": "invoice_date_due asc"},
+async def get_overdue_invoices(days: int = 0) -> dict:
+    """To'lov muddati o'tgan to'lanmagan fakturalar (`days` — kamida necha kun kechikkan)."""
+    cutoff = (_today() - timedelta(days=max(0, int(days or 0)))).isoformat()
+    domain = _UNPAID_INVOICE_DOMAIN + [["invoice_date_due", "<", cutoff]]
+    invoices, totals = await asyncio.gather(
+        _odoo.execute_kw(
+            "account.move", "search_read",
+            [domain, ["id", "name", "partner_id", "invoice_date", "invoice_date_due",
+                      "amount_total", "amount_residual", "currency_id"]],
+            {"limit": 100, "order": "invoice_date_due asc"},
+        ),
+        _rg("account.move", domain, ["amount_residual"], ["currency_id"]),
     )
+    return {
+        "jami": [
+            {"valyuta": _m2o_name(t.get("currency_id"), ""), "qarz": t.get("amount_residual") or 0,
+             "fakturalar_soni": _group_count(t, "currency_id")}
+            for t in totals
+        ],
+        "korsatilgan": len(invoices),
+        "fakturalar": invoices,
+    }
 
 
 async def get_cashflow_summary(date_from: str = "", date_to: str = "") -> list[dict]:
-    """Kassa/pul oqimi xulosasi — oylar bo'yicha kirim va chiqim (account.payment)."""
-    domain = [["state", "=", "posted"]]
-    if date_from:
-        domain.append(["date", ">=", date_from])
-    if date_to:
-        domain.append(["date", "<=", date_to])
-    return await _odoo.execute_kw(
-        "account.payment", "read_group",
-        [domain, ["amount", "payment_type"], ["date:month"]],
-    )
+    """Pul oqimi — oylar va valyutalar bo'yicha kirim, chiqim va farqi (account.payment)."""
+    domain = [["state", "in", _PAYMENT_DONE_STATES]] + _date_bounds("date", date_from, date_to)
+    groups = await _rg("account.payment", domain, ["amount"], ["date:month", "payment_type", "currency_id"])
+    months: dict[tuple, dict] = {}
+    for g in groups:
+        key = (_month_key(g, "date:month") or (0, 0), _m2o_name(g.get("currency_id"), ""))
+        item = months.setdefault(key, {"davr": _month_label(g, "date:month"), "valyuta": key[1],
+                                        "kirim": 0.0, "chiqim": 0.0})
+        side = "kirim" if g.get("payment_type") == "inbound" else "chiqim"
+        item[side] += g.get("amount") or 0
+    return [{**item, "farq": item["kirim"] - item["chiqim"]} for _key, item in sorted(months.items())]
 
 
 async def get_sales_by_seller(date_from: str = "", date_to: str = "", limit: int = 10) -> list[dict]:
-    """Sotuvchilar bo'yicha sotuv reytingi (sale.order user_id)."""
-    domain = [["state", "in", ["sale", "done"]]]
-    if date_from:
-        domain.append(["date_order", ">=", date_from])
-    if date_to:
-        domain.append(["date_order", "<=", date_to])
-    return await _odoo.execute_kw(
-        "sale.order", "read_group",
-        [domain, ["amount_total", "id:count"], ["user_id"]],
-        {"limit": limit},
-    )
+    """Sotuvchilar bo'yicha sotuv reytingi (summa kamayish tartibida)."""
+    domain = [["state", "in", ["sale", "done"]]] + _dt_bounds("date_order", date_from, date_to)
+    rows = await _rg("sale.order", domain, ["amount_total"], "user_id",
+                     limit=limit, orderby="amount_total desc")
+    return _clean_groups(rows, "user_id")
 
 
 async def get_employees_by_department() -> list[dict]:
     """Xodimlar soni bo'limlar bo'yicha (hr.employee)."""
-    return await _odoo.execute_kw(
-        "hr.employee", "read_group",
-        [[["active", "=", True], ["department_id", "!=", False]], ["id:count"], ["department_id"]],
-    )
+    rows = await _rg("hr.employee", [["active", "=", True]], ["id:count"], "department_id")
+    return sorted(_clean_groups(rows, "department_id"), key=lambda g: -g["soni"])
 
 
 async def get_upcoming_deadlines(days: int = 7) -> list[dict]:
     """Yaqin muddatdagi (N kun ichida) ochiq vazifalar."""
-    from datetime import datetime, timedelta
-    today = datetime.now().strftime("%Y-%m-%d")
-    end = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+    today = _today()
     return await _odoo.execute_kw(
         "project.task", "search_read",
-        [[["state", "not in", ["done", "cancelled"]], ["date_deadline", ">=", today],
-          ["date_deadline", "<=", end]],
+        [[["state", "not in", ["1_done", "1_canceled"]],
+          ["date_deadline", ">=", today.isoformat()],
+          ["date_deadline", "<=", (today + timedelta(days=days)).isoformat() + " 23:59:59"]],
          ["id", "name", "project_id", "user_ids", "date_deadline", "state", "priority"]],
         {"limit": 100, "order": "date_deadline asc"},
     )
 
 
 async def get_crm_funnel() -> list[dict]:
-    """CRM funnel — lidlar bosqichlar bo'yicha (faqat mavjud maydonlar)."""
-    return await _odoo.execute_kw(
-        "crm.lead", "read_group",
-        [[], ["id:count"], ["stage_id"]],
-    )
+    """CRM funnel — lidlar bosqichlar bo'yicha, kutilayotgan daromad bilan."""
+    rows = await _rg("crm.lead", [], ["expected_revenue"], "stage_id")
+    return _clean_groups(rows, "stage_id")
 
 
 async def get_profit_summary(date_from: str = "", date_to: str = "") -> dict:
-    """Foyda xulosasi: sotuv, to'langan, qarz va to'lovlar balansi."""
-    # To'lanmagan qarz (customer invoices)
-    domain = [["move_type", "in", ["out_invoice", "out_refund"]], ["state", "=", "posted"]]
-    if date_from:
-        domain.append(["invoice_date", ">=", date_from])
-    if date_to:
-        domain.append(["invoice_date", "<=", date_to])
-    invoices = await _odoo.execute_kw(
-        "account.move", "search_read",
-        [domain, ["amount_total", "amount_residual"]],
-        {"limit": 500},
-    )
-    total_invoiced = sum(i.get("amount_total", 0) or 0 for i in invoices)
-    total_residual = sum(i.get("amount_residual", 0) or 0 for i in invoices)
+    """Fakturalar va to'lovlar xulosasi (valyuta bo'yicha): yozilgan fakturalar, qolgan qarz,
+    mijozlardan tushgan va chiqib ketgan to'lovlar.
 
-    # To'lovlar (income payments)
-    pdomain = [["state", "=", "posted"], ["payment_type", "=", "inbound"]]
-    if date_from:
-        pdomain.append(["date", ">=", date_from])
-    if date_to:
-        pdomain.append(["date", "<=", date_to])
-    payments = await _odoo.execute_kw(
-        "account.payment", "search_read",
-        [pdomain, ["amount"]],
-        {"limit": 1000},
+    Ilgari birinchi 500 ta faktura va 1000 ta to'lov qo'lda qo'shilardi — bu bazada (75 000
+    faktura) natija bir necha foizni tashkil qilardi; to'lovlar esa 'posted' holati bo'yicha
+    qidirilgani uchun 0 chiqardi. Endi jamlashni Odoo'ning o'zi bajaradi."""
+    inv_domain = ([["move_type", "in", ["out_invoice", "out_refund"]], ["state", "=", "posted"]]
+                  + _date_bounds("invoice_date", date_from, date_to))
+    pay_domain = [["state", "in", _PAYMENT_DONE_STATES]] + _date_bounds("date", date_from, date_to)
+    invoices, payments = await asyncio.gather(
+        _rg("account.move", inv_domain, ["amount_total", "amount_residual"], ["currency_id", "move_type"]),
+        _rg("account.payment", pay_domain, ["amount"], ["currency_id", "payment_type"]),
     )
-    total_paid = sum(p.get("amount", 0) or 0 for p in payments)
+    by_currency: dict[str, dict] = {}
+
+    def bucket(row: dict) -> dict:
+        return by_currency.setdefault(_m2o_name(row.get("currency_id"), "ko'rsatilmagan"), {
+            "jami_faktura": 0.0, "qaytarilgan": 0.0, "qolgan_qarz": 0.0, "fakturalar_soni": 0,
+            "mijozlardan_tushgan": 0.0, "chiqim_tolovlar": 0.0,
+        })
+
+    for row in invoices:
+        b = bucket(row)
+        if row.get("move_type") == "out_refund":
+            b["qaytarilgan"] += row.get("amount_total") or 0
+        else:
+            b["jami_faktura"] += row.get("amount_total") or 0
+            b["qolgan_qarz"] += row.get("amount_residual") or 0
+            b["fakturalar_soni"] += _group_count(row, "currency_id")
+    for row in payments:
+        side = "mijozlardan_tushgan" if row.get("payment_type") == "inbound" else "chiqim_tolovlar"
+        bucket(row)[side] += row.get("amount") or 0
 
     return {
-        "jami_faktura": round(total_invoiced, 2),
-        "to_langan": round(total_paid, 2),
-        "qolgan_qarz": round(total_residual, 2),
-        "fakturalar_soni": len(invoices),
+        "davr": _period_label(date_from, date_to),
+        "valyutalar": [{"valyuta": cur, **{k: round(v, 2) for k, v in vals.items()}}
+                       for cur, vals in by_currency.items()],
+        "izoh": "Bu sof foyda EMAS (tannarx va xarajatlar hisobga olinmagan) — faqat fakturalar "
+                "va to'lovlar yig'indisi. Turli valyutalardagi summalar qo'shilmaydi.",
     }
 
 
 # ─── STATISTICS TOOLS ───────────────────────────────────────────────────────
 
+_SALE_DONE = [["state", "in", ["sale", "done"]]]
+
+
 async def get_sales_stats(date_from: str = "", date_to: str = "", group_by: str = "date_order:month") -> list[dict]:
     """Sotuv statistikasi — sale.order bo'yicha guruhlab hisoblash."""
-    domain = [["state", "in", ["sale", "done"]]]
-    if date_from:
-        domain.append(["date_order", ">=", date_from])
-    if date_to:
-        domain.append(["date_order", "<=", date_to])
-    return await _odoo.execute_kw(
-        "sale.order", "read_group",
-        [domain, ["amount_total", "amount_tax"], [group_by]],
-    )
+    domain = _SALE_DONE + _dt_bounds("date_order", date_from, date_to)
+    rows = await _rg("sale.order", domain, ["amount_total", "amount_tax"], group_by)
+    return _clean_groups(rows, group_by)
+
 
 async def get_sales_by_partner(date_from: str = "", date_to: str = "", limit: int = 20) -> list[dict]:
-    """Sotuv statistikasi — mijozlar bo'yicha."""
-    domain = [["state", "in", ["sale", "done"]]]
-    if date_from:
-        domain.append(["date_order", ">=", date_from])
-    if date_to:
-        domain.append(["date_order", "<=", date_to])
-    return await _odoo.execute_kw(
-        "sale.order", "read_group",
-        [domain, ["amount_total"], ["partner_id"]],
-        {"limit": limit},
-    )
+    """Sotuv statistikasi — eng ko'p xarid qilgan mijozlar (summa kamayish tartibida)."""
+    domain = _SALE_DONE + _dt_bounds("date_order", date_from, date_to)
+    rows = await _rg("sale.order", domain, ["amount_total"], "partner_id",
+                     limit=limit, orderby="amount_total desc")
+    return _clean_groups(rows, "partner_id")
+
+
+def _sale_line_domain(date_from: str, date_to: str) -> list:
+    """Faqat TASDIQLANGAN buyurtmalarning mahsulot qatorlari, buyurtma sanasi bo'yicha
+    (ilgari qoralama/bekor qilingan takliflar ham qo'shilib, summa oshib ketardi)."""
+    return (_SALE_DONE + [["product_id", "!=", False], ["display_type", "=", False]]
+            + _dt_bounds("order_id.date_order", date_from, date_to))
+
 
 async def get_sales_by_product(date_from: str = "", date_to: str = "", limit: int = 20) -> list[dict]:
-    """Sotuv statistikasi — mahsulotlar bo'yicha."""
-    domain = []
-    if date_from:
-        domain.append(["create_date", ">=", date_from])
-    if date_to:
-        domain.append(["create_date", "<=", date_to])
-    return await _odoo.execute_kw(
-        "sale.order.line", "read_group",
-        [domain, ["price_subtotal", "product_uom_qty"], ["product_id"]],
-        {"limit": limit},
-    )
+    """Sotuv statistikasi — eng ko'p sotilgan mahsulotlar (summa kamayish tartibida)."""
+    rows = await _rg("sale.order.line", _sale_line_domain(date_from, date_to),
+                     ["price_subtotal", "product_uom_qty"], "product_id",
+                     limit=limit, orderby="price_subtotal desc")
+    return _clean_groups(rows, "product_id")
+
 
 async def get_invoice_stats(date_from: str = "", date_to: str = "") -> list[dict]:
-    """Schyot-faktura statistikasi."""
-    domain = [["move_type", "in", ["out_invoice", "out_refund"]], ["state", "=", "posted"]]
-    if date_from:
-        domain.append(["invoice_date", ">=", date_from])
-    if date_to:
-        domain.append(["invoice_date", "<=", date_to])
-    return await _odoo.execute_kw(
-        "account.move", "read_group",
-        [domain, ["amount_total", "amount_residual"], ["invoice_date:month"]],
-    )
+    """Schyot-faktura statistikasi (mijozlarga yozilgan, oylar kesimida)."""
+    domain = ([["move_type", "=", "out_invoice"], ["state", "=", "posted"]]
+              + _date_bounds("invoice_date", date_from, date_to))
+    rows = await _rg("account.move", domain, ["amount_total", "amount_residual"], "invoice_date:month")
+    return _clean_groups(rows, "invoice_date:month")
+
 
 async def get_crm_stats() -> list[dict]:
     """CRM lidlar statistikasi."""
-    return await _odoo.execute_kw(
-        "crm.lead", "read_group",
-        [[], ["id:count"], ["stage_id"]],
+    return _clean_groups(await _rg("crm.lead", [], ["id:count"], "stage_id"), "stage_id")
+
+
+async def _task_state_groups() -> list[dict]:
+    """Vazifalar holatlar bo'yicha: [{"holat": kod, "nomi": o'zbekcha nom, "soni": n}]."""
+    rows, labels = await asyncio.gather(
+        _rg("project.task", [], ["id:count"], "state"),
+        _selection_labels("project.task", "state"),
     )
+    return [
+        {"holat": r.get("state") or "", "nomi": labels.get(r.get("state"), r.get("state") or "Ko'rsatilmagan"),
+         "soni": _group_count(r, "state")}
+        for r in rows
+    ]
+
 
 async def get_task_stats() -> list[dict]:
     """Vazifalar statistikasi."""
-    return await _odoo.execute_kw(
-        "project.task", "read_group",
-        [[], ["id:count"], ["state"]],
-    )
+    return await _task_state_groups()
+
+
+async def _single_currency_note(model: str, domain: list) -> str:
+    """Summalar qaysi valyutada ekanini aytadi; aralash bo'lsa — ogohlantiradi."""
+    groups = await _rg(model, domain, ["amount_total"], "currency_id")
+    names = [_m2o_name(g.get("currency_id"), "") for g in groups if g.get("currency_id")]
+    if len(names) == 1:
+        return f"Summalar valyutasi: {names[0]}"
+    if len(names) > 1:
+        parts = ", ".join(f"{_m2o_name(g.get('currency_id'), '')}: {rh.fmt_num(g.get('amount_total'))}"
+                          for g in groups if g.get("currency_id"))
+        return f"Diqqat: hujjatlar turli valyutalarda ({parts}) — jami summalar ularning oddiy yig'indisi."
+    return ""
+
 
 async def generate_sales_report(date_from: str = "", date_to: str = "") -> str:
     """Sotuv hisoboti — boyitilgan HTML report: grafik + jadvallar + tahlil."""
-    from app.services.claude_report import generate_report_link
-    import asyncio
-    import uuid, os
-    from datetime import datetime
-
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    domain = _SALE_DONE + _dt_bounds("date_order", date_from, date_to)
 
-    # 1. Oylik sotuv
-    domain = [["state", "in", ["sale", "done"]]]
-    if date_from:
-        domain.append(["date_order", ">=", date_from])
-    if date_to:
-        domain.append(["date_order", "<=", date_to])
-    
-    # 2. Mijozlar bo'yicha (top 15)
-    line_domain = []
-    if date_from:
-        line_domain.append(["create_date", ">=", date_from])
-    if date_to:
-        line_domain.append(["create_date", "<=", date_to])
-
-    # Mustaqil statistikalarni PARALLEL o'qiymiz
-    monthly, by_partner, by_product, by_seller = await asyncio.gather(
-        _odoo.execute_kw(
-            "sale.order", "read_group",
-            [domain, ["amount_total", "amount_tax"], ["date_order:month"]],
-            {},
-        ),
-        _odoo.execute_kw(
-            "sale.order", "read_group",
-            [domain, ["amount_total", "id:count"], ["partner_id"]],
-            {"limit": 15},
-        ),
-        _odoo.execute_kw(
-            "sale.order.line", "read_group",
-            [line_domain, ["price_subtotal", "product_uom_qty"], ["product_id"]],
-            {"limit": 15},
-        ),
-        _odoo.execute_kw(
-            "sale.order", "read_group",
-            [domain, ["amount_total", "id:count"], ["user_id"]],
-            {"limit": 10},
-        ),
+    # Mustaqil statistikalarni PARALLEL o'qiymiz. "Top" ro'yxatlar summa bo'yicha
+    # saralanadi (ilgari tartibsiz birinchi 15 ta guruh olinardi — ular eng yiriklari emas edi).
+    monthly, by_partner, by_product, by_seller, currency_note = await asyncio.gather(
+        _rg("sale.order", domain, ["amount_total", "amount_tax"], "date_order:month"),
+        _rg("sale.order", domain, ["amount_total"], "partner_id", limit=15, orderby="amount_total desc"),
+        _rg("sale.order.line", _sale_line_domain(date_from, date_to),
+            ["price_subtotal", "product_uom_qty"], "product_id", limit=15, orderby="price_subtotal desc"),
+        _rg("sale.order", domain, ["amount_total"], "user_id", limit=10, orderby="amount_total desc"),
+        _single_currency_note("sale.order", domain),
     )
-    
-    # 5. Umumiy statistika
-    total_orders = sum(m.get("date_order_count", 0) for m in monthly)
-    total_amount = sum(m.get("amount_total", 0) for m in monthly)
-    total_tax = sum(m.get("amount_tax", 0) for m in monthly)
-    
-    # HTML report yaratish
+
+    total_orders = sum(_group_count(m, "date_order:month") for m in monthly)
+    total_amount = sum(m.get("amount_total") or 0 for m in monthly)
+    total_tax = sum(m.get("amount_tax") or 0 for m in monthly)
+
+    month_labels = [_month_label(m, "date_order:month") for m in monthly]
+    month_values = [round(m.get("amount_total") or 0) for m in monthly]
+
+    def top(rows: list[dict], field: str, measure: str, n: int) -> tuple[list[str], list]:
+        return ([_m2o_name(r.get(field))[:40] for r in rows[:n]],
+                [round(r.get(measure) or 0) for r in rows[:n]])
+
+    partner_labels, partner_values = top(by_partner, "partner_id", "amount_total", 10)
+    product_labels, product_values = top(by_product, "product_id", "price_subtotal", 10)
+    seller_labels, seller_values = top(by_seller, "user_id", "amount_total", 8)
+
+    charts = rh.Charts()
+    body = "\n".join([
+        rh.section(
+            "Oylik sotuv dinamikasi",
+            charts.add(month_labels, month_values, label="Sotuv"),
+            rh.table(["Oy", "Buyurtmalar", "Sotuv summasi"],
+                     [[lb, _group_count(m, "date_order:month"), val]
+                      for lb, m, val in zip(month_labels, monthly, month_values)]),
+        ),
+        rh.section(
+            "Top mijozlar",
+            charts.add(partner_labels, partner_values, horizontal=True, color="#f472b6", label="Summa"),
+            rh.table(["Mijoz", "Buyurtmalar", "Summa"],
+                     [[_m2o_name(p.get("partner_id")), _group_count(p, "partner_id"),
+                       round(p.get("amount_total") or 0)] for p in by_partner], numbered=True),
+        ),
+        rh.section(
+            "Top mahsulotlar",
+            charts.add(product_labels, product_values, horizontal=True, color="#22d3ee", label="Summa"),
+            rh.table(["Mahsulot", "Miqdori", "Summa"],
+                     [[_m2o_name(p.get("product_id")), round(p.get("product_uom_qty") or 0),
+                       round(p.get("price_subtotal") or 0)] for p in by_product], numbered=True),
+        ),
+        rh.section(
+            "Sotuvchilar reytingi",
+            charts.add(seller_labels, seller_values, kind="doughnut"),
+            rh.table(["Sotuvchi", "Buyurtmalar", "Summa"],
+                     [[_m2o_name(s.get("user_id"), "Biriktirilmagan"), _group_count(s, "user_id"),
+                       round(s.get("amount_total") or 0)] for s in by_seller], numbered=True),
+        ),
+        rh.note(currency_note),
+    ])
+
+    page = rh.page(
+        title="Sotuv hisoboti", subtitle=_period_label(date_from, date_to),
+        cards=[rh.card("Jami buyurtmalar", rh.fmt_int(total_orders)),
+               rh.card("Jami sotuv", rh.fmt_num(total_amount)),
+               rh.card("O'rtacha buyurtma", rh.fmt_num(total_amount / total_orders if total_orders else 0)),
+               *([rh.card("Soliq", rh.fmt_num(total_tax))] if total_tax else [])],
+        body=body, charts=charts,
+    )
     filename = f"sales_{uuid.uuid4().hex[:12]}.html"
-    
-    # Oylik chart data
-    month_labels = [str(m.get("date_order:month", "")) for m in monthly]
-    month_values = [round(m.get("amount_total", 0), 0) for m in monthly]
-    month_orders = [m.get("date_order_count", 0) for m in monthly]
-    
-    # Mijozlar chart data
-    partner_labels = []
-    partner_values = []
-    for p in by_partner[:10]:
-        name = str(p.get("partner_id", ["Noma'lum"])[1])[:25] if isinstance(p.get("partner_id"), list) else "Noma'lum"
-        partner_labels.append(name)
-        partner_values.append(round(p.get("amount_total", 0), 0))
-    
-    # Mahsulotlar chart data
-    product_labels = []
-    product_values = []
-    for pr in by_product[:10]:
-        name = str(pr.get("product_id", ["Noma'lum"])[1])[:25] if isinstance(pr.get("product_id"), list) else "Noma'lum"
-        product_labels.append(name)
-        product_values.append(round(pr.get("price_subtotal", 0), 0))
-    
-    # Sotuvchilar chart data
-    seller_labels = []
-    seller_values = []
-    for s in by_seller[:8]:
-        name = str(s.get("user_id", ["Noma'lum"])[1])[:25] if isinstance(s.get("user_id"), list) else "Noma'lum"
-        seller_labels.append(name)
-        seller_values.append(round(s.get("amount_total", 0), 0))
-    
-    def fmt(n):
-        if n >= 1_000_000_000:
-            return f"{n/1_000_000_000:.1f} mlrd"
-        if n >= 1_000_000:
-            return f"{n/1_000_000:.1f} mln"
-        if n >= 1_000:
-            return f"{n/1_000:.1f} ming"
-        return str(int(n))
-
-    # Grafik chizish qoidasi: bo'sh, yagona yoki 0 qiymatli ma'lumotga grafik chizilmaydi
-    def chart_ok(values):
-        return sum(1 for v in values if v) >= 2
-
-    def kpi_chips(labels, values):
-        chips = ""
-        for lb, vl in zip(labels, values):
-            if vl:
-                chips += (f'<div class="kpi-chip"><div class="kpi-value">{fmt(vl)}</div>'
-                          f'<div class="kpi-label">{lb}</div></div>')
-        return f'<div class="kpi-row">{chips}</div>' if chips else ""
-    
-    def bars_html(labels, values, color="#4361ee"):
-        if not values:
-            return ""
-        mx = max(values) or 1
-        items = ""
-        for lb, vl in zip(labels, values):
-            pct = (vl / mx) * 100
-            items += f'<div class="bar-row"><div class="bar-label">{lb}</div><div class="bar-container"><div class="bar" style="width:{pct:.0f}%;background:{color}"></div></div><div class="bar-value">{fmt(vl)}</div></div>'
-        return items
-    
-    def table_html(headers, rows_data):
-        ths = "".join(f"<th>{h}</th>" for h in headers)
-        trs = ""
-        for row in rows_data:
-            cells = ""
-            for i, cell in enumerate(row):
-                cls = ' class="number"' if isinstance(cell, (int, float)) else ""
-                if isinstance(cell, (int, float)) and cell == 0:
-                    # 0 qiymatlar bo'sh qoldiriladi
-                    val = ""
-                else:
-                    val = fmt(cell) if isinstance(cell, (int, float)) else str(cell)
-                cells += f"<td{cls}>{val}</td>"
-            trs += f"<tr>{cells}</tr>"
-        return f'<table><thead><tr>{ths}</tr></thead><tbody>{trs}</tbody></table>'
-    
-    # Jadvallar
-    monthly_table = table_html(
-        ["Oy", "Buyurtmalar", "Sotuv summasi"],
-        [[str(m.get("date_order:month", "")), m.get("date_order_count", 0), round(m.get("amount_total", 0), 0)] for m in monthly]
-    )
-    
-    partner_table = table_html(
-        ["Mijoz", "Buyurtmalar", "Summa"],
-        [[str(p.get("partner_id", [""])[1])[:40] if isinstance(p.get("partner_id"), list) else "", p.get("id:count", 0), round(p.get("amount_total", 0), 0)] for p in by_partner[:15]]
-    )
-    
-    product_table = table_html(
-        ["Mahsulot", "Miqdori", "Summa"],
-        [[str(pr.get("product_id", [""])[1])[:40] if isinstance(pr.get("product_id"), list) else "", round(pr.get("product_uom_qty", 0), 0), round(pr.get("price_subtotal", 0), 0)] for pr in by_product[:15]]
-    )
-    
-    seller_table = table_html(
-        ["Sotuvchi", "Buyurtmalar", "Summa"],
-        [[str(s.get("user_id", [""])[1])[:30] if isinstance(s.get("user_id"), list) else "", s.get("id:count", 0), round(s.get("amount_total", 0), 0)] for s in by_seller[:10]]
-    )
-    
-    # Grafik shartlari: kamida 2 ta nol bo'lmagan qiymat bo'lsa chart, aks holda KPI kartochkalari
-    c1_ok = chart_ok(month_values)
-    c2_ok = chart_ok(partner_values)
-    c3_ok = chart_ok(product_values)
-    c4_ok = chart_ok(seller_values)
-
-    c1_visual = '<div class="chart-wrap"><canvas id="c1"></canvas></div>' if c1_ok else kpi_chips(month_labels, month_values)
-    c2_visual = '<div class="chart-wrap"><canvas id="c2"></canvas></div>' if c2_ok else kpi_chips(partner_labels, partner_values)
-    c3_visual = '<div class="chart-wrap"><canvas id="c3"></canvas></div>' if c3_ok else kpi_chips(product_labels, product_values)
-    c4_visual = '<div class="chart-wrap"><canvas id="c4"></canvas></div>' if c4_ok else kpi_chips(seller_labels, seller_values)
-
-    charts_js = []
-    if c1_ok:
-        charts_js.append(
-            f"new Chart(C('c1'),{{type:'bar',data:{{labels:{month_labels},datasets:[{{label:'Sotuv',data:{month_values},backgroundColor:'#6366f1',borderRadius:6}},{{label:'Buyurtmalar',data:{month_orders},backgroundColor:'#8b5cf6',borderRadius:6}}]}},options:{{responsive:true,maintainAspectRatio:false,plugins:{{legend:{{position:'top',labels:{{color:'#cbd5e1'}}}}}},scales:{{y:{{beginAtZero:true,grid:{{color:'rgba(148,163,184,0.08)'}},ticks:{{callback:v=>v>=1e9?(v/1e9).toFixed(0)+' mlrd':v>=1e6?(v/1e6).toFixed(0)+' mln':v}}}}}}}}}});"
-        )
-    if c2_ok:
-        charts_js.append(
-            f"new Chart(C('c2'),{{type:'bar',data:{{labels:{partner_labels},datasets:[{{label:'Summa',data:{partner_values},backgroundColor:'#f472b6',borderRadius:6}}]}},options:{{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{{legend:{{display:false}}}},scales:{{x:{{beginAtZero:true,grid:{{color:'rgba(148,163,184,0.08)'}},ticks:{{callback:v=>v>=1e9?(v/1e9).toFixed(0)+' mlrd':v>=1e6?(v/1e6).toFixed(0)+' mln':v}}}}}}}}}});"
-        )
-    if c3_ok:
-        charts_js.append(
-            f"new Chart(C('c3'),{{type:'bar',data:{{labels:{product_labels},datasets:[{{label:'Summa',data:{product_values},backgroundColor:'#22d3ee',borderRadius:6}}]}},options:{{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{{legend:{{display:false}}}},scales:{{x:{{beginAtZero:true,grid:{{color:'rgba(148,163,184,0.08)'}},ticks:{{callback:v=>v>=1e9?(v/1e9).toFixed(0)+' mlrd':v>=1e6?(v/1e6).toFixed(0)+' mln':v}}}}}}}}}});"
-        )
-    if c4_ok:
-        charts_js.append(
-            f"new Chart(C('c4'),{{type:'doughnut',data:{{labels:{seller_labels},datasets:[{{data:{seller_values},backgroundColor:['#6366f1','#a855f7','#ec4899','#f472b6','#22d3ee','#fbbf24','#f43f5e','#34d399']}}]}},options:{{responsive:true,maintainAspectRatio:false,plugins:{{legend:{{position:'right',labels:{{color:'#cbd5e1'}}}}}}}}}});"
-        )
-    charts_js = "\n".join(charts_js)
-
-    html = f"""<!DOCTYPE html>
-<html lang="uz">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sotuv hisoboti</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f172a 100%); color:#e2e8f0; padding:20px; min-height:100vh; }}
-.container {{ max-width:1000px; margin:0 auto; }}
-h1 {{ font-size:1.5em; margin-bottom:4px; font-weight:800; color:#fff; }}
-.sub {{ color:#94a3b8; font-size:.9em; margin-bottom:20px; }}
-.cards {{ display:flex; gap:14px; margin-bottom:20px; flex-wrap:wrap; }}
-.card {{ background:rgba(30,41,59,.75); border:1px solid rgba(148,163,184,.12); border-radius:16px; padding:18px 20px; flex:1; min-width:150px; box-shadow:0 8px 24px rgba(0,0,0,.25); }}
-.card .lbl {{ font-size:.8em; color:#94a3b8; margin-bottom:2px; }}
-.card .val {{ font-size:1.7em; font-weight:700; color:#c7d2fe; }}
-.section {{ background:rgba(30,41,59,.75); border:1px solid rgba(148,163,184,.12); border-radius:16px; padding:20px; margin-bottom:16px; box-shadow:0 8px 24px rgba(0,0,0,.25); }}
-.section h2 {{ font-size:1.1em; margin-bottom:14px; color:#f1f5f9; }}
-.chart-wrap {{ height:280px; position:relative; margin-bottom:16px; }}
-table {{ width:100%; border-collapse:collapse; font-size:.88em; border-radius:10px; overflow:hidden; background:rgba(30,41,59,.45); border:1px solid rgba(148,163,184,.12); }}
-th {{ background:rgba(99,102,241,.2); color:#e0e7ff; padding:10px 12px; text-align:left; border-bottom:1px solid rgba(148,163,184,.15); }}
-td {{ padding:8px 12px; border-bottom:1px solid rgba(148,163,184,.1); color:#e2e8f0; }}
-tr:hover td {{ background:rgba(99,102,241,.08); }}
-.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
-.kpi-row {{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:8px; }}
-.kpi-chip {{ background:rgba(99,102,241,.12); border:1px solid rgba(148,163,184,.15); border-radius:12px; padding:12px 16px; min-width:120px; text-align:center; }}
-.kpi-chip .kpi-value {{ font-size:1.4em; font-weight:700; color:#c7d2fe; }}
-.kpi-chip .kpi-label {{ font-size:.78em; color:#94a3b8; margin-top:2px; }}
-.footer {{ text-align:center; color:#64748b; font-size:.78em; margin-top:20px; }}
-</style>
-</head>
-<body>
-<div class="container">
-<h1>Sotuv hisoboti</h1>
-<p class="sub">{date_from or 'Boshidan'} — {date_to or 'Hozirgacha'} | {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
-
-<div class="cards">
-  <div class="card"><div class="lbl">Jami buyurtmalar</div><div class="val">{total_orders:,}</div></div>
-  <div class="card"><div class="lbl">Jami sotuv</div><div class="val">{fmt(total_amount)}</div></div>
-  <div class="card"><div class="lbl">Soliq</div><div class="val">{fmt(total_tax)}</div></div>
-  <div class="card"><div class="lbl">Oylar</div><div class="val">{len(monthly)}</div></div>
-</div>
-
-<div class="section">
-  <h2>Oylik sotuv dinamikasi</h2>
-  {c1_visual}
-  {monthly_table}
-</div>
-
-<div class="section">
-  <h2>Top mijozlar</h2>
-  {c2_visual}
-  {partner_table}
-</div>
-
-<div class="section">
-  <h2>Top mahsulotlar</h2>
-  {c3_visual}
-  {product_table}
-</div>
-
-<div class="section">
-  <h2>Sotuvchilar reytingi</h2>
-  {c4_visual}
-  {seller_table}
-</div>
-
-<p class="footer">dunyabunya agent — {datetime.now().strftime('%Y-%m-%d')}</p>
-</div>
-
-<script>
-Chart.defaults.color = '#cbd5e1';
-Chart.defaults.borderColor = 'rgba(148,163,184,0.08)';
-const C=s=>document.getElementById(s).getContext('2d');
-{charts_js}
-</script>
-</body>
-</html>"""
-    
-    out_path = REPORTS_DIR / filename
-    out_path.write_text(html, encoding="utf-8")
-    
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}/reports/{filename}"
+    (REPORTS_DIR / filename).write_text(page, encoding="utf-8")
+    return _report_url(filename)
 
 
 async def generate_invoice_report(date_from: str = "", date_to: str = "") -> str:
     """Schyot-faktura hisoboti — HTML report."""
     from app.services.claude_report import generate_report_link
-    
-    domain = [["move_type", "in", ["out_invoice", "out_refund"]], ["state", "=", "posted"]]
-    if date_from:
-        domain.append(["invoice_date", ">=", date_from])
-    if date_to:
-        domain.append(["invoice_date", "<=", date_to])
-    
-    stats = await _odoo.execute_kw(
-        "account.move", "read_group",
-        [domain, ["amount_total", "amount_residual"], ["invoice_date:month"]],
-    )
-    
+
+    domain = ([["move_type", "=", "out_invoice"], ["state", "=", "posted"]]
+              + _date_bounds("invoice_date", date_from, date_to))
+    stats = await _rg("account.move", domain, ["amount_total", "amount_residual"], "invoice_date:month")
+
     rows = []
     for s in stats:
-        month = str(s.get("invoice_date:month", "Noma'lum"))
-        total = round(s.get("amount_total", 0), 0)
-        residual = round(s.get("amount_residual", 0), 0)
-        paid = total - residual
+        total = round(s.get("amount_total") or 0)
+        residual = round(s.get("amount_residual") or 0)
         rows.append({
-            "Oy": month,
-            "Jami summa": total,
-            "To'langan": paid,
-            "Qarz": residual,
+            "oy": _month_label(s, "invoice_date:month"),
+            "soni": _group_count(s, "invoice_date:month"),
+            "jami": total,
+            "tolangan": total - residual,
+            "qarz": residual,
         })
-    
     if not rows:
         return "Bu davr uchun faktura ma'lumotlari topilmadi."
-    
+
     link = generate_report_link(
-        title=f"Faktura hisoboti ({date_from or 'Boshidan'} — {date_to or 'Hozirgacha'})",
-        description="Schyot-fakturalar, to'lovlar va qarzdorlik",
+        title=f"Faktura hisoboti ({_period_label(date_from, date_to)})",
+        description="Mijozlarga yozilgan schyot-fakturalar, to'lovlar va qarzdorlik",
         rows=rows,
+        columns=[("oy", "Oy"), ("soni", "Fakturalar soni"), ("jami", "Jami summa"),
+                 ("tolangan", "To'langan"), ("qarz", "Qarz")],
+        numeric=["soni", "jami", "tolangan", "qarz"],
     )
     return link or "Hisobot yaratilmadi."
 
@@ -1261,235 +1473,109 @@ async def generate_invoice_report(date_from: str = "", date_to: str = "") -> str
 async def generate_task_report() -> str:
     """Vazifalar hisoboti — HTML report."""
     from app.services.claude_report import generate_report_link
-    
-    stats = await _odoo.execute_kw(
-        "project.task", "read_group",
-        [[], ["id:count"], ["state"]],
-    )
-    
-    rows = []
-    for s in stats:
-        state = str(s.get("state", "Noma'lum"))
-        count = s.get("id:count", 0)
-        rows.append({
-            "Holat": state,
-            "Soni": count,
-        })
-    
+
+    groups = await _task_state_groups()
+    rows = [{"holat": g["nomi"], "soni": g["soni"]} for g in groups]
     if not rows:
         return "Vazifalar topilmadi."
-    
+
     link = generate_report_link(
         title="Vazifalar hisoboti",
         description="Vazifalar holatlari bo'yicha",
-        rows=rows,
+        rows=rows, columns=[("holat", "Holat"), ("soni", "Soni")], numeric=["soni"],
     )
     return link or "Hisobot yaratilmadi."
 
 
 async def generate_company_report(date_from: str = "", date_to: str = "") -> str:
-    """Kompaniyaning to'liq statistikasi — barcha bo'limlar.
+    """Kompaniyaning to'liq statistikasi — barcha bo'limlar, oylar kesimida.
 
     Standart holatda JORIY YIL (1-yanvardan bugungacha) bo'yicha hisoblaydi — "shu yilgi
     to'liq hisobot" so'ralganda parametrsiz chaqiring. Boshqa davr kerak bo'lsa
     date_from/date_to (YYYY-MM-DD) bering; butun tarix uchun ikkalasiga ham "all" bering.
     """
-    import asyncio
-    import uuid
-    from datetime import date, datetime
-
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # "shu yilgi" — standart bo'yicha joriy yil boshidan bugungacha (butun tarix uchun
-    # date_from="all" beriladi). Bitta yillik oraliqqa cheklash Odoo'dan bir yo'la
-    # o'nlab yillik xom qatorlarni tortib olishning oldini oladi — read_group baribir
-    # server tomonida agregat qiladi, lekin domain qanchalik tor bo'lsa shunchalik tez.
+    # date_from="all" beriladi). Jamlashni Odoo'ning o'zi (read_group) bajaradi — xom
+    # qatorlar tortib olinmaydi, shuning uchun bir yillik davr ham og'ir/sekin bo'lmaydi.
     if date_from == "" and date_to == "":
-        date_from = date.today().replace(month=1, day=1).isoformat()
-        date_to = date.today().isoformat()
+        date_from = _today().replace(month=1, day=1).isoformat()
+        date_to = _today().isoformat()
     elif date_from == "all" or date_to == "all":
         date_from = date_to = ""
-    period_label = f"{date_from or 'Boshidan'} — {date_to or 'Hozirgacha'}"
 
-    def fmt(n):
-        n = float(n or 0)
-        if n >= 1_000_000_000: return f"{n/1_000_000_000:.1f} mlrd"
-        if n >= 1_000_000: return f"{n/1_000_000:.1f} mln"
-        if n >= 1_000: return f"{n/1_000:.1f} ming"
-        return str(int(n))
+    sales_domain = _SALE_DONE + _dt_bounds("date_order", date_from, date_to)
+    invoice_domain = ([["move_type", "=", "out_invoice"], ["state", "=", "posted"]]
+                      + _date_bounds("invoice_date", date_from, date_to))
 
-    # Grafik chizish qoidasi: bo'sh, yagona yoki 0 qiymatli ma'lumotga grafik chizilmaydi
-    def chart_ok(values):
-        return sum(1 for v in values if v) >= 2
-
-    def kpi_chips(labels, values):
-        chips = ""
-        for lb, vl in zip(labels, values):
-            if vl:
-                chips += (f'<div class="kpi-chip"><div class="kpi-value">{fmt(vl)}</div>'
-                          f'<div class="kpi-label">{lb}</div></div>')
-        return f'<div class="kpi-row">{chips}</div>' if chips else ""
-    
-    sales_domain = [["state", "in", ["sale", "done"]]]
-    invoice_domain = [["move_type", "in", ["out_invoice"]], ["state", "=", "posted"]]
-    if date_from:
-        sales_domain.append(["date_order", ">=", date_from])
-        invoice_domain.append(["invoice_date", ">=", date_from])
-    if date_to:
-        sales_domain.append(["date_order", "<=", date_to])
-        invoice_domain.append(["invoice_date", "<=", date_to])
-
-    # Barcha bo'lim statistikalarini PARALLEL o'qiymiz (mustaqil so'rovlar) — xom
-    # qatorlar emas, faqat Odoo'ning o'zida oldindan hisoblangan (read_group) jamlangan
-    # sonlar so'raladi, shuning uchun bir yillik davr ham og'ir/sekin bo'lmaydi.
-    sales, invoices, tasks, crm, products, product_count_result, emp_count = await asyncio.gather(
-        _odoo.execute_kw(
-            "sale.order", "read_group",
-            [sales_domain, ["amount_total", "id:count"], ["date_order:month"]],
-        ),
-        _odoo.execute_kw("account.move", "read_group",
-            [invoice_domain, ["amount_total", "amount_residual"], ["invoice_date:month"]]),
-        _odoo.execute_kw("project.task", "read_group", [[], ["id:count"], ["state"]]),
-        _odoo.execute_kw("crm.lead", "read_group", [[], ["id:count"], ["stage_id"]]),
-        _odoo.execute_kw("product.product", "search_read",
-            [[["type", "=", "product"]], ["id", "name", "qty_available", "list_price"]],
-            {"limit": 1}),
-        _odoo.execute_kw("product.product", "search_count", [[["type", "=", "product"]]]),
-        _odoo.execute_kw("hr.employee", "search_count", [[["active", "=", True]]]),
+    sales, invoices, tasks, crm, emp_count, currency_note = await asyncio.gather(
+        _rg("sale.order", sales_domain, ["amount_total"], "date_order:month"),
+        _rg("account.move", invoice_domain, ["amount_total", "amount_residual"], "invoice_date:month"),
+        _task_state_groups(),
+        _rg("crm.lead", [], ["id:count"], "stage_id"),
+        _count("hr.employee", [["active", "=", True]]),
+        _single_currency_note("sale.order", sales_domain),
     )
 
-    total_sales = sum(s.get("amount_total", 0) for s in sales)
-    total_orders = sum(s.get("id:count", 0) for s in sales)
-    total_invoiced = sum(i.get("amount_total", 0) for i in invoices)
-    total_residual = sum(i.get("amount_residual", 0) for i in invoices)
-    total_crm = sum(c.get("id:count", 0) for c in crm)
-    
-    # Oylik sotuv data
-    sales_labels = [str(s.get("date_order:month", "")) for s in sales[-6:]]
-    sales_values = [round(s.get("amount_total", 0), 0) for s in sales[-6:]]
-    
-    # Vazifalar data
-    task_labels = [str(t.get("state", "")) for t in tasks]
-    task_values = [t.get("id:count", 0) for t in tasks]
-    
-    # CRM data
-    crm_labels = [str(c.get("stage_id", [""])[1])[:20] if isinstance(c.get("stage_id"), list) else str(c.get("stage_id", "")) for c in crm[:8]]
-    crm_values = [c.get("id:count", 0) for c in crm[:8]]
-    
-    # Grafik shartlari: kamida 2 ta nol bo'lmagan qiymat bo'lsa chart, aks holda KPI kartochkalari
-    c1_ok = chart_ok(sales_values)
-    c2_ok = chart_ok(task_values)
-    c3_ok = chart_ok(crm_values)
-    c4_ok = chart_ok([total_invoiced, total_residual])
+    total_sales = sum(s.get("amount_total") or 0 for s in sales)
+    total_orders = sum(_group_count(s, "date_order:month") for s in sales)
+    total_invoiced = sum(i.get("amount_total") or 0 for i in invoices)
+    total_residual = sum(i.get("amount_residual") or 0 for i in invoices)
+    total_crm = sum(_group_count(c, "stage_id") for c in crm)
 
-    c1_visual = '<div class="chart-wrap"><canvas id="c1"></canvas></div>' if c1_ok else kpi_chips(sales_labels, sales_values)
-    c2_visual = '<div class="chart-wrap"><canvas id="c2"></canvas></div>' if c2_ok else kpi_chips(task_labels, task_values)
-    c3_visual = '<div class="chart-wrap"><canvas id="c3"></canvas></div>' if c3_ok else kpi_chips(crm_labels, crm_values)
-    c4_visual = '<div class="chart-wrap"><canvas id="c4"></canvas></div>' if c4_ok else kpi_chips(['Jami', 'Qarz'], [total_invoiced, total_residual])
+    # Oylar kesimi: sotuv va fakturalar bitta jadvalda
+    months: dict[tuple, dict] = {}
+    for s in sales:
+        key = _month_key(s, "date_order:month") or (0, 0)
+        months.setdefault(key, {"label": _month_label(s, "date_order:month")}).update(
+            orders=_group_count(s, "date_order:month"), sales=round(s.get("amount_total") or 0))
+    for i in invoices:
+        key = _month_key(i, "invoice_date:month") or (0, 0)
+        months.setdefault(key, {"label": _month_label(i, "invoice_date:month")}).update(
+            invoiced=round(i.get("amount_total") or 0), residual=round(i.get("amount_residual") or 0))
+    ordered = [months[k] for k in sorted(months)]
 
-    charts_js = []
-    if c1_ok:
-        charts_js.append(
-            f"new Chart(C('c1'),{{type:'bar',data:{{labels:{sales_labels},datasets:[{{label:'Sotuv',data:{sales_values},backgroundColor:'#6366f1',borderRadius:6}}]}},options:{{responsive:true,maintainAspectRatio:false,plugins:{{legend:{{display:false}}}},scales:{{y:{{beginAtZero:true,grid:{{color:'rgba(148,163,184,0.08)'}},ticks:{{callback:v=>v>=1e9?(v/1e9).toFixed(0)+' mlrd':v>=1e6?(v/1e6).toFixed(0)+' mln':v}}}}}}}}}});"
-        )
-    if c2_ok:
-        charts_js.append(
-            f"new Chart(C('c2'),{{type:'doughnut',data:{{labels:{task_labels},datasets:[{{data:{task_values},backgroundColor:['#34d399','#fbbf24','#f43f5e','#22d3ee']}}]}},options:{{responsive:true,maintainAspectRatio:false,plugins:{{legend:{{position:'right',labels:{{color:'#cbd5e1'}}}}}}}}}});"
-        )
-    if c3_ok:
-        charts_js.append(
-            f"new Chart(C('c3'),{{type:'bar',data:{{labels:{crm_labels},datasets:[{{label:'Soni',data:{crm_values},backgroundColor:'#a855f7',borderRadius:6}}]}},options:{{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{{legend:{{display:false}}}},scales:{{x:{{beginAtZero:true,grid:{{color:'rgba(148,163,184,0.08)'}},ticks:{{callback:v=>v>=1e9?(v/1e9).toFixed(0)+' mlrd':v>=1e6?(v/1e6).toFixed(0)+' mln':v}}}}}}}}}});"
-        )
-    if c4_ok:
-        charts_js.append(
-            f"new Chart(C('c4'),{{type:'bar',data:{{labels:['Jami','Qarz'],datasets:[{{data:[{round(total_invoiced, 0)},{round(total_residual, 0)}],backgroundColor:['#34d399','#f43f5e'],borderRadius:6}}]}},options:{{responsive:true,maintainAspectRatio:false,plugins:{{legend:{{display:false}}}},scales:{{y:{{beginAtZero:true,grid:{{color:'rgba(148,163,184,0.08)'}},ticks:{{callback:v=>v>=1e9?(v/1e9).toFixed(0)+' mlrd':v>=1e6?(v/1e6).toFixed(0)+' mln':v}}}}}}}}}});"
-        )
-    charts_js = "\n".join(charts_js)
+    charts = rh.Charts()
+    recent = ordered[-12:]
+    body = "\n".join([
+        rh.row(
+            rh.section("Oylik sotuv", charts.add([m["label"] for m in recent],
+                                                 [m.get("sales", 0) for m in recent], label="Sotuv")),
+            rh.section("Vazifalar holati (hozirgi)", charts.add([t["nomi"] for t in tasks],
+                                                                [t["soni"] for t in tasks], kind="doughnut")),
+        ),
+        rh.row(
+            rh.section("CRM bosqichlari (hozirgi)",
+                       charts.add([_m2o_name(c.get("stage_id"), "Bosqichsiz")[:30] for c in crm[:8]],
+                                  [_group_count(c, "stage_id") for c in crm[:8]],
+                                  horizontal=True, color="#a855f7", label="Soni")),
+            rh.section("Fakturalar", charts.add(["Jami yozilgan", "To'lanmagan qarz"],
+                                                [round(total_invoiced), round(total_residual)],
+                                                color="#34d399")),
+        ),
+        rh.section(
+            "Oylar kesimida",
+            rh.table(["Oy", "Buyurtmalar", "Sotuv", "Fakturalar", "Qarz"],
+                     [[m["label"], m.get("orders", 0), m.get("sales", 0),
+                       m.get("invoiced", 0), m.get("residual", 0)] for m in ordered]),
+            rh.note(currency_note),
+        ),
+    ])
 
+    page = rh.page(
+        title="Kompaniya to'liq statistikasi", subtitle=_period_label(date_from, date_to),
+        cards=[rh.card("Jami sotuv", rh.fmt_num(total_sales)),
+               rh.card("Buyurtmalar", rh.fmt_int(total_orders)),
+               rh.card("Fakturalar", rh.fmt_num(total_invoiced)),
+               rh.card("Qarz", rh.fmt_num(total_residual)),
+               rh.card("CRM lidlar", rh.fmt_int(total_crm)),
+               rh.card("Xodimlar", rh.fmt_int(emp_count))],
+        body=body, charts=charts,
+    )
     filename = f"company_{uuid.uuid4().hex[:12]}.html"
-    html = f"""<!DOCTYPE html>
-<html lang="uz">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kompaniya statistikasi</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f172a 100%); color:#e2e8f0; padding:20px; min-height:100vh; }}
-.container {{ max-width:1000px; margin:0 auto; }}
-h1 {{ font-size:1.5em; margin-bottom:4px; font-weight:800; color:#fff; }}
-.sub {{ color:#94a3b8; font-size:.9em; margin-bottom:20px; }}
-.cards {{ display:flex; gap:14px; margin-bottom:20px; flex-wrap:wrap; }}
-.card {{ background:rgba(30,41,59,.75); border:1px solid rgba(148,163,184,.12); border-radius:16px; padding:18px 20px; flex:1; min-width:140px; box-shadow:0 8px 24px rgba(0,0,0,.25); text-align:center; }}
-.card .emoji {{ font-size:1.8em; margin-bottom:4px; }}
-.card .lbl {{ font-size:.8em; color:#94a3b8; margin-bottom:2px; }}
-.card .val {{ font-size:1.5em; font-weight:700; color:#c7d2fe; }}
-.section {{ background:rgba(30,41,59,.75); border:1px solid rgba(148,163,184,.12); border-radius:16px; padding:20px; margin-bottom:16px; box-shadow:0 8px 24px rgba(0,0,0,.25); }}
-.section h2 {{ font-size:1.1em; margin-bottom:14px; color:#f1f5f9; }}
-.row {{ display:flex; gap:16px; flex-wrap:wrap; }}
-.row > div {{ flex:1; min-width:300px; }}
-.chart-wrap {{ height:250px; position:relative; }}
-table {{ width:100%; border-collapse:collapse; font-size:.85em; margin-top:12px; border-radius:10px; overflow:hidden; background:rgba(30,41,59,.45); border:1px solid rgba(148,163,184,.12); }}
-th {{ background:rgba(99,102,241,.2); color:#e0e7ff; padding:8px 10px; text-align:left; border-bottom:1px solid rgba(148,163,184,.15); }}
-td {{ padding:7px 10px; border-bottom:1px solid rgba(148,163,184,.1); color:#e2e8f0; }}
-.kpi-row {{ display:flex; gap:10px; flex-wrap:wrap; }}
-.kpi-chip {{ background:rgba(99,102,241,.12); border:1px solid rgba(148,163,184,.15); border-radius:12px; padding:12px 16px; min-width:110px; text-align:center; }}
-.kpi-chip .kpi-value {{ font-size:1.4em; font-weight:700; color:#c7d2fe; }}
-.kpi-chip .kpi-label {{ font-size:.78em; color:#94a3b8; margin-top:2px; }}
-.footer {{ text-align:center; color:#64748b; font-size:.78em; margin-top:20px; }}
-</style>
-</head>
-<body>
-<div class="container">
-<h1>Kompaniya to'liq statistikasi</h1>
-<p class="sub">{period_label} | {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
-
-<div class="cards">
-  <div class="card"><div class="emoji">💰</div><div class="lbl">Jami sotuv</div><div class="val">{fmt(total_sales)}</div></div>
-  <div class="card"><div class="emoji">📦</div><div class="lbl">Buyurtmalar</div><div class="val">{total_orders:,}</div></div>
-  <div class="card"><div class="emoji">🧾</div><div class="lbl">Fakturalar</div><div class="val">{fmt(total_invoiced)}</div></div>
-  <div class="card"><div class="emoji">📋</div><div class="lbl">Qarz</div><div class="val">{fmt(total_residual)}</div></div>
-  <div class="card"><div class="emoji">🎯</div><div class="lbl">CRM lidlar</div><div class="val">{total_crm:,}</div></div>
-  <div class="card"><div class="emoji">👥</div><div class="lbl">Xodimlar</div><div class="val">{emp_count:,}</div></div>
-</div>
-
-<div class="row">
-  <div class="section">
-    <h2>Oylik sotuv</h2>
-    {c1_visual}
-  </div>
-  <div class="section">
-    <h2>Vazifalar holati</h2>
-    {c2_visual}
-  </div>
-</div>
-
-<div class="row">
-  <div class="section">
-    <h2>CRM bosqichlari</h2>
-    {c3_visual}
-  </div>
-  <div class="section">
-    <h2>Fakturalar</h2>
-    {c4_visual}
-  </div>
-</div>
-
-<p class="footer">dunyabunya agent — {datetime.now().strftime('%Y-%m-%d')}</p>
-</div>
-<script>
-Chart.defaults.color = '#cbd5e1';
-Chart.defaults.borderColor = 'rgba(148,163,184,0.08)';
-const C=s=>document.getElementById(s).getContext('2d');
-{charts_js}
-</script>
-</body></html>"""
-    
-    out_path = REPORTS_DIR / filename
-    out_path.write_text(html, encoding="utf-8")
-    return f"{settings.PUBLIC_BASE_URL.rstrip('/')}/reports/{filename}"
+    (REPORTS_DIR / filename).write_text(page, encoding="utf-8")
+    return _report_url(filename)
 
 
 STATS_TOOLS = {
@@ -1663,31 +1749,37 @@ ALL_TOOLS: dict[str, callable] = {
 TOOL_SCHEMAS: dict[str, dict] = {
     "search_kassa_chiqim": {
         "name": "search_kassa_chiqim",
-        "description": "Kassa chiqimlarini qidirish (account.move, out_invoice)",
+        "description": "Kassa chiqimlari (Odoo'dagi 'Kassa chiqim' hujjatlari): so'nggi yozuvlar ro'yxati, "
+                       "jami soni va valyuta bo'yicha jami summasi. Har yozuvda summa, valyuta, chiqim/kirim "
+                       "hisobi, holat, turi va kim kiritgani bor.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "domain": {"type": "array", "description": "Odoo domain (ixtiyoriy)"},
-                "limit": {"type": "integer", "default": 50},
+                "status": {"type": "string", "enum": ["new", "done", "cancel"],
+                           "description": "Holat bo'yicha filtr (ixtiyoriy): new=yangi, done=bajarilgan, cancel=bekor qilingan"},
+                "date_from": {"type": "string", "description": "Kiritilgan sana, boshlanishi (YYYY-MM-DD)"},
+                "date_to": {"type": "string", "description": "Kiritilgan sana, tugashi (YYYY-MM-DD)"},
+                "limit": {"type": "integer", "default": 50, "description": "Ro'yxatdagi yozuvlar soni (ko'pi bilan 200)"},
             },
         },
     },
     "create_kassa_chiqim": {
         "name": "create_kassa_chiqim",
-        "description": "Kassa chiqimi uchun qoralama yaratish",
+        "description": "Kassa chiqimi yaratish — bot orqali MUMKIN EMAS (tool faqat sababini qaytaradi, "
+                       "uni foydalanuvchiga ayting).",
         "input_schema": {
             "type": "object",
             "properties": {
-                "partner_id": {"type": "integer", "description": "Partner ID"},
                 "amount": {"type": "number", "description": "Summa"},
                 "description": {"type": "string", "description": "Tavsif"},
             },
-            "required": ["partner_id", "amount"],
         },
     },
     "search_payments": {
         "name": "search_payments",
-        "description": "To'lovlarni qidirish (account.payment)",
+        "description": "To'lovlarni qidirish (account.payment). Domain berilmasa o'tkazilgan to'lovlar "
+                       "(state: in_process, paid) qaytadi. Har to'lovda valyuta (currency_id) bor — "
+                       "turli valyutadagi summalarni qo'shmang.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1711,16 +1803,14 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "create_currency_exchange": {
         "name": "create_currency_exchange",
-        "description": "Valyuta ayirboshlash amaliyotini kiritish",
+        "description": "Valyuta ayirboshlash kiritish — bot orqali MUMKIN EMAS (tool faqat sababini "
+                       "qaytaradi, uni foydalanuvchiga ayting).",
         "input_schema": {
             "type": "object",
             "properties": {
-                "from_currency_id": {"type": "integer"},
-                "to_currency_id": {"type": "integer"},
                 "amount": {"type": "number"},
                 "rate": {"type": "number"},
             },
-            "required": ["from_currency_id", "to_currency_id", "amount", "rate"],
         },
     },
     "get_invoice_pdf": {
@@ -1743,7 +1833,8 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "find_product": {
         "name": "find_product",
-        "description": "Mahsulotlarni qidirish",
+        "description": "Mahsulotlarni nomi, artikuli (default_code) yoki shtrix-kodi bo'yicha qidirish; "
+                       "natijada joriy qoldiq (qty_available) ham bor",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1755,7 +1846,7 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "check_stock_quant": {
         "name": "check_stock_quant",
-        "description": "Mahsulotning ombordagi qoldig'ini tekshirish",
+        "description": "Mahsulotning ombordagi qoldig'i: jami, band qilingan va har bir ombor joyi bo'yicha",
         "input_schema": {
             "type": "object",
             "properties": {"product_id": {"type": "integer"}},
@@ -1764,11 +1855,15 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "check_low_stock": {
         "name": "check_low_stock",
-        "description": "Kam qoldiqdagi mahsulotlarni aniqlash",
+        "description": "Kam qoldiqdagi mahsulotlar (0 < qoldiq <= chegara): jami soni, tugagan mahsulotlar "
+                       "soni va dastlabki mahsulotlar ro'yxati. To'liq ro'yxat uchun export_excel ishlating.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "threshold": {"type": "number", "default": 10.0, "description": "Chegara miqdori"},
+                "include_zero": {"type": "boolean", "default": False,
+                                 "description": "true bo'lsa tugagan (qoldig'i 0) mahsulotlar ham ro'yxatga kiradi"},
+                "limit": {"type": "integer", "default": 100},
             },
         },
     },
@@ -1826,7 +1921,7 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "properties": {
                 "name": {"type": "string"},
                 "partner_name": {"type": "string"},
-                "planned_revenue": {"type": "number"},
+                "planned_revenue": {"type": "number", "description": "Kutilayotgan daromad"},
             },
             "required": ["name"],
         },
@@ -2008,7 +2103,8 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "get_top_debtors": {
         "name": "get_top_debtors",
-        "description": "Eng katta qarzdor mijozlar ro'yxati (to'lanmagan fakturalar bo'yicha)",
+        "description": "Eng katta qarzdor mijozlar: har bir mijozning barcha to'lanmagan fakturalari "
+                       "bo'yicha JAMI qarzi (kamayish tartibida), valyutasi va fakturalar soni",
         "input_schema": {
             "type": "object",
             "properties": {"limit": {"type": "integer", "default": 10}},
@@ -2016,15 +2112,17 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "get_overdue_invoices": {
         "name": "get_overdue_invoices",
-        "description": "Muddati o'tgan to'lanmagan fakturalar",
+        "description": "To'lov muddati o'tgan to'lanmagan fakturalar: valyuta bo'yicha jami qarz, soni "
+                       "va eng eski 100 tasi ro'yxati",
         "input_schema": {
             "type": "object",
-            "properties": {"days": {"type": "integer", "default": 30, "description": "Nech kundan beri muddati o'tgan"}},
+            "properties": {"days": {"type": "integer", "default": 0,
+                                    "description": "Kamida necha kun kechikkanlari (0 = muddati o'tganlarning hammasi)"}},
         },
     },
     "get_cashflow_summary": {
         "name": "get_cashflow_summary",
-        "description": "Kassa/pul oqimi xulosasi — oylar bo'yicha kirim va chiqim",
+        "description": "Pul oqimi xulosasi — oylar va valyutalar bo'yicha kirim, chiqim va farqi (to'lovlar asosida)",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -2065,7 +2163,9 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "get_profit_summary": {
         "name": "get_profit_summary",
-        "description": "Foyda xulosasi: jami faktura, to'langan summa, qolgan qarz",
+        "description": "Fakturalar va to'lovlar xulosasi (valyuta bo'yicha): yozilgan fakturalar, qaytarilgan, "
+                       "qolgan qarz, mijozlardan tushgan va chiqib ketgan to'lovlar. Bu sof foyda EMAS — "
+                       "javobda 'foyda' deb atamang.",
         "input_schema": {
             "type": "object",
             "properties": {

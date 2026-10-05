@@ -31,6 +31,15 @@ def mock_odoo_response():
 
 
 @pytest.fixture(autouse=True)
+def _fresh_odoo_tool_caches(monkeypatch):
+    """odoo_tools maydon sxemasi va "ombor mahsuloti" filtrini jarayon ichida keshlaydi —
+    bir testning mok'langan Odoo javobi keyingisiga o'tib ketmasligi uchun har testda tozalanadi."""
+    from app.services import odoo_tools
+    monkeypatch.setattr(odoo_tools, "_fields_meta_cache", {})
+    monkeypatch.setattr(odoo_tools, "_storable_domain_cache", None)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_ceo_state(tmp_path, monkeypatch):
     """ceo_state.is_ceo() CEO tanilganda ID'ni fonda faylga yozadi — testlar
     haqiqiy storage/ceo_state.json'ni ifloslantirmasligi uchun (ilgari
