@@ -234,7 +234,8 @@ class OdooClient:
             except (OSError, xmlrpc.client.ProtocolError) as exc2:
                 raise self._connection_error(exc2) from exc2
             except xmlrpc.client.Fault as exc2:
-                raise OdooError(f"Odoo XML-RPC xato: {exc2}") from exc2
+                # Fault matni — butun Python traceback; foydalanuvchiga faqat mazmunli oxirgi qatori
+                raise OdooError(f"Odoo so'rovni rad etdi: {_fault_summary(exc2)}") from exc2
 
     def _diagnose_sync(self) -> dict:
         """Odoo bilan aloqani JONLI tekshiradi — keshlangan uid/ulanish ishlatilmaydi,

@@ -31,6 +31,7 @@ from aiogram.types import (
 from app import ceo_state
 from app.rbac import Role
 from app.services.assistant import FILE_TOOLS, AssistantResult, ask_with_files
+from app.services.errors import friendly_error
 from app.telegram.tg_format import TG_LIMIT, split_message, to_telegram_html
 
 log = logging.getLogger(__name__)
@@ -377,7 +378,7 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
         try:
             await bot.send_message(
                 chat_id=chat_id, message_thread_id=thread_id,
-                text=f"⚠️ Xatolik yuz berdi: {str(e)[:200]}",
+                text=f"⚠️ Xatolik yuz berdi: {friendly_error(e)}",
             )
         except Exception:
             pass

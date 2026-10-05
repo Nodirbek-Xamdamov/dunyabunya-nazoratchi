@@ -40,6 +40,16 @@ def _fresh_odoo_tool_caches(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_metrics(tmp_path, monkeypatch):
+    """Hisoblagichlar testlarda haqiqiy storage/metrics.json ga tegmaydi."""
+    from app import metrics
+    monkeypatch.setattr(metrics, "_PATH", tmp_path / "metrics.json")
+    monkeypatch.setattr(metrics, "_days", {})
+    monkeypatch.setattr(metrics, "_loaded", True)
+    monkeypatch.setattr(metrics, "_dirty", False)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_ceo_state(tmp_path, monkeypatch):
     """ceo_state.is_ceo() CEO tanilganda ID'ni fonda faylga yozadi — testlar
     haqiqiy storage/ceo_state.json'ni ifloslantirmasligi uchun (ilgari

@@ -24,6 +24,7 @@ from app.db.session import SessionLocal
 from app.services.assistant import ask_with_files
 from app.rbac import Role, ROLE_NAMES
 from app.services.crypto import decrypt, encrypt
+from app.services.errors import friendly_error
 from app.services.llm import analyze_message
 from app.services.odoo import OdooClient
 from app.telegram import delivery, replies
@@ -414,7 +415,7 @@ async def _register_employee_by_name(message: Message, user_id: int) -> None:
     except Exception as e:
         log.exception("_register_employee_by_name: Odoo qidiruvida xatolik")
         _waiting_name.add(user_id)  # qayta urinib ko'rish uchun holatni saqlaymiz
-        await message.answer(f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {str(e)[:200]}\nQaytadan to'liq F.I.SH. ni kiriting.")
+        await message.answer(f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {friendly_error(e)}\nQaytadan to'liq F.I.SH. ni kiriting.")
         return
 
     log.info("_register_employee_by_name: name=%r -> %d nomzod (fallback=%s, loose=%s)",
@@ -535,7 +536,7 @@ async def on_delete_task(message: Message, command: CommandObject) -> None:
             task = await _odoo.get_task(task_id)
         except Exception as e:
             log.exception("on_delete_task (CEO): get_task xatosi")
-            await message.answer(f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {str(e)[:200]}")
+            await message.answer(f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {friendly_error(e)}")
             return
         if task is None:
             await message.answer(replies.task_not_found_text(task_id))
@@ -544,7 +545,7 @@ async def on_delete_task(message: Message, command: CommandObject) -> None:
             await _odoo.delete_task(task_id)
         except Exception as e:
             log.exception("on_delete_task (CEO): delete_task xatosi")
-            await message.answer(f"⚠️ Vazifani o'chirishda xatolik yuz berdi: {str(e)[:200]}")
+            await message.answer(f"⚠️ Vazifani o'chirishda xatolik yuz berdi: {friendly_error(e)}")
             return
         await message.answer(replies.task_deleted_text(task_id))
         return
@@ -559,7 +560,7 @@ async def on_delete_task(message: Message, command: CommandObject) -> None:
         task = await odoo_client.get_task(task_id)
     except Exception as e:
         log.exception("on_delete_task: get_task xatosi")
-        await message.answer(f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {str(e)[:200]}")
+        await message.answer(f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {friendly_error(e)}")
         return
     if task is None:
         await message.answer(replies.task_not_found_text(task_id))
@@ -583,7 +584,7 @@ async def on_delete_task(message: Message, command: CommandObject) -> None:
         await odoo_client.delete_task(task_id)
     except Exception as e:
         log.exception("on_delete_task: delete_task xatosi")
-        await message.answer(f"⚠️ Vazifani o'chirishda xatolik yuz berdi: {str(e)[:200]}")
+        await message.answer(f"⚠️ Vazifani o'chirishda xatolik yuz berdi: {friendly_error(e)}")
         return
     await message.answer(replies.task_deleted_text(task_id))
 
@@ -632,7 +633,7 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
             result = await _ask_assistant(message, text, Role.CEO)
         except Exception as e:
             log.exception("on_private_dm_message (CEO): ask_with_files xatosi")
-            await message.answer(f"⚠️ Javob tayyorlashda xatolik yuz berdi: {str(e)[:200]}")
+            await message.answer(f"⚠️ Javob tayyorlashda xatolik yuz berdi: {friendly_error(e)}")
             return
         await _answer_with_format_options(message, bot, text, result, role=Role.CEO)
         return
@@ -660,6 +661,6 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
         result = await _ask_assistant(message, text, role)
     except Exception as e:
         log.exception("on_private_dm_message (manager): ask_with_files xatosi")
-        await message.answer(f"⚠️ Javob tayyorlashda xatolik yuz berdi: {str(e)[:200]}")
+        await message.answer(f"⚠️ Javob tayyorlashda xatolik yuz berdi: {friendly_error(e)}")
         return
     await _answer_with_format_options(message, bot, text, result, role=role)

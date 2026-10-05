@@ -11,8 +11,10 @@ from datetime import date
 from pathlib import Path
 from typing import Awaitable, Callable
 
+import anthropic
 from anthropic import AsyncAnthropic
 
+from app import metrics
 from app.config import settings
 from app.db import repo
 from app.db.session import SessionLocal
@@ -30,6 +32,10 @@ if settings.ANTHROPIC_WORKSPACE_ID:
 _client = AsyncAnthropic(
     api_key=settings.ANTHROPIC_API_KEY,
     default_headers=_extra_headers or None,
+    # SDK sukuti 10 daqiqa — chatda foydalanuvchi buncha kutmaydi. Javob 90 soniyada kelmasa
+    # xato sifatida ko'rsatiladi (SDK 429/5xx/uzilishda o'zi 2 marta qayta urinadi).
+    timeout=anthropic.Timeout(90.0, connect=10.0),
+    max_retries=2,
 )
 _odoo = OdooClient()
 
@@ -363,6 +369,7 @@ async def _exec_tool(name: str, args: dict, role: Role) -> str:
 
     Bajarishdan oldin `_role_denial` rol ruxsatini tekshiradi: role prompt boshqa
     bo'lim ma'lumotini "taqiqlaydi", lekin bu LLM uchun ko'rsatma, texnik cheklov emas."""
+    metrics.inc("tool_calls")
     try:
         denial = _role_denial(name, args, role)
         if denial:
@@ -404,12 +411,15 @@ async def _exec_tool(name: str, args: dict, role: Role) -> str:
             # Odoo so'rovni qabul qilib rad etgan (noto'g'ri field/domain...) — model tuzatib qayta chaqiradi
             log.exception("tool %s error", name)
             return json.dumps({"error": str(e)[:300]})
-        # Odoo'ga yetib bo'lmadi/kirib bo'lmadi — aniq sabab va tavsiya bilan qaytariladi
-        log.warning("tool %s: Odoo bilan aloqa yo'q (%s) — %s", name, e.kind, e)
+        # Odoo'ga yetib bo'lmadi/kirib bo'lmadi — aniq sabab va tavsiya bilan qaytariladi.
+        # ERROR darajasida: dasturchi buni CEO aytishidan oldin bilishi kerak (P1-2 ogohlantirishi)
+        log.error("tool %s: Odoo bilan aloqa yo'q (%s) — %s", name, e.kind, e)
+        metrics.inc("odoo_errors")
         return json.dumps({"error": str(e)[:400], "odoo_connection": e.kind,
                            "tavsiya": connection_hint(e.kind)}, ensure_ascii=False)
     except Exception as e:
         log.exception("tool %s error", name)
+        metrics.inc("tool_errors")
         return json.dumps({"error": str(e)[:300]})
 
 
@@ -445,6 +455,7 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
     found_texts: list[str] = []
     odoo_failure: dict | None = None
     tool_started = False
+    metrics.inc("questions")
     async with SessionLocal() as session:
         history = await repo.get_recent_conversation(session, telegram_user_id)
 
@@ -479,9 +490,17 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
     system = system.replace("{role_prompt}", role_prompt)
     # Xavfsizlik/fakt bloki eng yuqori ustuvorlikda — prompt boshida turadi
     system = SECURITY_FRAGMENT + "\n\n" + system
+    # Prompt keshi: tool'lar ro'yxati va shu blok (jami ~10 ming token) har so'rovda bir xil —
+    # belgi (cache_control) ularni keshlaydi va bitta savol ichidagi keyingi so'rovlar (tool
+    # natijasidan keyingi javob) hamda 5 daqiqa ichidagi keyingi savollar uni ~10 baravar
+    # arzon va tezroq o'qiydi. Blok ichida faqat kun davomida o'zgarmaydigan narsa bo'lishi
+    # shart (sana, rol) — har so'rovda o'zgaradigan qiymat qo'shilsa kesh jimgina ishlamay qoladi.
+    system_blocks = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
     if instruction:
-        # Tizim qo'shgan ko'rsatma (masalan format tanlovi) — user_input ichida EMAS
-        system += "\n\nQO'SHIMCHA TIZIM KO'RSATMACHI (bajarilishi shart):\n" + instruction
+        # Tizim qo'shgan ko'rsatma (masalan format tanlovi) — user_input ichida EMAS;
+        # keshlangan blokdan KEYIN turadi, shuning uchun keshni buzmaydi
+        system_blocks.append({"type": "text", "text":
+                              "QO'SHIMCHA TIZIM KO'RSATMACHI (bajarilishi shart):\n" + instruction})
 
     tools = _get_tools_for_role(role)
     if exclude_tools:
@@ -498,7 +517,7 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
         create_kwargs = dict(
             model=settings.ANTHROPIC_MODEL,
             max_tokens=4096,
-            system=system,
+            system=system_blocks,
             tools=tools,
             messages=messages,
         )
@@ -508,8 +527,14 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
         if tool_choice and i == 0:
             create_kwargs["tool_choice"] = tool_choice
         resp = await _client.messages.create(**create_kwargs)
-        log.info("iter %d: stop=%s blocks=%s role=%s", i, resp.stop_reason,
-                 [b.type for b in resp.content], role.value)
+        # Token sarfi: cache_read > 0 bo'lsa kesh ishlayapti (ketma-ket so'rovlarda doim 0
+        # chiqsa — system blokiga har safar o'zgaradigan narsa qo'shilib qolgan)
+        usage = getattr(resp, "usage", None)
+        log.info("iter %d: stop=%s blocks=%s role=%s tokens(in=%s cache_read=%s cache_write=%s out=%s)",
+                 i, resp.stop_reason, [b.type for b in resp.content], role.value,
+                 getattr(usage, "input_tokens", "?"), getattr(usage, "cache_read_input_tokens", "?"),
+                 getattr(usage, "cache_creation_input_tokens", "?"), getattr(usage, "output_tokens", "?"))
+        metrics.add_usage(usage)
 
         text_parts = [b.text for b in resp.content if b.type == "text"]
         if text_parts:

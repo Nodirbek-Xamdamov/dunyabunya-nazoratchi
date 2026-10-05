@@ -24,6 +24,7 @@ from app.db.session import SessionLocal
 from app.db.repo import save_group_message
 from app.services.assistant import ask_with_files
 from app.services.audio_service import synthesize_speech
+from app.services.errors import friendly_error
 from app.services.llm import AnalyzeResult, analyze_message
 from app.services.odoo import OdooClient
 from app.telegram import delivery, replies
@@ -370,7 +371,7 @@ async def on_topic_message(message: Message, bot: Bot) -> None:
             log.exception("on_topic_message: xodim qidirishda xatolik")
             await bot.send_message(
                 chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=message.message_thread_id,
-                text=f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {str(e)[:200]}\nBiroz keyin qayta urinib ko'ring.",
+                text=f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {friendly_error(e)}\nBiroz keyin qayta urinib ko'ring.",
             )
             return
 
@@ -507,7 +508,7 @@ async def on_task_assign(callback: CallbackQuery, bot: Bot) -> None:
         log.exception("on_task_assign: Odoo'da vazifa yaratishda xatolik")
         try:
             await callback.message.edit_text(
-                f"⚠️ Vazifani Odoo'ga yozishda xatolik yuz berdi: {str(e)[:200]}",
+                f"⚠️ Vazifani Odoo'ga yozishda xatolik yuz berdi: {friendly_error(e)}",
                 reply_markup=None,
             )
         except Exception:
@@ -619,7 +620,7 @@ async def _finish_task(callback: CallbackQuery, bot: Bot, *, done: bool) -> None
         try:
             await bot.send_message(
                 chat_id=callback.from_user.id,
-                text=f"⚠️ Vazifa holatini Odoo'ga yozib bo'lmadi: {str(e)[:200]}\n"
+                text=f"⚠️ Vazifa holatini Odoo'ga yozib bo'lmadi: {friendly_error(e)}\n"
                      f"Birozdan keyin tugmani qayta bosing.",
             )
         except Exception:
@@ -811,7 +812,7 @@ async def _assistant_reply(bot: Bot, text: str, thread_id: int | None = None) ->
         # abadiy kutib qolardi.
         log.exception("_assistant_reply: ask_with_files xatosi")
         await bot.send_message(chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=thread_id,
-                               text=f"⚠️ Javob tayyorlashda xatolik yuz berdi: {str(e)[:200]}")
+                               text=f"⚠️ Javob tayyorlashda xatolik yuz berdi: {friendly_error(e)}")
         return
     scope = f"grp-{thread_id if thread_id is not None else 'main'}"
     markup = delivery.offer_formats(
@@ -831,7 +832,7 @@ async def _write_task(bot: Bot, result: AnalyzeResult, odoo_project_id: int,
     except Exception as e:
         log.exception("_write_task: xodim aniqlashda xatolik")
         await bot.send_message(chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=reply_thread_id,
-                               text=f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {str(e)[:200]}")
+                               text=f"⚠️ Odoo bilan bog'lanishda xatolik yuz berdi: {friendly_error(e)}")
         return
     log.info("_write_task: user_ids=%s unresolved=%s", user_ids, unresolved_name)
     task_title = result.title or result.description[:80] or "Vazifa"
@@ -846,7 +847,7 @@ async def _write_task(bot: Bot, result: AnalyzeResult, odoo_project_id: int,
         # timeout), vazifa yozilmasdi-yu, guruhda hech qanday xabar chiqmasdi.
         log.exception("_write_task: Odoo'da vazifa yaratishda xatolik")
         await bot.send_message(chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=reply_thread_id,
-                               text=f"⚠️ Vazifani Odoo'ga yozishda xatolik yuz berdi: {str(e)[:200]}")
+                               text=f"⚠️ Vazifani Odoo'ga yozishda xatolik yuz berdi: {friendly_error(e)}")
         return
 
     async def _log():
