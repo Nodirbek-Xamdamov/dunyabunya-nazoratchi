@@ -793,17 +793,15 @@ def _records_note(layout, shown: int, total: int | None = None) -> str:
     return text
 
 
-def _export_result(filename: str, shown: int, total: int) -> dict | str:
-    """Fayl havolasi; yozuvlar sig'may qolgan bo'lsa — model buni foydalanuvchiga aytishi uchun
-    aniq sonlar bilan (ilgari 10 000 dan ortig'i hech qanday ogohlantirishsiz tushib qolardi)."""
-    url = _report_url(filename)
-    if total <= shown:
-        return url
-    return {
-        "url": url, "rows_in_file": shown, "rows_total": total,
-        "note": f"Faylga jami {total:,} ta yozuvdan dastlabki {shown:,} tasi kirdi — buni "
-                f"foydalanuvchiga ayting; to'liq ma'lumot uchun filtrni (davr, bo'lim) toraytirish kerak.",
-    }
+def _export_result(filename: str, shown: int, total: int) -> dict:
+    """Fayl havolasi va undagi yozuvlar soni. Son har doim qaytadi: model fayl haqida yozganda
+    uni shundan oladi (ilgari faqat havola qaytardi va model 5 qatorli faylni oldingi javobdagi
+    son bilan "38 ta" deb yozgan). Yozuvlar sig'may qolgan bo'lsa — buni aytishi uchun izoh ham."""
+    result = {"url": _report_url(filename), "rows_in_file": shown, "rows_total": max(total, shown)}
+    if total > shown:
+        result["note"] = (f"Faylga jami {total:,} ta yozuvdan dastlabki {shown:,} tasi kirdi — buni "
+                          f"foydalanuvchiga ayting; to'liq ma'lumot uchun filtrni (davr, bo'lim) toraytirish kerak.")
+    return result
 
 
 def _display_value(val) -> str:
@@ -1203,11 +1201,13 @@ async def generate_html_report(model: str = "", domain: list | None = None,
         description += " (to'liq ro'yxat uchun Excel)"
     link = generate_list_report(title=title, description=description, layout=layout,
                                 numeric=numeric, totals=totals, total_rows=total)
-    if link and total > len(rows):
-        return {"url": link, "rows_in_file": len(rows), "rows_total": total,
-                "note": f"Hisobotga jami {total:,} ta yozuvdan dastlabki {len(rows):,} tasi sig'di — buni "
-                        f"foydalanuvchiga ayting (to'liq ro'yxat uchun Excel)."}
-    return link or "Hisobot yaratilmadi."
+    if not link:
+        return "Hisobot yaratilmadi."
+    result = {"url": link, "rows_in_file": len(rows), "rows_total": total}
+    if total > len(rows):
+        result["note"] = (f"Hisobotga jami {total:,} ta yozuvdan dastlabki {len(rows):,} tasi sig'di — buni "
+                          f"foydalanuvchiga ayting (to'liq ro'yxat uchun Excel).")
+    return result
 
 
 async def aggregate_data(model: str, group_by: str, fields: list[str],

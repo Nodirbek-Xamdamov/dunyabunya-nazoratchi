@@ -39,7 +39,8 @@ def _fake_odoo(monkeypatch, handler):
     return calls
 
 
-def _report_text(url: str) -> str:
+def _report_text(result) -> str:
+    url = result["url"] if isinstance(result, dict) else result
     return (odoo_tools.REPORTS_DIR / url.rsplit("/", 1)[-1]).read_text(encoding="utf-8")
 
 

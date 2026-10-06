@@ -295,3 +295,20 @@ def test_table_stack_mode_marks_the_title_cell_and_labels_the_rest():
     assert '<td class="s t" data-l="Ism">Ali</td>' in html
     assert '<td class="nw" data-l="Telefon"><a class="lnk" href="tel:+998901234567">+998 90 123 45 67</a></td>' in html
     assert 'data-l="Summa">1.5 mln</td>' in html
+
+
+# ── Eksport natijasi: fayldagi yozuvlar soni ────────────────────────────────
+
+async def test_every_export_reports_how_many_records_the_file_holds(odoo):
+    """Ilgari to'liq sig'gan eksport faqat havola qaytarardi: model fayl haqida yozganda sonni
+    oldingi javobdan olar va 5 qatorli faylni "38 ta" deb yozgan."""
+    kw = dict(model="hr.employee", domain=[], fields=FIELDS, title="Xodimlar")
+    for export in (odoo_tools.export_excel, odoo_tools.export_word, odoo_tools.export_pdf,
+                   odoo_tools.export_csv, odoo_tools.generate_html_report):
+        result = await export(**kw)
+        assert result["rows_in_file"] == 4 and result["rows_total"] == 4 and "note" not in result
+        assert _file(result, odoo.dir).exists()
+
+    odoo.total = 900
+    partial = await odoo_tools.export_excel(**kw)
+    assert partial["rows_in_file"] == 4 and partial["rows_total"] == 900 and "900" in partial["note"]
