@@ -14,3 +14,4 @@ _deprecated_unused/
 tools/cloudflared.exe
 tools/cloudflared.log
 logs/
+!.env.example
