@@ -21,6 +21,8 @@ import math
 import re
 from datetime import datetime
 
+from app.services import list_layout as ll
+
 # ── Qiymatlarni yozish ──────────────────────────────────────────────────────
 
 
@@ -182,6 +184,33 @@ tbody.auto{counter-reset:r}tbody.auto tr:not([hidden]){counter-increment:r}tbody
 tr[hidden]{display:none}
 .rb{height:6px;min-width:2px;border-radius:0 3px 3px 0;background:var(--series-1);margin-top:6px}
 .empty{color:var(--muted);font-size:13px}
+a.lnk{color:inherit;text-decoration:underline;text-decoration-color:var(--axis);text-underline-offset:3px}
+a.lnk:hover,a.lnk:focus-visible{text-decoration-color:var(--series-1)}
+.pp{display:block;font-size:11.5px;line-height:1.35;color:var(--muted);margin-top:2px}
+.pw{min-width:150px}
+.nw{white-space:nowrap}
+table.fx{table-layout:fixed}
+table.fx td,table.fx th{overflow-wrap:anywhere}
+table.fx .s{white-space:normal}
+table.fx .w,table.fx .pw{min-width:0}
+col.ci{width:44px}
+.tools.all{margin:4px 0 14px}
+.tools.all input{max-width:420px;background:var(--surface)}
+.grp{background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:12px;min-width:0}
+.grp>summary{display:flex;align-items:baseline;gap:6px 12px;flex-wrap:wrap;padding:14px 20px;cursor:pointer;list-style:none;border-radius:12px}
+.grp>summary::-webkit-details-marker{display:none}
+.grp>summary::before{content:"";flex:none;align-self:center;width:6px;height:6px;margin:0 4px 2px 2px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(-45deg);transition:transform .15s}
+.grp[open]>summary::before{transform:rotate(45deg)}
+.grp>summary:hover{background:var(--wash)}
+.grp>summary:focus-visible{outline:2px solid var(--series-1);outline-offset:-2px}
+.gt{font-size:15px;font-weight:600}
+.gc{flex:1 1 120px;min-width:0;font-size:12px;color:var(--muted)}
+.gs{font-size:12px;color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums}
+.gn{font-size:12px;color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums;background:var(--wash);border-radius:999px;padding:2px 10px}
+.grp>.tbl{padding:0 20px 10px}
+.grp th{position:static}
+.hb-l a{color:inherit;text-decoration:none}
+.hb-l a:hover{text-decoration:underline;text-underline-offset:3px}
 .note{color:var(--muted);font-size:12px;margin-top:12px}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 .tip{position:fixed;z-index:9;pointer-events:none;background:var(--ink);color:var(--surface);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.45;box-shadow:0 4px 16px rgba(0,0,0,.2);max-width:260px}
@@ -192,7 +221,22 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 .tip .k{width:10px;height:2px;border-radius:1px;background:var(--series-1);flex:none}
 .tip .k.s2{background:var(--series-2)}.tip .k.pt{background:var(--track)}
 @media (max-width:600px){body{padding:18px 12px 32px}h1{font-size:21px}.card{padding:16px}.cols-plot,.cols-x{margin-left:50px}td,th{padding-left:10px;padding-right:10px}}
-@media print{body{padding:0;background:#fff}.theme,.tools{display:none!important}.card,.tile{break-inside:avoid}.tbl,.tbl.tall{max-height:none;overflow:visible}th{position:static}thead{display:table-header-group}.seg,.rb,.hb i,.meter-fill,.meter-track,.sw,.brand i{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+@media (max-width:640px){
+.grp>summary{padding:12px 14px}.grp>.tbl{padding:0 14px 6px}
+table.stack thead{display:none}
+table.stack,table.stack tbody,table.stack tr,table.stack td{display:block}
+table.stack colgroup{display:none}
+table.stack tr{padding:10px 0;border-bottom:1px solid var(--grid)}
+table.stack tbody tr:last-child{border-bottom:0}
+table.stack tr[hidden]{display:none}
+table.stack td{border:0;padding:1px 0;min-width:0;white-space:normal;text-align:left;overflow-wrap:anywhere}
+table.stack td.i,table.stack td:empty{display:none}
+table.stack td.t{font-size:14.5px;font-weight:600;padding-bottom:3px}
+table.stack td[data-l]:not(.t)::before{content:attr(data-l) ": ";font-size:12px;color:var(--muted)}
+table.stack .pp{display:inline;margin:0 0 0 6px}
+table.stack tbody tr:hover td{background:none}
+}
+@media print{body{padding:0;background:#fff}.theme,.tools{display:none!important}.card,.tile{break-inside:avoid}.grp>summary::before{display:none}.grp tr{break-inside:avoid}.tbl,.tbl.tall{max-height:none;overflow:visible}th{position:static}thead{display:table-header-group}.seg,.rb,.hb i,.meter-fill,.meter-track,.sw,.brand i{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 """
 )
 
@@ -201,6 +245,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 _JS = """
 (function(){
 var d=document,root=d.documentElement;
+var fmtN=function(n){return String(n).replace(/\\B(?=(\\d{3})+(?!\\d))/g,' ');};
 var btn=d.querySelector('.theme');
 if(btn){btn.hidden=false;btn.addEventListener('click',function(){
 var dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
@@ -249,6 +294,20 @@ if(typeof x==='number'&&typeof y==='number')return asc?x-y:y-x;
 x=String(x);y=String(y);if(x===''&&y!=='')return 1;if(y===''&&x!=='')return -1;
 return asc?x.localeCompare(y,undefined,{numeric:true}):y.localeCompare(x,undefined,{numeric:true});});
 rows.forEach(function(r){body.appendChild(r);});});});});
+d.querySelectorAll('.tools[data-all]').forEach(function(tools){
+var rows=Array.prototype.slice.call(d.querySelectorAll('table[data-g] tbody tr'));
+if(!rows.length)return;
+var groups=Array.prototype.slice.call(d.querySelectorAll('.grp'));
+var inp=tools.querySelector('input'),cnt=tools.querySelector('.cnt');
+tools.hidden=false;
+var upd=function(){var q=inp.value.trim().toLowerCase(),n=0;
+rows.forEach(function(r){var ok=!q||r.textContent.toLowerCase().indexOf(q)>=0;r.hidden=!ok;if(ok)n++;});
+groups.forEach(function(g){var vis=g.querySelectorAll('tbody tr:not([hidden])').length;
+g.hidden=!vis;if(q&&vis)g.open=true;
+var b=g.querySelector('.gn');if(b)b.textContent=(q?fmtN(vis)+' / ':'')+b.getAttribute('data-n')+' ta';});
+cnt.textContent=q?(fmtN(n)+' / '+fmtN(rows.length)+' ta'):(fmtN(rows.length)+' ta');};
+inp.addEventListener('input',upd);upd();});
+addEventListener('beforeprint',function(){d.querySelectorAll('details').forEach(function(x){x.open=true;});});
 })();
 """
 
@@ -374,9 +433,11 @@ def columns(labels, series, *, titles=None, sublabels=None, partial_last: bool =
             f'<div class="cols-x">{axis}</div></div>')
 
 
-def hbars(labels, values) -> str:
-    """Gorizontal chiziqlar — nomli toifalarni taqqoslash (qiymat chiziq uchida)."""
+def hbars(labels, values, links=None) -> str:
+    """Gorizontal chiziqlar — nomli toifalarni taqqoslash (qiymat chiziq uchida).
+    `links` — har bir yorliq uchun sahifa ichidagi havola ("#g3"): bosilganda o'sha guruhga o'tadi."""
     pairs = [(str(lb), v if is_number(v) else 0) for lb, v in zip(labels, values)]
+    links = list(links or [])
     if not pairs or not any(v for _lb, v in pairs):
         return empty()
     if len(pairs) == 1:
@@ -385,10 +446,13 @@ def hbars(labels, values) -> str:
         return f'<div class="meter-pct">{esc(fmt_num(value))}</div><div class="meter-cap">{esc(label)}</div>'
     top = max(abs(v) for _lb, v in pairs) or 1
     cells = []
-    for label, value in pairs:
+    for index, (label, value) in enumerate(pairs):
         share = abs(value) / top
+        name = esc(label)
+        if index < len(links) and links[index]:
+            name = f'<a href="{esc(links[index])}">{name}</a>'
         cells.append(
-            f'<div class="hb-l" title="{esc(label)}">{esc(label)}</div>'
+            f'<div class="hb-l" title="{esc(label)}">{name}</div>'
             f'<div class="hb" tabindex="0" {_tip(label, [("", fmt_full(value), "")])}>'
             f'<i style="width:calc((100% - 76px) * {share:.4f})"></i><span>{esc(fmt_num(value))}</span></div>'
         )
@@ -415,28 +479,66 @@ def meter(filled, total, filled_label: str, rest_label: str) -> str:
     )
 
 
-def _number_cell(value) -> str:
+def _number_cell(value, attrs: str = "") -> str:
     if not value:
-        return '<td class="n"></td>'  # 0 qiymatlar bo'sh qoldiriladi
+        return f'<td class="n"{attrs}></td>'  # 0 qiymatlar bo'sh qoldiriladi
     short = fmt_num(value, 2)
     full = fmt_full(value)
     hint = f' title="{esc(full)}"' if short != full else ""
-    return f'<td class="n" data-v="{value:.10g}"{hint}>{esc(short)}</td>'
+    return f'<td class="n" data-v="{value:.10g}"{hint}{attrs}>{esc(short)}</td>'
+
+
+def _smart_cell(cell, kind) -> tuple[str, str, str] | None:
+    """Turi ma'lum ustun katagi: (ichki HTML, klass, qo'shimcha atributlar). Telefon va email —
+    bosiladigan havola, sana — kun.oy.yil (saralash kaliti bilan), pog'onali nom — oxirgi bo'g'in
+    va undan oldingilari kichik yozuvda. Oddiy matn uchun None."""
+    value = "" if cell in (None, False) else str(cell)
+    if not value:
+        return None
+    if kind == "phone":
+        parts = ll.phone_parts(value)
+        if parts:
+            links = ", ".join(f'<a class="lnk" href="tel:{esc(tel)}">{esc(shown)}</a>' for shown, tel in parts)
+            return links, "nw", ""
+    elif kind == "email" and "@" in value and " " not in value.strip():
+        return f'<a class="lnk" href="mailto:{esc(value.strip())}">{esc(value.strip())}</a>', "", ""
+    elif kind in ("date", "datetime"):
+        key = ll.date_sort_key(value)
+        if key:
+            return esc(ll.date_text(value)), "nw", f' data-v="{key}"'
+    elif kind == "path":
+        leaf, parents = ll.split_path(value)
+        if parents:
+            return f'{esc(leaf)}<span class="pp">{esc(parents)}</span>', "pw", ""
+    return None
 
 
 def table(headers, rows, *, numbered: bool = False, interactive: bool = False,
-          bar_col: int | None = None, label_col: int = 0) -> str:
+          bar_col: int | None = None, label_col: int = 0,
+          kinds: list | None = None, stack: bool = False, tools: bool = True, group: bool = False,
+          widths: list | None = None) -> str:
     """Jadval. Son kataklari o'ngga tekislanadi va ixcham yoziladi (to'liq qiymat — ustiga
     borganda), 0 qiymatlar bo'sh qoldiriladi.
 
-    `interactive` — qidiruv maydoni va ustun sarlavhasini bosib saralash (uzun ro'yxatlar uchun).
+    `interactive` — ustun sarlavhasini bosib saralash va (`tools`) qidiruv maydoni.
     `bar_col` — shu ustun qiymatiga mutanosib ingichka chiziq `label_col` katagi ostida
-    chiziladi (reyting jadvali: "top mijozlar")."""
+    chiziladi (reyting jadvali: "top mijozlar").
+    `kinds` — ustun turlari (phone, email, date, datetime, path): kataklar shunga mos chiziladi.
+    `stack` — yozuvlar ro'yxati: tor ekranda har qator "sarlavha + nom: qiymat" kartochkasiga
+    aylanadi (ko'p ustunli jadval telefonda sig'maydi). `group` — sahifadagi umumiy qidiruv
+    shu jadval qatorlarini ham filtrlaydi. `widths` — ustunlarning nisbiy kengligi: berilsa
+    jadval shu nisbatda bo'linadi (bir necha guruh jadvalida ustunlar bir chiziqda turishi uchun)."""
     rows = [list(r) for r in rows]
     if not rows:
         return empty()
+    colgroup = ""
+    if widths and len(widths) == len(headers) and sum(widths) > 0:
+        colgroup = ("<colgroup>" + ('<col class="ci">' if numbered else "")
+                    + "".join(f'<col style="width:{w / sum(widths) * 100:.2f}%">' for w in widths) + "</colgroup>")
+    kinds = list(kinds or []) + [None] * len(headers)
     numeric = [any(is_number(r[c]) for r in rows if c < len(r)) for c in range(len(headers))]
     bar_top = max((abs(r[bar_col]) for r in rows if is_number(r[bar_col])), default=0) if bar_col is not None else 0
+    title_col = next((c for c in range(len(headers)) if not numeric[c]), 0) if stack else None
 
     sort_attr = " data-s" if interactive else ""
     head = ('<th class="i">#</th>' if numbered else "") + "".join(
@@ -447,28 +549,54 @@ def table(headers, rows, *, numbered: bool = False, interactive: bool = False,
     for n, r in enumerate(rows, start=1):
         cells = [f'<td class="i">{"" if interactive else n}</td>'] if numbered else []
         for c, cell in enumerate(r):
+            label = f' data-l="{esc(headers[c])}"' if stack and c < len(headers) else ""
             if is_number(cell):
-                cells.append(_number_cell(cell))
+                cells.append(_number_cell(cell, label))
                 continue
-            text = esc(cell)
+            title = " t" if c == title_col else ""
+            smart = _smart_cell(cell, kinds[c])
+            if smart:
+                inner, cls, attrs = smart
+                cells.append(f'<td class="{(cls + title).strip()}"{attrs}{label}>{inner}</td>')
+                continue
+            text = esc("" if cell is False else cell)
             if bar_top and c == label_col and is_number(r[bar_col]):
                 text += f'<div class="rb" style="width:{abs(r[bar_col]) / bar_top * 100:.1f}%"></div>'
-                cells.append(f"<td>{text}</td>")
+                cells.append(f"<td{label}>{text}</td>")
                 continue
             # Qisqa qiymat (sana, oy nomi, raqamli kod) tor ekranda ikki qatorga bo'linib ketmasin;
             # uzun matnli ustun esa siqilib, har katagi besh-olti qatorga cho'zilib ketmasin
             # (jadval sig'masa — gorizontal aylantiriladi)
             length = len(str(cell or ""))
-            cls = ' class="s"' if length <= 18 else ' class="w"' if length >= 34 else ""
-            cells.append(f"<td{cls}>{text}</td>")
+            cls = ("s" if length <= 18 else "w" if length >= 34 else "") + title
+            cells.append(f'<td class="{cls.strip()}"{label}>{text}</td>' if cls.strip() else f"<td{label}>{text}</td>")
         body.append(f"<tr>{''.join(cells)}</tr>")
 
-    tools = ('<div class="tools" hidden><input type="search" placeholder="Qidirish…" '
-             'aria-label="Jadvaldan qidirish"><span class="cnt"></span></div>') if interactive else ""
-    tall = " tall" if len(rows) > 15 else ""
-    return (f'{tools}<div class="tbl{tall}"><table{" data-x" if interactive else ""}>'
+    tools_html = ('<div class="tools" hidden><input type="search" placeholder="Qidirish…" '
+                  'aria-label="Jadvaldan qidirish"><span class="cnt"></span></div>') if interactive and tools else ""
+    tall = " tall" if len(rows) > 15 and not group else ""
+    classes = " ".join(c for c in ("stack" if stack else "", "fx" if colgroup else "") if c)
+    attrs = (" data-x" if interactive else "") + (" data-g" if group else "") + (f' class="{classes}"' if classes else "")
+    return (f'{tools_html}<div class="tbl{tall}"><table{attrs}>{colgroup}'
             f'<thead><tr>{head}</tr></thead>'
             f'<tbody{" class=auto" if interactive and numbered else ""}>{"".join(body)}</tbody></table></div>')
+
+
+def search_bar() -> str:
+    """Sahifadagi barcha guruh jadvallari uchun bitta qidiruv maydoni (skript yoqadi)."""
+    return ('<div class="tools all" data-all hidden><input type="search" placeholder="Qidirish…" '
+            'aria-label="Ro\'yxatdan qidirish"><span class="cnt"></span></div>')
+
+
+def group(title, body: str, *, context: str = "", count: int = 0, extra: str = "", anchor: str = "") -> str:
+    """Ro'yxatdagi bitta guruh (masalan bo'lim): sarlavha, nechta yozuv borligi va jadvali.
+    Yig'ib-ochiladi (skriptsiz ham ishlaydi); bosmada hamma guruh ochiq chiqadi."""
+    ident = f' id="{esc(anchor)}"' if anchor else ""
+    more = f'<span class="gs">{esc(extra)}</span>' if extra else ""
+    return (f'<details class="grp" open{ident}><summary><span class="gt">{esc(title)}</span>'
+            f'<span class="gc">{esc(context)}</span>{more}'
+            f'<span class="gn" data-n="{esc(fmt_int(count))}">{esc(fmt_int(count))} ta</span></summary>'
+            f'{body}</details>')
 
 
 def page(*, title: str, subtitle: str = "", tiles_html: str = "", body: str = "", wide: bool = False) -> str:

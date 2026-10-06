@@ -13,8 +13,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.config import settings
+from app.services import list_layout as ll
 from app.services import report_html as rh
 from app.services.odoo import OdooClient, OdooError
+from app.services.tool_errors import ToolInputError
 
 _odoo = OdooClient()
 REPORTS_DIR = Path(settings.STORAGE_DIR) / "reports"
@@ -273,16 +275,28 @@ async def _resolve_x2many_names(raw: list[dict], fields: list[str], meta: dict) 
 
 
 _READ_PAGE_SIZE = 2000
+_ORDER_RE = re.compile(r"^[a-z0-9_.]+(\s+(asc|desc))?(\s*,\s*[a-z0-9_.]+(\s+(asc|desc))?)*$", re.IGNORECASE)
+_FIELD_NAME_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def _safe_order(order) -> str:
+    """Saralash ifodasi ("amount_total desc, id") — faqat maydon nomlari va asc/desc."""
+    order = str(order or "").strip()
+    if order and not _ORDER_RE.match(order):
+        raise ToolInputError("order noto'g'ri — masalan \"amount_total desc\" yoki \"name\"")
+    return order
 
 
 async def _read_rows(model: str, domain: list | None = None, fields: list | None = None,
-                     limit: int = 1000, *, keep_id: bool = False) -> tuple[list[dict], list[tuple[str, str]], dict]:
+                     limit: int = 1000, *, keep_id: bool = False,
+                     order: str = "") -> tuple[list[dict], list[tuple[str, str]], dict]:
     """Yozuvlarni o'qib, ko'rsatishga tayyor holga keltiradi.
 
     Qaytadi: (qatorlar {maydon: qiymat}, ustunlar [(maydon, sarlavha)], maydonlar sxemasi).
     Sarlavhalar Odoo'dagi maydon nomi ("Bo'lim", "Ish telefoni"), texnik nom (department_id) emas.
     Texnik "id" ustuni faqat `keep_id` bilan va aniq so'ralganda qoladi."""
     meta = await _fields_meta(model)
+    order = _safe_order(order)
     flds = [f for f in (fields or []) if f != "id" or keep_id]
     if not flds:
         skip = {"one2many", "many2many", "binary", "text", "html", "json", "properties"}
@@ -291,16 +305,25 @@ async def _read_rows(model: str, domain: list | None = None, fields: list | None
         flds = flds or ["display_name"]
 
     limit = max(1, int(limit or 1000))
-    raw: list[dict] = []
-    while len(raw) < limit:
-        kwargs = {"limit": min(_READ_PAGE_SIZE, limit - len(raw)), "context": _UZ_CTX}
-        if raw or limit > _READ_PAGE_SIZE:
-            # Bir nechta sahifa — tartib barqaror bo'lishi shart (aks holda qatorlar takrorlanadi)
-            kwargs.update(offset=len(raw), order="id")
-        page = await _odoo.execute_kw(model, "search_read", [domain or [], flds], kwargs)
-        raw.extend(page)
-        if len(page) < kwargs["limit"]:
-            break
+    # Birinchi sahifa modelning o'z tartibida (yoki so'ralgan tartibda) o'qiladi: ro'yxat bitta
+    # sahifaga sig'sa — xodimlar ism bo'yicha, hujjatlar sana bo'yicha turadi (ilgari katta limit
+    # bilan so'ralgan har qanday eksport ID tartibida chiqardi).
+    first = {"limit": min(_READ_PAGE_SIZE, limit), "context": _UZ_CTX}
+    if order:
+        first["order"] = order
+    raw: list[dict] = await _odoo.execute_kw(model, "search_read", [domain or [], flds], first)
+    if len(raw) == first["limit"] and limit > _READ_PAGE_SIZE:
+        # Bir nechta sahifa kerak — tartib barqaror bo'lishi shart (aks holda qatorlar takrorlanadi
+        # yoki tushib qoladi): ID qo'shib, boshidan sahifalab o'qiladi
+        stable = f"{order}, id" if order else "id"
+        raw = []
+        while len(raw) < limit:
+            kwargs = {"limit": min(_READ_PAGE_SIZE, limit - len(raw)), "offset": len(raw),
+                      "order": stable, "context": _UZ_CTX}
+            page = await _odoo.execute_kw(model, "search_read", [domain or [], flds], kwargs)
+            raw.extend(page)
+            if len(page) < kwargs["limit"]:
+                break
 
     names = await _resolve_x2many_names(raw, flds, meta)
     rows = [{f: _display_cell(r.get(f), meta.get(f) or {}, names.get(f)) for f in flds} for r in raw]
@@ -733,17 +756,41 @@ def _export_slug(title: str) -> str:
     return rh.slug(title)
 
 
+def _group_field(group_by, fields: list | None) -> tuple[str, list | None]:
+    """Guruhlash maydonini tekshiradi va (kerak bo'lsa) o'qiladigan maydonlarga qo'shadi."""
+    group_by = str(group_by or "").strip()
+    if not group_by:
+        return "", fields
+    if not _FIELD_NAME_RE.match(group_by):
+        raise ToolInputError("group_by — bitta maydon nomi bo'lishi kerak (masalan \"department_id\")")
+    if fields and group_by not in fields:
+        fields = [*fields, group_by]
+    return group_by, fields
+
+
 async def _export_rows(model: str, domain: list | None = None, fields: list | None = None,
-                       limit: int = 10000) -> tuple[list[dict], list[tuple[str, str]], int, dict[str, str]]:
+                       limit: int = 10000, order: str = "",
+                       group_by: str = "") -> tuple[list[dict], list[tuple[str, str]], int, dict[str, str]]:
     """Eksport uchun tayyor qatorlar, ustunlar [(maydon, sarlavha)], bazadagi JAMI soni va
     maydon turlari {maydon: "monetary" | "date" | ...} (fayl formatlash uchun)."""
     limit = max(1, min(int(limit or 10000), EXPORT_MAX_ROWS))
+    _group, fields = _group_field(group_by, fields)
     (rows, columns, meta), total = await asyncio.gather(
-        _read_rows(model, domain, fields, limit, keep_id=True),
+        _read_rows(model, domain, fields, limit, keep_id=True, order=order),
         _count(model, domain),
     )
     types = {field: (meta.get(field) or {}).get("type") or "" for field, _label in columns}
     return rows, columns, max(total, len(rows)), types
+
+
+def _records_note(layout, shown: int, total: int | None = None) -> str:
+    """Sarlavha ostidagi izoh: "132 ta yozuv · Bo'lim: 21 ta"."""
+    text = f"{shown:,} ta yozuv".replace(",", " ")
+    if total and total > shown:
+        text = f"jami {total:,} ta yozuvdan dastlabki {shown:,} tasi".replace(",", " ")
+    if layout is not None and layout.grouped:
+        text += f"  ·  {layout.group_label}: {len(layout.groups)} ta"
+    return text
 
 
 def _export_result(filename: str, shown: int, total: int) -> dict | str:
@@ -836,26 +883,34 @@ def _xlsx_text_width(value, number_format) -> int:
 
 
 def _write_xlsx(path: Path, title: str, rows: list[dict], columns: list[tuple[str, str]],
-                types: dict[str, str] | None = None, total: int | None = None) -> None:
-    """Excel fayl: sarlavha bloki, rangli ustun nomlari, navbatlashgan qatorlar, sonlar va
-    sanalar o'z formatida, summalar bo'yicha "Jami" qatori, filtr, qotirilgan sarlavha va
-    bosmaga tayyor sahifa sozlamalari."""
+                types: dict[str, str] | None = None, total: int | None = None, layout=None) -> None:
+    """Excel fayl: sarlavha bloki, rangli ustun nomlari, sonlar va sanalar o'z formatida,
+    summalar bo'yicha "Jami" qatori, qotirilgan sarlavha va bosmaga tayyor sahifa sozlamalari.
+
+    Oddiy ro'yxat — navbatlashgan qatorlar va filtr bilan. Guruhlangan ro'yxat (`layout`) —
+    har guruh o'z sarlavha qatori (nomi, nechta yozuv, oraliq yig'indilar) ostida, yig'ib-ochiladi,
+    ikkinchi varaqda guruhlar bo'yicha xulosa."""
     from openpyxl import Workbook
-    from openpyxl.formatting.rule import FormulaRule
+    from openpyxl.cell.rich_text import CellRichText, TextBlock
+    from openpyxl.cell.text import InlineFont
+    from openpyxl.formatting.rule import DataBarRule, FormulaRule
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.properties import PageSetupProperties
 
     types = types or {}
+    grouped = bool(layout is not None and layout.grouped)
+    kinds = layout.kinds if layout is not None else {}
+    if grouped:
+        columns, rows = layout.columns, layout.rows
     count = len(columns)
     last_letter = get_column_letter(count)
     first_row = _XLSX_HEADER_ROW + 1
-    last_row = _XLSX_HEADER_ROW + len(rows)
     polish = len(rows) <= _XLSX_FULL_STYLE_MAX_ROWS
 
     wb = Workbook()
     ws = wb.active
-    ws.title = re.sub(r"[\[\]:*?/\\]", " ", title or "Hisobot")[:31] or "Hisobot"
+    ws.title = "Ro'yxat" if grouped else (re.sub(r"[\[\]:*?/\\]", " ", title or "Hisobot")[:31] or "Hisobot")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = _XLSX_ACCENT
     wb.properties.title = title or "Hisobot"
@@ -865,11 +920,8 @@ def _write_xlsx(path: Path, title: str, rows: list[dict], columns: list[tuple[st
     ws.cell(row=1, column=1, value=title or "Hisobot").font = Font(size=15, bold=True, color="0B0B0B")
     ws.row_dimensions[1].height = 26
     shown = len(rows)
-    info = f"{shown:,} ta yozuv".replace(",", " ")
-    if total and total > shown:
-        info = f"jami {total:,} ta yozuvdan dastlabki {shown:,} tasi".replace(",", " ")
-    info += f"  ·  {datetime.now(_TZ).strftime('%d.%m.%Y %H:%M')}  ·  dunyabunya"
-    ws.cell(row=2, column=1, value=info).font = Font(size=9, color=_XLSX_MUTED)
+    stamp = f"  ·  {datetime.now(_TZ).strftime('%d.%m.%Y %H:%M')}  ·  dunyabunya"
+    ws.cell(row=2, column=1, value=_records_note(layout, shown, total) + stamp).font = Font(size=9, color=_XLSX_MUTED)
 
     # 2) Ustun nomlari (son va sana ustunlari — qiymatlari kabi o'ngga tekislanadi)
     formats = {
@@ -890,23 +942,32 @@ def _write_xlsx(path: Path, title: str, rows: list[dict], columns: list[tuple[st
 
     # 3) Ma'lumotlar
     widths = [len(str(label)) + 4 for _field, label in columns]  # +4: filtr tugmasi uchun joy
+    measures = [ci for ci, (field, _label) in enumerate(columns, start=1)
+                if types.get(field) in ("monetary", "float")]
     sums: dict[int, float] = {}
-    measures = {ci for ci, (field, _label) in enumerate(columns, start=1)
-                if types.get(field) in ("monetary", "float")}
     top = Alignment(vertical="top")
     wrap = Alignment(vertical="top", wrap_text=True)
-    for ri, row in enumerate(rows, start=first_row):
+    hairline = Border(bottom=Side(style="hair", color="C9C8C0"))
+
+    def write_row(ri: int, row: dict, index: int, subtotal: dict[int, float] | None = None) -> None:
         for ci, (field, _label) in enumerate(columns, start=1):
             number_format = formats[ci]
-            value = _xlsx_value(row.get(field), number_format)
+            raw = row.get(field)
+            if kinds.get(field) == "phone":
+                raw = ll.phone_text(raw)
+            value = _xlsx_value(raw, number_format)
             if value is None:
+                if grouped and polish:
+                    ws.cell(row=ri, column=ci).border = hairline
                 continue
             cell = ws.cell(row=ri, column=ci, value=value)
             if number_format and not isinstance(value, str):
                 cell.number_format = number_format
             if ci in measures and isinstance(value, (int, float)):
                 sums[ci] = sums.get(ci, 0) + value
-            if polish or ri - first_row < 300:
+                if subtotal is not None:
+                    subtotal[ci] = subtotal.get(ci, 0) + value
+            if polish or index < 300:
                 width = _xlsx_text_width(value, number_format)
                 if width > widths[ci - 1]:
                     widths[ci - 1] = width
@@ -914,14 +975,57 @@ def _write_xlsx(path: Path, title: str, rows: list[dict], columns: list[tuple[st
                     cell.alignment = wrap if (width > _XLSX_MAX_WIDTH or "\n" in value) else top
                 elif polish:
                     cell.alignment = top
+                if grouped and polish:
+                    cell.border = hairline
 
-    # 4) Jami qatori (faqat summa/miqdor ustunlari bo'lsa)
-    if sums and len(rows) > 1:
+    band_fill = PatternFill("solid", fgColor=_XLSX_TOTAL_FILL)
+    label_span = (min(measures) - 1) if measures and min(measures) > 1 else count
+    summary: list[tuple[object, int, dict[int, float]]] = []  # (guruh, soni, oraliq yig'indilar)
+    ri = first_row
+    if grouped:
+        ws.sheet_properties.outlinePr.summaryBelow = False
+        index = 0
+        for item in layout.groups:
+            band_row = ri
+            ri += 1
+            subtotal: dict[int, float] = {}
+            for row in item.rows:
+                write_row(ri, row, index, subtotal)
+                ws.row_dimensions[ri].outlineLevel = 1
+                ri += 1
+                index += 1
+            # Guruh sarlavhasi: nomi (qalin), yuqori bo'limi (xira) va yozuvlar soni; summa ustunlarida — oraliq yig'indi
+            blocks = [TextBlock(InlineFont(b=True, sz=10.5), str(item.title))]
+            if item.context:
+                blocks.append(TextBlock(InlineFont(sz=9, color=_XLSX_MUTED), f"   {item.context}"))
+            blocks.append(TextBlock(InlineFont(sz=9.5, color="3F3E3B"), f"   ·   {len(item.rows)} ta"))
+            for ci in range(1, count + 1):
+                cell = ws.cell(row=band_row, column=ci)
+                cell.fill = band_fill
+                if ci in subtotal:
+                    cell.value = subtotal[ci]
+                    cell.number_format = formats[ci] or "#,##0.00"
+                    cell.font = Font(bold=True)
+            ws.cell(row=band_row, column=1).value = CellRichText(*blocks)
+            ws.cell(row=band_row, column=1).alignment = Alignment(vertical="center", indent=1)
+            if label_span > 1:
+                ws.merge_cells(start_row=band_row, start_column=1, end_row=band_row, end_column=label_span)
+            ws.row_dimensions[band_row].height = 22
+            summary.append((item, len(item.rows), subtotal))
+    else:
+        for index, row in enumerate(rows):
+            write_row(ri, row, index)
+            ri += 1
+    last_row = ri - 1
+
+    # 4) Jami qatori (summa/miqdor ustunlari bo'lsa; guruhlangan ro'yxatda — har doim)
+    if (sums and len(rows) > 1) or grouped:
         total_row = last_row + 1
         total_font = Font(bold=True)
         total_fill = PatternFill("solid", fgColor=_XLSX_TOTAL_FILL)
         total_border = Border(top=Side(style="thin", color=_XLSX_ACCENT))
         label_col = next((ci for ci in range(1, count + 1) if ci not in sums), None)
+        partial = bool(total and total > shown)
         for ci in range(1, count + 1):
             cell = ws.cell(row=total_row, column=ci)
             cell.font, cell.fill, cell.border = total_font, total_fill, total_border
@@ -931,11 +1035,14 @@ def _write_xlsx(path: Path, title: str, rows: list[dict], columns: list[tuple[st
                 widths[ci - 1] = max(widths[ci - 1], _xlsx_text_width(sums[ci], cell.number_format) + 1)
             elif ci == label_col:
                 # Faylga yozuvlarning bir qismi sig'gan bo'lsa — yig'indi ham shu qismga tegishli
-                cell.value = "Jami (fayldagi qatorlar)" if total and total > shown else "Jami"
+                cell.value = "Jami (fayldagi qatorlar)" if partial else "Jami"
+                if grouped:
+                    cell.value += f" — {shown:,} ta".replace(",", " ")
         ws.row_dimensions[total_row].height = 20
 
-    # 5) Navbatlashgan qatorlar — bitta shartli format (har katakni bo'yamasdan, katta faylda ham tez)
-    if rows:
+    # 5) Oddiy ro'yxatda navbatlashgan qatorlar — bitta shartli format (har katakni bo'yamasdan,
+    #    katta faylda ham tez); guruhlangan ro'yxatda qatorlar ingichka chiziq bilan ajratilgan
+    if rows and not grouped:
         ws.conditional_formatting.add(
             f"A{first_row}:{last_letter}{last_row}",
             FormulaRule(formula=["MOD(ROW(),2)=0"], stopIfTrue=False,
@@ -944,37 +1051,99 @@ def _write_xlsx(path: Path, title: str, rows: list[dict], columns: list[tuple[st
 
     for ci, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(ci)].width = max(8, min(width + 2, _XLSX_MAX_WIDTH))
+    if grouped:
+        # Guruh nomi birinchi ustun(lar)ga sig'ishi uchun (birlashtirilgan katak kenglikni o'zi oshirmaydi)
+        longest = max((len(str(g.title)) + len(str(g.context)) + 12 for g in layout.groups), default=0)
+        spanned = sum(ws.column_dimensions[get_column_letter(ci)].width for ci in range(1, label_span + 1))
+        if longest > spanned:
+            ws.column_dimensions["A"].width = min(_XLSX_MAX_WIDTH + 10, ws.column_dimensions["A"].width + longest - spanned)
 
     # 6) Ko'rish va bosma sozlamalari
-    ws.freeze_panes = ws.cell(row=first_row, column=2 if count >= 5 else 1)
-    ws.auto_filter.ref = f"A{_XLSX_HEADER_ROW}:{last_letter}{max(last_row, _XLSX_HEADER_ROW)}"
-    ws.print_title_rows = f"{_XLSX_HEADER_ROW}:{_XLSX_HEADER_ROW}"
-    ws.page_setup.orientation = "landscape"
-    ws.page_setup.paperSize = ws.PAPERSIZE_A4
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.page_margins.left = ws.page_margins.right = 0.4
-    ws.page_margins.top = ws.page_margins.bottom = 0.6
-    ws.oddFooter.center.text = "&P / &N"
-    ws.oddFooter.right.text = "dunyabunya"
+    def page_setup(sheet, header_row: int) -> None:
+        sheet.print_title_rows = f"{header_row}:{header_row}"
+        sheet.page_setup.orientation = "landscape"
+        sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+        sheet.page_margins.left = sheet.page_margins.right = 0.4
+        sheet.page_margins.top = sheet.page_margins.bottom = 0.6
+        sheet.oddFooter.center.text = "&P / &N"
+        sheet.oddFooter.right.text = "dunyabunya"
+
+    ws.freeze_panes = ws.cell(row=first_row, column=2 if count >= 5 and not grouped else 1)
+    if not grouped:
+        ws.auto_filter.ref = f"A{_XLSX_HEADER_ROW}:{last_letter}{max(last_row, _XLSX_HEADER_ROW)}"
+    page_setup(ws, _XLSX_HEADER_ROW)
+
+    # 7) Guruhlar bo'yicha xulosa varag'i
+    if grouped:
+        sheet = wb.create_sheet("Xulosa")
+        sheet.sheet_view.showGridLines = False
+        sheet.sheet_properties.tabColor = _XLSX_HEADER_FILL
+        sheet.cell(row=1, column=1, value=f"{layout.group_label} bo'yicha xulosa").font = Font(size=15, bold=True, color="0B0B0B")
+        sheet.row_dimensions[1].height = 26
+        sheet.cell(row=2, column=1, value=str(title or "Hisobot") + stamp).font = Font(size=9, color=_XLSX_MUTED)
+        has_context = any(item.context for item, _n, _s in summary)
+        heads = [layout.group_label] + (["Tarkibida"] if has_context else []) + ["Soni"] + \
+                [str(columns[ci - 1][1]) for ci in measures]
+        for ci, label in enumerate(heads, start=1):
+            cell = sheet.cell(row=_XLSX_HEADER_ROW, column=ci, value=label)
+            cell.font, cell.fill, cell.border = header_font, header_fill, header_border
+            numeric_head = ci > (2 if has_context else 1)
+            cell.alignment = Alignment(horizontal="right" if numeric_head else "left", vertical="center", indent=1)
+        sheet.row_dimensions[_XLSX_HEADER_ROW].height = 26
+        count_col = 3 if has_context else 2
+        sri = _XLSX_HEADER_ROW + 1
+        for item, members, subtotal in summary:
+            sheet.cell(row=sri, column=1, value=str(item.title)).border = hairline
+            if has_context:
+                context_cell = sheet.cell(row=sri, column=2, value=str(item.context) or None)
+                context_cell.font, context_cell.border = Font(color=_XLSX_MUTED), hairline
+            number = sheet.cell(row=sri, column=count_col, value=members)
+            number.number_format, number.border = "#,##0", hairline
+            for offset, ci in enumerate(measures, start=1):
+                value = sheet.cell(row=sri, column=count_col + offset, value=subtotal.get(ci) or None)
+                value.number_format, value.border = formats[ci] or "#,##0.00", hairline
+            sri += 1
+        for ci in range(1, len(heads) + 1):
+            cell = sheet.cell(row=sri, column=ci)
+            cell.font, cell.fill = Font(bold=True), band_fill
+            cell.border = Border(top=Side(style="thin", color=_XLSX_ACCENT))
+        sheet.cell(row=sri, column=1, value="Jami")
+        sheet.cell(row=sri, column=count_col, value=shown).number_format = "#,##0"
+        for offset, ci in enumerate(measures, start=1):
+            sheet.cell(row=sri, column=count_col + offset, value=sums.get(ci) or None).number_format = formats[ci] or "#,##0.00"
+        if len(summary) > 1:
+            letter = get_column_letter(count_col)
+            sheet.conditional_formatting.add(
+                f"{letter}{_XLSX_HEADER_ROW + 1}:{letter}{sri - 1}",
+                DataBarRule(start_type="num", start_value=0, end_type="max", color=_XLSX_ACCENT, showValue=True))
+        sheet.column_dimensions["A"].width = max(18, min(_XLSX_MAX_WIDTH, max(len(str(i.title)) for i, _n, _s in summary) + 4))
+        if has_context:
+            sheet.column_dimensions["B"].width = max(14, min(_XLSX_MAX_WIDTH, max(len(str(i.context)) for i, _n, _s in summary) + 4))
+        for ci in range(count_col, len(heads) + 1):
+            sheet.column_dimensions[get_column_letter(ci)].width = 18
+        sheet.freeze_panes = sheet.cell(row=_XLSX_HEADER_ROW + 1, column=1)
+        page_setup(sheet, _XLSX_HEADER_ROW)
     wb.save(path)
 
 
 async def export_excel(model: str = "", domain: list | None = None,
                        fields: list | None = None, title: str = "Hisobot",
-                       limit: int = 10000) -> dict | str:
+                       limit: int = 10000, group_by: str = "", order: str = "") -> dict | str:
     """Odoo ma'lumotlarini haqiqiy Excel (.xlsx) faylga eksport qiladi.
 
     Foydalanuvchi excel/xlsx fayl so'raganda shu toolni chaqiring.
     model: qaysi Odoo model (masalan hr.employee, sale.order)
     domain/fields: qidiruv shartlari — avvalgi tool natijasiga mos bo'lsin.
+    group_by: shu maydon bo'yicha guruhlab chiqarish (masalan department_id); order: saralash.
     Fayl diskka yoziladi va havola qaytariladi (bot faylni ham yuboradi).
     """
     if not model:
         return "Excel uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
 
-    rows, columns, total, types = await _export_rows(model, domain, fields, limit)
+    rows, columns, total, types = await _export_rows(model, domain, fields, limit, order, group_by)
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
     try:
@@ -984,8 +1153,9 @@ async def export_excel(model: str = "", domain: list | None = None,
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{_export_slug(title)}_{_unguessable_suffix()}.xlsx"
+    layout = ll.build(rows, columns, types, group_by)
     # Katta faylni yozish soniyalab davom etadi — boshqa foydalanuvchilar kutib qolmasligi uchun alohida oqimda
-    await asyncio.to_thread(_write_xlsx, REPORTS_DIR / filename, title, rows, columns, types, total)
+    await asyncio.to_thread(_write_xlsx, REPORTS_DIR / filename, title, rows, columns, types, total, layout)
     return _export_result(filename, len(rows), total)
 
 
@@ -993,44 +1163,46 @@ _HTML_REPORT_MAX_ROWS = 1000
 
 
 async def generate_html_report(model: str = "", domain: list | None = None,
-                               fields: list | None = None,
-                               title: str = "Hisobot") -> dict | str:
-    """Har qanday Odoo model ma'lumotlaridan HTML hisobot (jadval + grafik) yaratadi.
+                               fields: list | None = None, title: str = "Hisobot",
+                               group_by: str = "", order: str = "") -> dict | str:
+    """Har qanday Odoo model yozuvlaridan HTML hisobot (ro'yxat, guruhlar, taqsimot) yaratadi.
 
-    Foydalanuvchi HTML/grafik/jadval ko'rinishida so'raganda ishlatiladi.
+    Foydalanuvchi HTML/jadval ko'rinishida so'raganda ishlatiladi.
     model: masalan hr.employee, sale.order, crm.lead
+    group_by: shu maydon bo'yicha guruhlab chiqarish (masalan department_id); order: saralash.
     """
-    from app.services.claude_report import generate_report_link
+    from app.services.claude_report import generate_list_report
 
     if not model:
         return "HTML hisobot uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
 
+    group_by, fields = _group_field(group_by, fields)
     (rows, columns, meta), total = await asyncio.gather(
-        _read_rows(model, domain, fields, _HTML_REPORT_MAX_ROWS),
+        _read_rows(model, domain, fields, _HTML_REPORT_MAX_ROWS, order=order),
         _count(model, domain),
     )
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
 
     total = max(total, len(rows))
-    numeric = _numeric_fields(columns, meta)
+    types = {field: (meta.get(field) or {}).get("type") or "" for field, _label in columns}
+    layout = ll.build(rows, columns, types, group_by)
+    numeric = _numeric_fields(layout.columns, meta)
     totals = None
-    description = f"{total:,} ta yozuv"
+    if total > len(rows) and numeric:
+        # Ro'yxatga sig'magan qatorlar ham hisobga kirishi uchun yig'indini Odoo'ning o'zi hisoblaydi
+        try:
+            grouped = await _odoo.execute_kw(model, "read_group", [domain or [], numeric, []])
+            totals = grouped[0] if grouped else None
+        except OdooError as e:
+            if e.kind:
+                raise
+            # Bazada saqlanmaydigan maydonni Odoo jamlay olmaydi — yig'indi kartochkasisiz davom etamiz
+    description = _records_note(layout, len(rows), total)
     if total > len(rows):
-        description = f"jami {total:,} ta yozuvdan dastlabki {len(rows):,} tasi (to'liq ro'yxat uchun Excel)"
-        if numeric:
-            # Jadvalga sig'magan qatorlar ham hisobga kirishi uchun yig'indini Odoo'ning o'zi hisoblaydi
-            try:
-                grouped = await _odoo.execute_kw(model, "read_group", [domain or [], numeric, []])
-                totals = grouped[0] if grouped else None
-            except OdooError as e:
-                if e.kind:
-                    raise
-                # Bazada saqlanmaydigan maydonni Odoo jamlay olmaydi — yig'indi kartochkasisiz davom etamiz
-    link = generate_report_link(
-        title=title, description=description.replace(",", " "), rows=rows,
-        columns=columns, numeric=numeric, totals=totals, total_rows=total,
-    )
+        description += " (to'liq ro'yxat uchun Excel)"
+    link = generate_list_report(title=title, description=description, layout=layout,
+                                numeric=numeric, totals=totals, total_rows=total)
     if link and total > len(rows):
         return {"url": link, "rows_in_file": len(rows), "rows_total": total,
                 "note": f"Hisobotga jami {total:,} ta yozuvdan dastlabki {len(rows):,} tasi sig'di — buni "
@@ -1056,56 +1228,186 @@ async def growth_dynamics(model: str, date_field: str, value_field: str,
     return _clean_groups(rows, groupby)
 
 
-async def search_employees_readonly(query: str = "") -> list[dict]:
-    """Xodimlarni o'qish rejimida qidirish."""
-    domain = [["active", "=", True]]
+async def search_employees_readonly(query: str = "", company_id: int = 0) -> list[dict]:
+    """Xodimlarni o'qish rejimida qidirish (company_id berilsa — faqat shu kompaniya xodimlari)."""
+    domain: list = [["active", "=", True]]
     if query:
         domain.append(["name", "ilike", query])
+    if company_id:
+        domain.append(["company_id", "=", int(company_id)])
     return await _odoo.execute_kw(
         "hr.employee", "search_read",
-        [domain, ["id", "name", "job_id", "department_id", "work_email", "work_phone", "mobile_phone"]],
-        {"limit": 1000},
+        [domain, ["id", "name", "job_title", "department_id", "company_id", "work_email", "work_phone",
+                  "mobile_phone"]],
+        {"limit": 1000, "context": _UZ_CTX},
     )
 
 
 # ─── FORMAT EXPORTS (Word/PDF/CSV) ──────────────────────────────────────────
 
+_DOC_HEADER = "184F95"   # jadval sarlavhasi (Excel bilan bir xil)
+_DOC_STRIPE = "F3F7FD"
+_DOC_BAND = "E3EDFA"
+_DOC_RULE = "D9D8D2"
+_DOC_MUTED = "6B6A66"
+
+
+def _doc_cell_text(row: dict, field: str, kinds: dict[str, str]) -> str:
+    """Word/PDF katagidagi matn: telefon va sana o'qiladigan ko'rinishda, son — xonalari ajratilgan."""
+    value = _display_value(row.get(field))
+    if value is None or value == "":
+        return ""
+    if isinstance(value, float):
+        return f"{value:,.2f}".replace(",", " ").removesuffix(".00")
+    if isinstance(value, int) and field != "id":
+        return f"{value:,}".replace(",", " ")
+    return ll.display(value, kinds.get(field) or "text")
+
+
 def _write_docx(path: Path, title: str, subtitle: str, rows: list[dict],
-                columns: list[tuple[str, str]]) -> None:
+                columns: list[tuple[str, str]], layout=None) -> None:
+    """Word hujjati: sarlavha, guruh nomlari (guruhlangan bo'lsa) va rangli sarlavhali, navbatlashgan
+    qatorli jadvallar; jadval sarlavhasi har sahifada takrorlanadi, pastda sahifa raqami."""
     import docx
-    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.enum.section import WD_ORIENT
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Mm, Pt, RGBColor
+
+    layout = layout or ll.build(rows, columns)
+    columns, kinds = layout.columns, layout.kinds
+    numeric = {field for field, _label in columns if kinds.get(field) == "number"}
+
+    def rgb(value: str) -> RGBColor:
+        return RGBColor.from_string(value)
+
+    def shade(cell, fill: str) -> None:
+        shading = OxmlElement("w:shd")
+        shading.set(qn("w:val"), "clear")
+        shading.set(qn("w:color"), "auto")
+        shading.set(qn("w:fill"), fill)
+        cell._tc.get_or_add_tcPr().append(shading)
+
+    def write(cell, text: str, *, bold: bool = False, color: str | None = None, size: float = 9, right: bool = False) -> None:
+        paragraph = cell.paragraphs[0]
+        paragraph.paragraph_format.space_after = Pt(0)
+        if right:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        if not text:
+            return
+        run = paragraph.add_run(text)
+        run.bold = bold
+        run.font.size = Pt(size)
+        if color:
+            run.font.color.rgb = rgb(color)
+
+    def rules(table) -> None:
+        """Faqat gorizontal ingichka chiziqlar (to'liq katakli to'r o'rniga)."""
+        borders = OxmlElement("w:tblBorders")
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            element = OxmlElement(f"w:{edge}")
+            element.set(qn("w:val"), "single" if edge in ("bottom", "insideH") else "nil")
+            element.set(qn("w:sz"), "4")
+            element.set(qn("w:space"), "0")
+            element.set(qn("w:color"), _DOC_RULE)
+            borders.append(element)
+        # Word sxemasida tblBorders o'z o'rnida turishi shart: shd / tblLayout / tblCellMar / tblLook'dan
+        # OLDIN (tartib buzilsa fayl "shikastlangan" deb ochilishi mumkin)
+        properties = table._tbl.tblPr
+        later = next((child for child in properties
+                      if child.tag in {qn(f"w:{name}") for name in ("shd", "tblLayout", "tblCellMar", "tblLook")}), None)
+        if later is not None:
+            later.addprevious(borders)
+        else:
+            properties.append(borders)
+
+    def field_code(paragraph, code: str) -> None:
+        run = paragraph.add_run()
+        run.font.size = Pt(8)
+        run.font.color.rgb = rgb(_DOC_MUTED)
+        for kind, text in (("begin", None), (None, code), ("end", None)):
+            if kind:
+                element = OxmlElement("w:fldChar")
+                element.set(qn("w:fldCharType"), kind)
+            else:
+                element = OxmlElement("w:instrText")
+                element.set(qn("xml:space"), "preserve")
+                element.text = text
+            run._r.append(element)
 
     doc = docx.Document()
-    doc.add_heading(title or "Hisobot", level=1)
-    doc.add_paragraph().add_run(subtitle).italic = True
+    section = doc.sections[0]
+    section.page_width, section.page_height = Mm(210), Mm(297)   # A4 (kutubxona sukuti — Letter)
+    if len(columns) > 4:
+        section.orientation = WD_ORIENT.LANDSCAPE
+        section.page_width, section.page_height = Mm(297), Mm(210)
+    for side in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
+        setattr(section, side, Mm(15))
+    normal = doc.styles["Normal"]
+    normal.font.name = "Calibri"
+    normal.font.size = Pt(10)
 
-    tbl = doc.add_table(rows=1, cols=len(columns))
-    tbl.style = "Light Grid Accent 1"
-    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
-    for cell, (_field, label) in zip(tbl.rows[0].cells, columns):
-        cell.text = str(label)
-        for para in cell.paragraphs:
-            for run in para.runs:
-                run.bold = True
-    for row in rows:
-        cells = tbl.add_row().cells
-        for cell, (field, _label) in zip(cells, columns):
-            val = _display_value(row.get(field))
-            cell.text = "" if val is None else str(val)
+    brand = doc.add_paragraph()
+    brand.paragraph_format.space_after = Pt(2)
+    mark = brand.add_run("dunyabunya")
+    mark.bold, mark.font.size, mark.font.color.rgb = True, Pt(9), rgb(_DOC_HEADER)
+    heading = doc.add_paragraph()
+    heading.paragraph_format.space_after = Pt(2)
+    name = heading.add_run(title or "Hisobot")
+    name.bold, name.font.size, name.font.color.rgb = True, Pt(18), rgb("0B0B0B")
+    info = doc.add_paragraph()
+    info.paragraph_format.space_after = Pt(10)
+    note = info.add_run(subtitle)
+    note.font.size, note.font.color.rgb = Pt(9), rgb(_DOC_MUTED)
+
+    footer = section.footer.paragraphs[0]
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    lead = footer.add_run(f"dunyabunya  ·  {datetime.now(_TZ).strftime('%d.%m.%Y')}  ·  ")
+    lead.font.size, lead.font.color.rgb = Pt(8), rgb(_DOC_MUTED)
+    field_code(footer, "PAGE")
+
+    for item in layout.groups:
+        if layout.grouped:
+            band = doc.add_paragraph()
+            band.paragraph_format.space_before = Pt(10)
+            band.paragraph_format.space_after = Pt(4)
+            band.paragraph_format.keep_with_next = True
+            head = band.add_run(str(item.title))
+            head.bold, head.font.size = True, Pt(12)
+            tail = band.add_run((f"   {item.context}" if item.context else "") + f"   ·   {len(item.rows)} ta")
+            tail.font.size, tail.font.color.rgb = Pt(9), rgb(_DOC_MUTED)
+        table = doc.add_table(rows=1, cols=len(columns))
+        table.autofit = True
+        rules(table)
+        header = table.rows[0]
+        repeat = OxmlElement("w:tblHeader")
+        repeat.set(qn("w:val"), "true")
+        header._tr.get_or_add_trPr().append(repeat)
+        for cell, (field, label) in zip(header.cells, columns):
+            shade(cell, _DOC_HEADER)
+            write(cell, str(label), bold=True, color="FFFFFF", size=9, right=field in numeric)
+        for index, row in enumerate(item.rows):
+            cells = table.add_row().cells
+            for cell, (field, _label) in zip(cells, columns):
+                if index % 2:
+                    shade(cell, _DOC_STRIPE)
+                write(cell, _doc_cell_text(row, field, kinds), right=field in numeric)
     doc.save(path)
 
 
 async def export_word(model: str = "", domain: list | None = None,
                       fields: list | None = None, title: str = "Hisobot",
-                      limit: int = 10000) -> dict | str:
+                      limit: int = 10000, group_by: str = "", order: str = "") -> dict | str:
     """Odoo ma'lumotlaridan Word (.docx) hujjat yaratadi.
     Foydalanuvchi 'word', 'docx', 'hujjat qilib ber' so'rasa ishlatiladi.
-    model: qaysi Odoo model (masalan hr.employee, sale.order)
+    model: qaysi Odoo model (masalan hr.employee, sale.order); group_by — guruhlab chiqarish.
     """
     if not model:
         return "Word uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
     # Word jadvali minglab qatorda juda sekin va og'ir — 2000 qator bilan cheklanadi
-    rows, columns, total, _types = await _export_rows(model, domain, fields, min(int(limit or 2000), 2000))
+    rows, columns, total, types = await _export_rows(model, domain, fields, min(int(limit or 2000), 2000),
+                                                     order, group_by)
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
     try:
@@ -1115,14 +1417,18 @@ async def export_word(model: str = "", domain: list | None = None,
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{_export_slug(title)}_{_unguessable_suffix()}.docx"
-    subtitle = f"{len(rows)} ta yozuv • {datetime.now(_TZ).strftime('%Y-%m-%d %H:%M')}"
-    await asyncio.to_thread(_write_docx, REPORTS_DIR / filename, title, subtitle, rows, columns)
+    layout = ll.build(rows, columns, types, group_by)
+    subtitle = f"{_records_note(layout, len(rows), total)}  ·  {datetime.now(_TZ).strftime('%d.%m.%Y %H:%M')}"
+    await asyncio.to_thread(_write_docx, REPORTS_DIR / filename, title, subtitle, rows, columns, layout)
     return _export_result(filename, len(rows), total)
 
 
 def _write_pdf(path: Path, title: str, subtitle: str, rows: list[dict],
-               columns: list[tuple[str, str]]) -> None:
+               columns: list[tuple[str, str]], layout=None) -> None:
+    """PDF hisobot: sarlavha, guruh qatorlari (guruhlangan bo'lsa), rangli sarlavhali navbatlashgan
+    jadval (sarlavha har sahifada takrorlanadi), ustun kengliklari mazmunga qarab, pastda sahifa raqami."""
     from reportlab.lib import colors
+    from reportlab.lib.enums import TA_RIGHT
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
@@ -1130,47 +1436,99 @@ def _write_pdf(path: Path, title: str, subtitle: str, rows: list[dict],
 
     from app.services.pdf_documents import FONT, FONT_BOLD
 
+    layout = layout or ll.build(rows, columns)
+    columns, kinds = layout.columns, layout.kinds
+    numeric = [kinds.get(field) == "number" for field, _label in columns]
+    ink, muted = colors.HexColor("#0B0B0B"), colors.HexColor("#" + _DOC_MUTED)
+
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("TitleX", parent=styles["Title"], fontName=FONT_BOLD, fontSize=16)
-    sub_style = ParagraphStyle("SubX", parent=styles["Normal"], fontName=FONT)
+    brand_style = ParagraphStyle("BrandX", parent=styles["Normal"], fontName=FONT_BOLD, fontSize=8.5,
+                                 textColor=colors.HexColor("#" + _DOC_HEADER), spaceAfter=2)
+    title_style = ParagraphStyle("TitleX", parent=styles["Normal"], fontName=FONT_BOLD, fontSize=17,
+                                 leading=21, textColor=ink, spaceAfter=3)
+    sub_style = ParagraphStyle("SubX", parent=styles["Normal"], fontName=FONT, fontSize=8.5, textColor=muted)
     head_style = ParagraphStyle("HeadX", parent=styles["BodyText"], fontName=FONT_BOLD, fontSize=8.5,
-                                leading=10, textColor=colors.white)
-    cell_style = ParagraphStyle("CellX", parent=styles["BodyText"], fontName=FONT, fontSize=7.5, leading=9)
+                                leading=10.5, textColor=colors.white)
+    head_right = ParagraphStyle("HeadR", parent=head_style, alignment=TA_RIGHT)
+    cell_style = ParagraphStyle("CellX", parent=styles["BodyText"], fontName=FONT, fontSize=8, leading=10,
+                                textColor=ink)
+    cell_right = ParagraphStyle("CellR", parent=cell_style, alignment=TA_RIGHT)
+    band_style = ParagraphStyle("BandX", parent=cell_style, fontName=FONT_BOLD, fontSize=9, leading=11)
 
     def para(value, style):
         # Paragraph matnni XML sifatida o'qiydi — "&", "<" ekranlanmasa PDF yaratilmay qoladi
         text = "" if value is None else str(value)
         return Paragraph(_html.escape(text, quote=False), style)
 
-    doc = SimpleDocTemplate(str(path), pagesize=landscape(A4),
-                            leftMargin=10 * mm, rightMargin=10 * mm,
-                            topMargin=12 * mm, bottomMargin=12 * mm,
-                            title=title or "Hisobot")
-    data = [[para(label, head_style) for _field, label in columns]]
-    for row in rows:
-        data.append([para(_display_value(row.get(field)), cell_style) for field, _label in columns])
+    wide = len(columns) > 4
+    page = landscape(A4) if wide else A4
+    margin = 12 * mm
+    usable = page[0] - 2 * margin
 
-    tbl = Table(data, repeatRows=1)
-    tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A1A2E")),
-        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cccccc")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f4f8")]),
-    ]))
-    doc.build([para(title or "Hisobot", title_style), Spacer(1, 4 * mm),
-               para(subtitle, sub_style), Spacer(1, 4 * mm), tbl])
+    # Ustun kengligi — mazmun uzunligiga mutanosib (eng uzun ustun hammasini siqib qo'ymasligi uchun cheklangan)
+    weights = []
+    for index, (field, label) in enumerate(columns):
+        longest = max([len(str(label))] + [len(_doc_cell_text(r, field, kinds)) for r in layout.rows[:400]])
+        weights.append(max(6, min(longest, 42)))
+    scale = usable / sum(weights)
+    col_widths = [w * scale for w in weights]
+
+    data = [[para(label, head_right if numeric[i] else head_style) for i, (_field, label) in enumerate(columns)]]
+    commands = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#" + _DOC_HEADER)),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.25, colors.HexColor("#" + _DOC_RULE)),
+    ]
+    for item in layout.groups:
+        if layout.grouped:
+            line = len(data)
+            label = _html.escape(str(item.title), quote=False)
+            detail = (f"   {item.context}" if item.context else "") + f"   ·   {len(item.rows)} ta"
+            band = Paragraph(f'{label}<font name="{FONT}" size="8" color="#{_DOC_MUTED}">'
+                             f'{_html.escape(detail, quote=False)}</font>', band_style)
+            data.append([band] + [""] * (len(columns) - 1))
+            commands += [("SPAN", (0, line), (-1, line)),
+                         ("BACKGROUND", (0, line), (-1, line), colors.HexColor("#" + _DOC_BAND)),
+                         ("TOPPADDING", (0, line), (-1, line), 5), ("BOTTOMPADDING", (0, line), (-1, line), 5)]
+        for index, row in enumerate(item.rows):
+            if index % 2:
+                commands.append(("BACKGROUND", (0, len(data)), (-1, len(data)), colors.HexColor("#" + _DOC_STRIPE)))
+            data.append([para(_doc_cell_text(row, field, kinds), cell_right if numeric[i] else cell_style)
+                         for i, (field, _label) in enumerate(columns)])
+
+    stamp = datetime.now(_TZ).strftime("%d.%m.%Y")
+
+    def footer(canvas, document):
+        canvas.saveState()
+        canvas.setFont(FONT, 7.5)
+        canvas.setFillColor(muted)
+        canvas.drawString(margin, 7 * mm, f"dunyabunya  ·  {stamp}")
+        canvas.drawRightString(page[0] - margin, 7 * mm, str(document.page))
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(str(path), pagesize=page, leftMargin=margin, rightMargin=margin,
+                            topMargin=12 * mm, bottomMargin=14 * mm, title=title or "Hisobot",
+                            author="dunyabunya agent")
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle(commands))
+    doc.build([para("dunyabunya", brand_style), para(title or "Hisobot", title_style),
+               para(subtitle, sub_style), Spacer(1, 5 * mm), table],
+              onFirstPage=footer, onLaterPages=footer)
 
 
 async def export_pdf(model: str = "", domain: list | None = None,
                      fields: list | None = None, title: str = "Hisobot",
-                     limit: int = 10000) -> dict | str:
+                     limit: int = 10000, group_by: str = "", order: str = "") -> dict | str:
     """Odoo ma'lumotlaridan PDF hisobot yaratadi.
-    Foydalanuvchi 'pdf', 'pdf qilib ber' so'rasa ishlatiladi.
+    Foydalanuvchi 'pdf', 'pdf qilib ber' so'rasa ishlatiladi; group_by — guruhlab chiqarish.
     """
     if not model:
         return "PDF uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
     # PDF jadvali sahifalab teriladi — 5000 qatordan ortig'i daqiqalab ketadi
-    rows, columns, total, _types = await _export_rows(model, domain, fields, min(int(limit or 5000), 5000))
+    rows, columns, total, types = await _export_rows(model, domain, fields, min(int(limit or 5000), 5000),
+                                                     order, group_by)
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
     try:
@@ -1180,7 +1538,9 @@ async def export_pdf(model: str = "", domain: list | None = None,
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{_export_slug(title)}_{_unguessable_suffix()}.pdf"
-    await asyncio.to_thread(_write_pdf, REPORTS_DIR / filename, title, f"{len(rows)} ta yozuv", rows, columns)
+    layout = ll.build(rows, columns, types, group_by)
+    subtitle = f"{_records_note(layout, len(rows), total)}  ·  {datetime.now(_TZ).strftime('%d.%m.%Y %H:%M')}"
+    await asyncio.to_thread(_write_pdf, REPORTS_DIR / filename, title, subtitle, rows, columns, layout)
     return _export_result(filename, len(rows), total)
 
 
@@ -1196,13 +1556,18 @@ def _write_csv(path: Path, rows: list[dict], columns: list[tuple[str, str]]) -> 
 
 async def export_csv(model: str = "", domain: list | None = None,
                      fields: list | None = None, title: str = "Hisobot",
-                     limit: int = 10000) -> dict | str:
-    """Odoo ma'lumotlaridan CSV fayl yaratadi (Excel ocha oladi)."""
+                     limit: int = 10000, group_by: str = "", order: str = "") -> dict | str:
+    """Odoo ma'lumotlaridan CSV fayl yaratadi (Excel ocha oladi). group_by berilsa — qatorlar shu
+    maydon bo'yicha ketma-ket turadi (CSV'da sarlavha qatorlari bo'lmaydi)."""
     if not model:
         return "CSV uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
-    rows, columns, total, _types = await _export_rows(model, domain, fields, limit)
+    rows, columns, total, types = await _export_rows(model, domain, fields, limit, order, group_by)
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
+    if group_by:
+        layout = ll.build(rows, columns, types, group_by)
+        if layout.grouped:
+            rows = layout.rows  # guruhlar tartibida; guruh ustuni faylda qoladi
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{_export_slug(title)}_{_unguessable_suffix()}.csv"
@@ -1232,62 +1597,66 @@ def _text_value(val) -> str:
     if val is True:
         return "Ha"
     if isinstance(val, float):
-        return f"{val:,.2f}".rstrip("0").rstrip(".")
+        return f"{val:,.2f}".rstrip("0").rstrip(".").replace(",", " ")
     if isinstance(val, int):
-        return f"{val:,}"
+        return f"{val:,}".replace(",", " ")
     return str(val).strip()
 
 
 async def export_text(model: str = "", domain: list | None = None,
                       fields: list | None = None, title: str = "Ro'yxat",
-                      group_by: str = "", limit: int = TEXT_EXPORT_MAX_ROWS) -> dict | str:
+                      group_by: str = "", limit: int = TEXT_EXPORT_MAX_ROWS, order: str = "") -> dict | str:
     """Odoo yozuvlari ro'yxatini FAYLSIZ — Telegram chatining o'ziga matn ko'rinishida
     tayyorlaydi (foydalanuvchi "matn", "shu yerga yoz" desa). Birinchi field — asosiy
-    (qalin) ustun, qolganlari "Nomi: qiymat" ko'rinishida; group_by berilsa yozuvlar
-    shu field bo'yicha guruhlab chiqariladi."""
+    (qalin) ustun; qolganlari yonida: matn, telefon va sana — o'zi, son va belgi — nomi bilan.
+    group_by berilsa yozuvlar shu field bo'yicha guruhlab chiqariladi."""
     if not model:
         return "Matn uchun model ko'rsatilmadi. Masalan: model='hr.employee'"
     limit = max(1, min(int(limit or TEXT_EXPORT_MAX_ROWS), TEXT_EXPORT_MAX_ROWS))
     flds = [f for f in (fields or []) if f != "id"] or ["display_name"]
-    if group_by and group_by not in flds:
-        flds.append(group_by)
+    group_by, flds = _group_field(group_by, flds)
 
-    (rows, columns, _meta), total = await asyncio.gather(
-        _read_rows(model, domain, flds, limit),
+    (rows, columns, meta), total = await asyncio.gather(
+        _read_rows(model, domain, flds, limit, order=order),
         _count(model, domain),
     )
     if not rows:
         return "Bu so'rov bo'yicha ma'lumot topilmadi."
-    labels = dict(columns)
-
-    main, *rest = [f for f in flds if f != group_by] or flds
+    types = {field: (meta.get(field) or {}).get("type") or "" for field, _label in columns}
+    layout = ll.build(rows, columns, types, group_by)
+    labels = dict(layout.columns)
+    main, *rest = [f for f, _label in layout.columns]
 
     def _line(n: int, row: dict) -> str:
         head = _html.escape(_text_value(row.get(main)) or "—", quote=False)
-        details = [
-            f"{_html.escape(str(labels[f]), quote=False)}: {_html.escape(v, quote=False)}"
-            for f in rest if (v := _text_value(row.get(f)))
-        ]
-        return f"{n}. <b>{head}</b>" + (" — " + "; ".join(details) if details else "")
+        details = []
+        for f in rest:
+            kind = layout.kinds.get(f) or "text"
+            value = _text_value(ll.display(row.get(f), kind) if kind in ("phone", "date", "datetime") else row.get(f))
+            if not value:
+                continue
+            if kind == "path":
+                value = ll.split_path(value)[0]
+            # Matn, telefon va sana o'zi tushunarli; son va "Ha/Yo'q" nimani bildirishi nomisiz noma'lum
+            named = kind in ("number", "bool")
+            details.append((f"{_html.escape(str(labels[f]), quote=False)}: " if named else "")
+                           + _html.escape(value, quote=False))
+        return f"{n}. <b>{head}</b>" + (" — " + " · ".join(details) if details else "")
 
     shown = len(rows)
     total = max(total, shown)
     safe_title = _html.escape(str(title or "Ro'yxat"), quote=False)
-    header = f"<b>{safe_title}</b> — {shown:,} ta yozuv"
+    header = f"<b>{safe_title}</b> — {shown:,} ta yozuv".replace(",", " ")
     if total > shown:
         header += (f"\nJami {total:,} ta yozuvdan dastlabki {shown:,} tasi ko'rsatildi — "
-                   f"to'liq ro'yxat uchun Excel faylni tanlang.")
+                   f"to'liq ro'yxat uchun Excel faylni tanlang.").replace(",", " ")
     out = [header, ""]
-    if group_by:
-        groups: dict[str, list[dict]] = {}
-        for row in rows:
-            groups.setdefault(_text_value(row.get(group_by)), []).append(row)
-        # Guruhsiz ("") yozuvlar oxirida
-        for name in sorted(groups, key=lambda g: (g == "", g.casefold())):
-            members = groups[name]
-            group_title = _html.escape(name or "Ko'rsatilmagan", quote=False)
-            out.append(f"<b>{group_title}</b> ({len(members)} ta)")
-            out.extend(_line(n, row) for n, row in enumerate(members, start=1))
+    if layout.grouped:
+        for item in layout.groups:
+            group_title = _html.escape(str(item.title), quote=False)
+            context = f" <i>({_html.escape(str(item.context), quote=False)})</i>" if item.context else ""
+            out.append(f"<b>{group_title}</b>{context} — {len(item.rows)} ta")
+            out.extend(_line(n, row) for n, row in enumerate(item.rows, start=1))
             out.append("")
     else:
         out.extend(_line(n, row) for n, row in enumerate(rows, start=1))
@@ -1376,9 +1745,12 @@ async def get_sales_by_seller(date_from: str = "", date_to: str = "", limit: int
     return _clean_groups(rows, "user_id")
 
 
-async def get_employees_by_department() -> list[dict]:
-    """Xodimlar soni bo'limlar bo'yicha (hr.employee)."""
-    rows = await _rg("hr.employee", [["active", "=", True]], ["id:count"], "department_id")
+async def get_employees_by_department(company_id: int = 0) -> list[dict]:
+    """Xodimlar soni bo'limlar bo'yicha (hr.employee); company_id berilsa — faqat shu kompaniya."""
+    domain: list = [["active", "=", True]]
+    if company_id:
+        domain.append(["company_id", "=", int(company_id)])
+    rows = await _rg("hr.employee", domain, ["id:count"], "department_id")
     return sorted(_clean_groups(rows, "department_id"), key=lambda g: -g["soni"])
 
 
@@ -2234,29 +2606,35 @@ TOOL_SCHEMAS: dict[str, dict] = {
     **STATS_TOOL_SCHEMAS,
     "export_excel": {
         "name": "export_excel",
-        "description": "Odoo ma'lumotlarini haqiqiy Excel (.xlsx) faylga eksport qiladi. Foydalanuvchi 'excel', 'xlsx', 'fayl qilib ber', 'eksport' so'rasa shu toolni ishlating. Kerakli model (masalan hr.employee), domain va fields ni avvalgi qidiruvga mos qilib bering.",
+        "description": "Odoo yozuvlari ro'yxatini Excel (.xlsx) faylga chiqaradi: rangli sarlavha, sonlar va sanalar o'z formatida, \"Jami\" qatori. group_by berilsa — har guruh o'z sarlavha qatori ostida (yig'ib-ochiladi) va alohida \"Xulosa\" varag'i. Foydalanuvchi 'excel', 'xlsx', 'fayl qilib ber', 'eksport' desa shu toolni ishlating.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "model": {"type": "string", "description": "Odoo model, masalan hr.employee, sale.order, account.move"},
-                "domain": {"type": "array", "description": "Odoo domain filtrlari (ixtiyoriy)"},
-                "fields": {"type": "array", "items": {"type": "string"}, "description": "Eksport qilinadigan maydonlar, masalan [\"name\", \"job_id\", \"department_id\", \"work_email\"]"},
-                "title": {"type": "string", "default": "Hisobot", "description": "Fayl va varaq nomi"},
+                "domain": {"type": "array", "description": "Odoo domain filtrlari (ixtiyoriy). Faqat bitta kompaniya kerak bo'lsa [\"company_id\", \"=\", ID] shartini qo'shing."},
+                "fields": {"type": "array", "items": {"type": "string"}, "description": "Ustunlar, masalan [\"name\", \"job_title\", \"work_phone\"]. Birinchisi — asosiy ustun (nom). Guruhlash maydonini bu yerga qo'shish shart emas."},
+                "title": {"type": "string", "default": "Hisobot", "description": "Fayl sarlavhasi (o'qiladigan nom)"},
+                "group_by": {"type": "string", "description": "Shu maydon bo'yicha guruhlab chiqarish (ixtiyoriy), masalan department_id. Foydalanuvchi \"... bo'yicha ajratib\" yoki \"guruhlab\" desa bering — har guruh o'z sarlavhasi ostida chiqadi."},
+                "order": {"type": "string", "description": "Saralash (ixtiyoriy), masalan \"amount_total desc\" yoki \"name\""},
                 "limit": {"type": "integer", "default": 10000},
             },
+            "required": ["model"],
         },
     },
     "generate_html_report": {
         "name": "generate_html_report",
-        "description": "Odoo model ma'lumotlaridan chiroyli HTML hisobot (jadval + grafiklar) yaratadi va fayl havolasini qaytaradi. Foydalanuvchi 'html', 'grafik', 'jadval', 'dashboard' ko'rinishida so'raganda shu toolni ishlating.",
+        "description": "Odoo yozuvlari ro'yxatidan chiroyli HTML sahifa yaratadi: qidiruv, saralash, telefonda qulay ko'rinish, bosiladigan telefon raqamlari. group_by berilsa — tepada guruhlar bo'yicha taqsimot, pastda har guruh o'z sarlavhasi va ro'yxati bilan. Foydalanuvchi 'html', 'sahifa', 'jadval ko'rinishida' desa shu toolni ishlating (sotuv/faktura/vazifa statistikasi uchun emas — ular uchun generate_*_report).",
         "input_schema": {
             "type": "object",
             "properties": {
-                "model": {"type": "string", "description": "Odoo model, masalan hr.employee, sale.order"},
-                "domain": {"type": "array", "description": "Odoo domain filtrlari (ixtiyoriy)"},
-                "fields": {"type": "array", "items": {"type": "string"}, "description": "Hisobotga kiritiladigan maydonlar"},
-                "title": {"type": "string", "default": "Hisobot", "description": "Hisobot sarlavhasi"},
+                "model": {"type": "string", "description": "Odoo model, masalan hr.employee, sale.order, account.move"},
+                "domain": {"type": "array", "description": "Odoo domain filtrlari (ixtiyoriy). Faqat bitta kompaniya kerak bo'lsa [\"company_id\", \"=\", ID] shartini qo'shing."},
+                "fields": {"type": "array", "items": {"type": "string"}, "description": "Ustunlar, masalan [\"name\", \"job_title\", \"work_phone\"]. Birinchisi — asosiy ustun (nom). Guruhlash maydonini bu yerga qo'shish shart emas."},
+                "title": {"type": "string", "default": "Hisobot", "description": "Fayl sarlavhasi (o'qiladigan nom)"},
+                "group_by": {"type": "string", "description": "Shu maydon bo'yicha guruhlab chiqarish (ixtiyoriy), masalan department_id. Foydalanuvchi \"... bo'yicha ajratib\" yoki \"guruhlab\" desa bering — har guruh o'z sarlavhasi ostida chiqadi."},
+                "order": {"type": "string", "description": "Saralash (ixtiyoriy), masalan \"amount_total desc\" yoki \"name\""},
             },
+            "required": ["model"],
         },
     },
     "aggregate_data": {
@@ -2289,22 +2667,28 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "search_employees_readonly": {
         "name": "search_employees_readonly",
-        "description": "Xodimlarni o'qish rejimida qidirish",
+        "description": "Faol xodimlarni ismi bo'yicha qidiradi (ism, lavozim, bo'lim, kompaniya, telefon, email). "
+                       "company_id berilsa — faqat shu kompaniya xodimlari.",
         "input_schema": {
             "type": "object",
-            "properties": {"query": {"type": "string", "default": ""}},
+            "properties": {
+                "query": {"type": "string", "default": "", "description": "Ism bo'lagi; bo'sh — hamma xodimlar"},
+                "company_id": {"type": "integer", "description": "Kompaniya ID'si (ixtiyoriy)"},
+            },
         },
     },
     "export_word": {
         "name": "export_word",
-        "description": "Odoo model ma'lumotlaridan Word (.docx) hujjat yaratadi. Foydalanuvchi 'word', 'docx', 'hujjat qilib ber' so'rasa ishlatiladi.",
+        "description": "Odoo yozuvlari ro'yxatidan Word (.docx) hujjat yaratadi (rangli sarlavhali jadval; group_by berilsa — guruh sarlavhalari bilan). Foydalanuvchi 'word', 'docx', 'hujjat qilib ber' desa ishlatiladi. Eng ko'pi 2000 qator.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "model": {"type": "string", "description": "Odoo model (masalan hr.employee, sale.order)"},
-                "domain": {"type": "array"},
-                "fields": {"type": "array", "items": {"type": "string"}},
-                "title": {"type": "string", "default": "Hisobot"},
+                "model": {"type": "string", "description": "Odoo model, masalan hr.employee, sale.order, account.move"},
+                "domain": {"type": "array", "description": "Odoo domain filtrlari (ixtiyoriy). Faqat bitta kompaniya kerak bo'lsa [\"company_id\", \"=\", ID] shartini qo'shing."},
+                "fields": {"type": "array", "items": {"type": "string"}, "description": "Ustunlar, masalan [\"name\", \"job_title\", \"work_phone\"]. Birinchisi — asosiy ustun (nom). Guruhlash maydonini bu yerga qo'shish shart emas."},
+                "title": {"type": "string", "default": "Hisobot", "description": "Fayl sarlavhasi (o'qiladigan nom)"},
+                "group_by": {"type": "string", "description": "Shu maydon bo'yicha guruhlab chiqarish (ixtiyoriy), masalan department_id. Foydalanuvchi \"... bo'yicha ajratib\" yoki \"guruhlab\" desa bering — har guruh o'z sarlavhasi ostida chiqadi."},
+                "order": {"type": "string", "description": "Saralash (ixtiyoriy), masalan \"amount_total desc\" yoki \"name\""},
                 "limit": {"type": "integer", "default": 10000},
             },
             "required": ["model"],
@@ -2312,14 +2696,16 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "export_pdf": {
         "name": "export_pdf",
-        "description": "Odoo model ma'lumotlaridan PDF hisobot yaratadi. Foydalanuvchi 'pdf', 'pdf qilib ber' so'rasa ishlatiladi.",
+        "description": "Odoo yozuvlari ro'yxatidan PDF hisobot yaratadi (group_by berilsa — guruh sarlavhalari bilan). Foydalanuvchi 'pdf' desa ishlatiladi. Eng ko'pi 5000 qator.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "model": {"type": "string"},
-                "domain": {"type": "array"},
-                "fields": {"type": "array", "items": {"type": "string"}},
-                "title": {"type": "string", "default": "Hisobot"},
+                "model": {"type": "string", "description": "Odoo model, masalan hr.employee, sale.order, account.move"},
+                "domain": {"type": "array", "description": "Odoo domain filtrlari (ixtiyoriy). Faqat bitta kompaniya kerak bo'lsa [\"company_id\", \"=\", ID] shartini qo'shing."},
+                "fields": {"type": "array", "items": {"type": "string"}, "description": "Ustunlar, masalan [\"name\", \"job_title\", \"work_phone\"]. Birinchisi — asosiy ustun (nom). Guruhlash maydonini bu yerga qo'shish shart emas."},
+                "title": {"type": "string", "default": "Hisobot", "description": "Fayl sarlavhasi (o'qiladigan nom)"},
+                "group_by": {"type": "string", "description": "Shu maydon bo'yicha guruhlab chiqarish (ixtiyoriy), masalan department_id. Foydalanuvchi \"... bo'yicha ajratib\" yoki \"guruhlab\" desa bering — har guruh o'z sarlavhasi ostida chiqadi."},
+                "order": {"type": "string", "description": "Saralash (ixtiyoriy), masalan \"amount_total desc\" yoki \"name\""},
                 "limit": {"type": "integer", "default": 10000},
             },
             "required": ["model"],
@@ -2327,14 +2713,16 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "export_csv": {
         "name": "export_csv",
-        "description": "Odoo model ma'lumotlaridan CSV fayl yaratadi. Foydalanuvchi 'csv' so'rasa ishlatiladi.",
+        "description": "Odoo yozuvlari ro'yxatidan CSV fayl yaratadi. Foydalanuvchi 'csv' desa ishlatiladi.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "model": {"type": "string"},
-                "domain": {"type": "array"},
-                "fields": {"type": "array", "items": {"type": "string"}},
-                "title": {"type": "string", "default": "Hisobot"},
+                "model": {"type": "string", "description": "Odoo model, masalan hr.employee, sale.order, account.move"},
+                "domain": {"type": "array", "description": "Odoo domain filtrlari (ixtiyoriy). Faqat bitta kompaniya kerak bo'lsa [\"company_id\", \"=\", ID] shartini qo'shing."},
+                "fields": {"type": "array", "items": {"type": "string"}, "description": "Ustunlar, masalan [\"name\", \"job_title\", \"work_phone\"]. Birinchisi — asosiy ustun (nom). Guruhlash maydonini bu yerga qo'shish shart emas."},
+                "title": {"type": "string", "default": "Hisobot", "description": "Fayl sarlavhasi (o'qiladigan nom)"},
+                "group_by": {"type": "string", "description": "Shu maydon bo'yicha guruhlab chiqarish (ixtiyoriy), masalan department_id. Foydalanuvchi \"... bo'yicha ajratib\" yoki \"guruhlab\" desa bering — har guruh o'z sarlavhasi ostida chiqadi."},
+                "order": {"type": "string", "description": "Saralash (ixtiyoriy), masalan \"amount_total desc\" yoki \"name\""},
                 "limit": {"type": "integer", "default": 10000},
             },
             "required": ["model"],
@@ -2346,11 +2734,12 @@ TOOL_SCHEMAS: dict[str, dict] = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "model": {"type": "string", "description": "Odoo model, masalan hr.employee, sale.order"},
-                "domain": {"type": "array", "description": "Odoo domain filtrlari (ixtiyoriy)"},
-                "fields": {"type": "array", "items": {"type": "string"}, "description": "Ko'rsatiladigan maydonlar; BIRINCHISI asosiy ustun (masalan [\"name\", \"job_id\", \"work_phone\"]). 2-5 ta maydon yetarli."},
+                "model": {"type": "string", "description": "Odoo model, masalan hr.employee, sale.order, account.move"},
+                "domain": {"type": "array", "description": "Odoo domain filtrlari (ixtiyoriy). Faqat bitta kompaniya kerak bo'lsa [\"company_id\", \"=\", ID] shartini qo'shing."},
+                "fields": {"type": "array", "items": {"type": "string"}, "description": "Ko'rsatiladigan maydonlar; BIRINCHISI asosiy ustun (masalan [\"name\", \"job_title\", \"work_phone\"]). 2-5 ta maydon yetarli."},
                 "title": {"type": "string", "default": "Ro'yxat", "description": "Ro'yxat sarlavhasi"},
-                "group_by": {"type": "string", "description": "Shu maydon bo'yicha guruhlab chiqarish (ixtiyoriy), masalan department_id"},
+                "group_by": {"type": "string", "description": "Shu maydon bo'yicha guruhlab chiqarish (ixtiyoriy), masalan department_id. Foydalanuvchi \"... bo'yicha ajratib\" yoki \"guruhlab\" desa bering — har guruh o'z sarlavhasi ostida chiqadi."},
+                "order": {"type": "string", "description": "Saralash (ixtiyoriy), masalan \"amount_total desc\" yoki \"name\""},
                 "limit": {"type": "integer", "default": 300},
             },
             "required": ["model", "fields"],
@@ -2400,8 +2789,11 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
     "get_employees_by_department": {
         "name": "get_employees_by_department",
-        "description": "Xodimlar soni bo'limlar bo'yicha",
-        "input_schema": {"type": "object", "properties": {}},
+        "description": "Faol xodimlar soni bo'limlar bo'yicha. company_id berilsa — faqat shu kompaniya.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"company_id": {"type": "integer", "description": "Kompaniya ID'si (ixtiyoriy)"}},
+        },
     },
     "get_upcoming_deadlines": {
         "name": "get_upcoming_deadlines",

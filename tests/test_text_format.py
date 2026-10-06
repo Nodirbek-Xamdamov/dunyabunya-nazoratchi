@@ -38,8 +38,9 @@ def fake_odoo(monkeypatch):
         if method == "search_count":
             return len(_EMPLOYEES)
         if method == "fields_get":
-            return {"name": {"string": "Ism"}, "job_id": {"string": "Lavozim"},
-                    "department_id": {"string": "Bo'lim"}, "work_phone": {"string": "Telefon"}}
+            return {"name": {"string": "Ism", "type": "char"}, "job_id": {"string": "Lavozim", "type": "many2one"},
+                    "department_id": {"string": "Bo'lim", "type": "many2one"},
+                    "work_phone": {"string": "Telefon", "type": "char"}}
         raise AssertionError(f"unexpected call: {model}.{method}")
 
     monkeypatch.setattr(odoo_tools._odoo, "execute_kw", fake_execute_kw)
@@ -48,7 +49,7 @@ def fake_odoo(monkeypatch):
 
 # ── export_text ─────────────────────────────────────────────────────────────
 
-async def test_export_text_renders_every_row_with_labels(fake_odoo):
+async def test_export_text_renders_every_row(fake_odoo):
     result = await odoo_tools.export_text(
         model="hr.employee", fields=["name", "job_id", "work_phone"], title="Xodimlar",
     )
@@ -56,10 +57,11 @@ async def test_export_text_renders_every_row_with_labels(fake_odoo):
     text = odoo_tools.pop_text_export(result["text_export"])
 
     assert text.startswith("<b>Xodimlar</b> — 3 ta yozuv")
-    assert "1. <b>Aziz Karimov</b> — Lavozim: Sotuv menejeri" in text
+    # Matn va telefon o'zi tushunarli — nomi yozilmaydi; telefon o'qiladigan ko'rinishda
+    assert "1. <b>Aziz Karimov</b> — Sotuv menejeri" in text
     # Bo'sh qiymatlar tashlab ketiladi, maxsus belgilar HTML uchun ekranlanadi
-    assert "2. <b>Dilnoza &lt;Test&gt; &amp; Co</b> — Telefon: +998901234567" in text
-    assert "3. <b>Bobur Aliyev</b> — Lavozim: Kassir" in text
+    assert "2. <b>Dilnoza &lt;Test&gt; &amp; Co</b> — +998 90 123 45 67" in text
+    assert "3. <b>Bobur Aliyev</b> — Kassir" in text
     # Matn faqat bir marta olinadi (xotirada qolib ketmaydi)
     assert odoo_tools.pop_text_export(result["text_export"]) is None
 
@@ -71,11 +73,11 @@ async def test_export_text_groups_rows(fake_odoo):
     text = odoo_tools.pop_text_export(result["text_export"])
     lines = text.split("\n")
 
-    assert "<b>Moliya</b> (1 ta)" in lines
-    assert "<b>Sotuv</b> (1 ta)" in lines
+    assert "<b>Moliya</b> — 1 ta" in lines
+    assert "<b>Sotuv</b> — 1 ta" in lines
     # Bo'limi ko'rsatilmaganlar oxirida, raqamlash har guruhda 1 dan
-    assert lines.index("<b>Ko'rsatilmagan</b> (1 ta)") > lines.index("<b>Sotuv</b> (1 ta)")
-    assert lines[lines.index("<b>Sotuv</b> (1 ta)") + 1] == "1. <b>Aziz Karimov</b> — Lavozim: Sotuv menejeri"
+    assert lines.index("<b>Ko'rsatilmagan</b> — 1 ta") > lines.index("<b>Sotuv</b> — 1 ta")
+    assert lines[lines.index("<b>Sotuv</b> — 1 ta") + 1] == "1. <b>Aziz Karimov</b> — Sotuv menejeri"
 
 
 async def test_export_text_caps_rows_and_says_so(monkeypatch):
@@ -92,7 +94,7 @@ async def test_export_text_caps_rows_and_says_so(monkeypatch):
     text = odoo_tools.pop_text_export(result["text_export"])
 
     assert result["rows_shown"] == 300 and result["rows_total"] == 84207
-    assert "Jami 84,207 ta yozuvdan dastlabki 300 tasi ko'rsatildi" in text
+    assert "Jami 84 207 ta yozuvdan dastlabki 300 tasi ko'rsatildi" in text
     assert "Excel" in text
 
 

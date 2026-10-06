@@ -14,13 +14,10 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from app.services import odoo_tools as ot
+from app.services.tool_errors import ToolInputError
 
 MAX_READ_LIMIT = 500
 _MAX_TEXT_CHARS = 400  # bitta uzun matn maydoni (tavsif, izoh) shundan oshsa qisqartiriladi
-
-
-class ToolInputError(ValueError):
-    """Model tool'ga noto'g'ri parametr berdi — xabar modelga qaytadi va u so'rovni tuzatadi."""
 
 
 # Parol/kalit saqlaydigan modellar — CEO roli uchun ham o'qilmaydi: ma'lumot ichiga yashirilgan
@@ -33,7 +30,6 @@ BLOCKED_MODELS = frozenset({
 })
 _SENSITIVE_FIELD_RE = re.compile(r"passw|api_?key|secret|token|totp|oauth_access|signup_", re.IGNORECASE)
 _MODEL_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
-_ORDER_RE = re.compile(r"^[a-z0-9_.]+(\s+(asc|desc))?(\s*,\s*[a-z0-9_.]+(\s+(asc|desc))?)*$", re.IGNORECASE)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$")
 _AGG_RE = re.compile(r"^([a-z0-9_]+)(?::([a-z_]+))?$")
@@ -163,9 +159,7 @@ async def odoo_search_read(model: str, domain: list | None = None, fields: list 
     limit = max(1, min(int(limit or 50), MAX_READ_LIMIT))
     kwargs: dict = {"fields": flds, "limit": limit, "context": ot._UZ_CTX}
     if order:
-        if not _ORDER_RE.match(order.strip()):
-            raise ToolInputError("order noto'g'ri — masalan \"amount_total desc\" yoki \"date_order desc, id desc\"")
-        kwargs["order"] = order.strip()
+        kwargs["order"] = ot._safe_order(order)
     if offset:
         kwargs["offset"] = max(0, int(offset))
     rows = await ot._odoo.execute_kw(model, "search_read", [dom], kwargs)

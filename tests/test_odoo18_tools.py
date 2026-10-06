@@ -318,9 +318,10 @@ async def test_html_report_treats_empty_fields_as_blank_not_numbers(monkeypatch)
     # Sarlavhalar — Odoo'dagi maydon nomi, texnik nom emas
     assert "<th>Xodim nomi</th><th>Ish Mobil</th><th>Faol</th><th>Bo&#x27;lim</th>" in page
     assert "mobile_phone" not in page
-    cells = re.sub(r' class="[^"]*"', "", page)  # katak klasslari (tekislash) ahamiyatsiz
+    cells = re.sub(r' (?:class|data-l)="[^"]*"', "", page)  # katak klasslari va telefon uchun yorliqlar ahamiyatsiz
     assert "<td>ABASOV &lt;P&gt;</td><td></td><td>Ha</td><td>Xavfsizlik</td>" in cells
-    assert "+998931097303" in page
+    # Telefon — bosiladigan havola, o'qiladigan ko'rinishda
+    assert '<a class="lnk" href="tel:+998931097303">+998 93 109 73 03</a>' in page
     # Faqat jadval: telefon bo'yicha "yig'indi" kartochkasi ham, grafik ham yo'q
     assert page.count('class="card"') == 1 and 'class="tile' not in page
     assert 'class="hbars"' not in page and 'class="cols"' not in page
@@ -393,7 +394,9 @@ async def test_large_export_is_read_in_stable_pages(monkeypatch):
     rows, _columns, _meta = await odoo_tools._read_rows("sale.order", [], ["name"], limit=10000)
 
     assert len(rows) == 4500 and [r["name"] for r in rows[:2]] == ["0", "1"]
-    assert seen == [(0, 2000, "id"), (2000, 2000, "id"), (4000, 2000, "id")]
+    # Birinchi so'rov — modelning o'z tartibida (ro'yxat bitta sahifaga sig'sa shu bilan tugaydi);
+    # sig'magach, ID bo'yicha barqaror tartibda boshidan sahifalab o'qiladi
+    assert seen == [(None, 2000, None), (0, 2000, "id"), (2000, 2000, "id"), (4000, 2000, "id")]
 
 
 # ── Raqam formati ───────────────────────────────────────────────────────────
