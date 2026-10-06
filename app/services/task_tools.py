@@ -64,6 +64,12 @@ def _deadline(value: str) -> str | None:
     return local.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _name_words(name: str) -> set[str]:
+    """Ismdagi so'zlar (kichik harfda, tutuq belgilarisiz): "G‘ANISHER O‘G‘LI" == "g'anisher o'g'li"."""
+    cleaned = re.sub(r"[‘’ʻʼ'`]", "", str(name).casefold())
+    return {word for word in re.split(r"[^\w]+", cleaned) if word}
+
+
 async def _find_assignee(name: str) -> list[dict]:
     """Ism bo'yicha nomzodlar: avval botda ro'yxatdan o'tganlar, keyin Odoo foydalanuvchilari
     (login bor — vazifaga rasman biriktiriladi), topilmasa xodimlar ro'yxati (login yo'q)."""
@@ -96,6 +102,13 @@ async def _resolve_assignee(assignee: str, assignee_user_id: int) -> tuple[dict 
         return None, {"aniqlashtirish_kerak": True,
                       "xabar": f"\"{assignee}\" ismli xodim Odoo'da topilmadi. Foydalanuvchidan to'liq ism-familiyani "
                                "so'rang yoki vazifani mas'ulsiz yaratishga roziligini oling."}
+    wanted = _name_words(assignee)
+    if len(wanted) >= 2:
+        # Ism-familiya to'liq aytilgan: aynan shu so'zlarning hammasi bor yagona nomzod — o'sha odam
+        # (o'xshashlik bali boshqa "Sardor"larnikiga yaqin chiqsa ham qayta so'ralmaydi)
+        exact = [c for c in found if wanted <= _name_words(c["name"])]
+        if len(exact) == 1:
+            return exact[0], None
     if len(found) > 1 and found[0].get("score", 0) - found[1].get("score", 0) < _CLEAR_LEAD_GAP:
         options = [{"ism": c["name"], **({"assignee_user_id": c["id"]} if c["source"] == "res.users" else {})}
                    for c in found[:8]]

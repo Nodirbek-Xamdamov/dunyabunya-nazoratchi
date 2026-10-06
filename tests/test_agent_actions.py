@@ -125,6 +125,18 @@ async def test_ambiguous_assignee_creates_nothing_and_asks_which_one(tasks):
     assert chosen["yaratildi"] and tasks.created[0]["user_ids"] == [93]
 
 
+async def test_full_name_picks_the_one_person_even_when_scores_are_close(tasks):
+    """Jonli sinovda "Kadirov Sardor Nadirovichga" javobidan keyin ham bot yana "qaysi biri?" deb so'ragan."""
+    tasks.users = [{"id": 2, "name": "HASANXO‘JAYEV SARDOR G‘ANISHER O‘G‘LI", "score": 82.0},
+                   {"id": 93, "name": "KADIROV SARDOR NADIROVICH", "score": 86.0}]
+    result = await task_tools.create_task("Tekshirish", "Ombor", assignee="Kadirov Sardor")
+    assert result["yaratildi"] and tasks.created[0]["user_ids"] == [93]
+
+    tasks.created.clear()
+    apostrophes = await task_tools.create_task("Tekshirish", "Ombor", assignee="Hasanxo'jayev Sardor")
+    assert apostrophes["masul"].startswith("HASANXO") and tasks.created[0]["user_ids"] == [2]
+
+
 async def test_clear_best_match_is_taken_without_asking(tasks):
     tasks.users = [{"id": 93, "name": "KADIROV SARDOR", "score": 97.0}, {"id": 2, "name": "SARDORBEK", "score": 80.0}]
     assert (await task_tools.create_task("Tekshirish", "Ombor", assignee="Kadirov Sardor"))["masul"] == "KADIROV SARDOR"
