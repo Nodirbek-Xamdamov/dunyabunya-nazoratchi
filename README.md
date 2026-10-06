@@ -120,7 +120,12 @@ powershell -ExecutionPolicy Bypass -File scripts\restart_bot.ps1    # qayta ishg
 Invoke-RestMethod http://127.0.0.1:8002/health                      # holat
 Get-Content logs\bot.log -Tail 50                                   # so'nggi loglar
 .\.venv\Scripts\python -m pytest -q                                 # testlar
+.\.venv\Scripts\python scripts\agent_eval.py natija.md              # yordamchini jonli sinash (~40 savol, pullik)
 ```
+
+`agent_eval.py` — prompt, tool yoki model o'zgartirilgandan keyin: savollar haqiqiy Claude va Odoo
+bilan bajariladi, javoblar va tool chaqiruvlari `natija.md` ga yoziladi (botning bazasi va
+`storage/` ga tegilmaydi). Natijani ko'z bilan ko'rib chiqing: raqamlar to'g'rimi, javob to'liqmi.
 
 - **`/status`** (botga, CEO) — Telegram, Odoo, baza, zaxira nusxa, disk, bugungi savollar va token sarfi.
 - **`/health`** — `200 ok` yoki `503` (polling to'xtagan/osilgan — watchdog bir daqiqada qayta yoqadi).
