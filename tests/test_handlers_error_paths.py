@@ -12,6 +12,7 @@ Odoo'ga chiqilmaydi.
 """
 from __future__ import annotations
 
+import asyncio
 import types
 
 import pytest
@@ -387,26 +388,41 @@ async def test_assistant_reply_plain_chat_sends_no_thinking_message(monkeypatch)
     assert bot.sent[0].get("reply_markup") is None
 
 
-async def test_assistant_reply_data_request_sends_thinking_before_answer(monkeypatch):
-    """Model Odoo'ga murojaat boshlaganda (on_tool_start) — avval "tayyorlanmoqda", keyin javob."""
-    async def fake_ask_with_files(*a, on_tool_start=None, **kw):
-        await on_tool_start()
+async def test_assistant_reply_data_request_sends_no_waiting_message(monkeypatch):
+    """Ma'lumotli so'rovda ham alohida "tayyorlanmoqda, biroz kuting" xabari yo'q — faqat javob;
+    kutish paytida mavzuda "yozmoqda..." belgisi turadi."""
+    async def fake_ask_with_files(*a, **kw):
+        assert "on_tool_start" not in kw
+        await asyncio.sleep(0)  # indikator ishga tushishi uchun
         return AssistantResult(text="Jami 18 ta ochiq vazifa bor.")
 
     monkeypatch.setattr(handlers, "ask_with_files", fake_ask_with_files)
     bot = _FakeBot()
     await handlers._assistant_reply(bot, "Nechta ochiq vazifa bor?", thread_id=3)
 
-    texts = [s["text"] for s in bot.sent]
-    assert len(texts) == 2
-    assert "tayyorlanmoqda" in texts[0].lower()
-    assert texts[1] == "Jami 18 ta ochiq vazifa bor."
+    assert [s["text"] for s in bot.sent] == ["Jami 18 ta ochiq vazifa bor."]
+    assert bot.chat_actions and bot.chat_actions[0]["action"] == "typing"
+    assert bot.chat_actions[0]["message_thread_id"] == 3
+
+
+async def test_assistant_reply_long_list_request_offers_excel_and_html_only(monkeypatch):
+    """30 tadan uzun ro'yxat uchun "shu chatda" taklif qilinmaydi — faqat Excel yoki HTML."""
+    async def fake_ask_with_files(*a, **kw):
+        return AssistantResult(text="Jami 187 ta yozuv topildi. Excel yoki HTML qilib beraymi?")
+
+    monkeypatch.setattr(handlers, "ask_with_files", fake_ask_with_files)
+    bot = _FakeBot()
+    await handlers._assistant_reply(bot, "Xodimlar ro'yxatini ber", thread_id=None)
+
+    callback_datas = [b.callback_data for row in bot.sent[-1]["reply_markup"].inline_keyboard for b in row]
+    assert [c.split(":")[1] for c in callback_datas] == ["excel", "html"]
 
 
 async def test_assistant_reply_list_request_offers_excel_html_and_text(monkeypatch):
-    """Ro'yxat so'ralganda format tugmalari orasida "Matn" ham bo'lishi shart."""
+    """Qisqa ro'yxat (30 tagacha) so'ralganda format tugmalari orasida "Matn" ham bo'ladi."""
     async def fake_ask_with_files(*a, on_tool_start=None, **kw):
-        return AssistantResult(text="Jami 187 ta ma'lumot topildi. Qaysi formatda tayyorlab beray?")
+        return AssistantResult(
+            text="Jami 18 ta yozuv topildi. Qaysi formatda tayyorlab beray: Excel, HTML yoki matn (shu chatda)?")
 
     monkeypatch.setattr(handlers, "ask_with_files", fake_ask_with_files)
     bot = _FakeBot()

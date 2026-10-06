@@ -154,6 +154,16 @@ async def _ask(uid: int, question: str, role: Role, fmt: str | None):
                                           **delivery.format_request(fmt))
 
 
+def _buttons(question: str, result, fmt: str | None) -> list[str]:
+    """Javob ostida foydalanuvchi ko'radigan tugmalar (Telegram handlerlaridagi qoida bilan)."""
+    from app.telegram import delivery
+
+    if fmt is not None:
+        return ["text"] if fmt != "text" and result.files and delivery.text_offer_fits(result) else []
+    markup = delivery.offer_formats("eval", question, result, chat_id=1, thread_id=None, user_key=1)
+    return [b.callback_data.split(":")[1] for row in markup.inline_keyboard for b in row] if markup else []
+
+
 async def _run_case(index: int, case, gate: asyncio.Semaphore, out_path: Path) -> str:
     name, role, turns, _writes = case
     uid = 1000 + index
@@ -175,7 +185,8 @@ async def _run_case(index: int, case, gate: asyncio.Semaphore, out_path: Path) -
             calls = _calls.get(uid, [])[before:]
             lines.append(f"\n**Q:** {question}" + (f"   _[{fmt} tugmasi]_" if fmt else ""))
             lines.append(f"_{time.monotonic() - started:.1f}s, {len(calls)} ta tool, fayllar={[f.kind for f in result.files]}, "
-                         f"vazifalar={result.task_ids}, odoo_error={result.odoo_error}, file_error={result.file_error}_")
+                         f"vazifalar={result.task_ids}, odoo_error={result.odoo_error}, file_error={result.file_error}, "
+                         f"yozuvlar={result.list_rows}, tugmalar={_buttons(question, result, fmt)}_")
             for tool, args, raw, took in calls:
                 flag = "  **XATO**" if raw.startswith('{"error"') else ""
                 lines.append(f"- `{tool}` {json.dumps(args, ensure_ascii=False)[:260]} -> "

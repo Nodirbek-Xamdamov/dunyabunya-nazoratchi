@@ -61,7 +61,7 @@ Guruhdagi bo'lim mavzusiga yozilgan topshiriq avvalgidek Odoo'ga vazifa bo'lib y
 
 HELP_MANAGER = """<b>dunyabunya yordamchisi</b>
 
-Shu chatga o'z bo'limingiz bo'yicha oddiy gap bilan yozing yoki ovozli xabar yuboring: ro'yxat, qoldiq, yig'indi, solishtirish yoki hisobot so'rang. Uzun ro'yxat uchun Excel / HTML / Matn tugmalari chiqadi. Rasm, PDF, Excel yoki Word fayl yuborsangiz — o'qib beraman.
+Shu chatga o'z bo'limingiz bo'yicha oddiy gap bilan yozing yoki ovozli xabar yuboring: ro'yxat, qoldiq, yig'indi, solishtirish yoki hisobot so'rang. Uzun ro'yxat uchun Excel / HTML tugmalari chiqadi. Rasm, PDF, Excel yoki Word fayl yuborsangiz — o'qib beraman.
 
 Eslatma ham qo'ya olasiz: «ertaga 10 da eslat: inventarizatsiya».
 

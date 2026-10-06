@@ -147,17 +147,16 @@ async def _answer_with_format_options(message: Message, bot: Bot, question: str,
                                reply_markup=markup or delivery.task_keyboard(result))
 
 
-async def _ask_assistant(message: Message, text: str, role: Role, attachments: list[dict] | None = None):
-    """Yordamchidan javob oladi. "So'rovingiz tayyorlanmoqda" xabari faqat model
-    haqiqatan ma'lumot qidira boshlaganda chiqadi — oddiy suhbatda yuborilmaydi."""
-    async def _notify_working() -> None:
-        await message.answer(replies.assistant_thinking_text())
-
+async def _ask_assistant(message: Message, bot: Bot, text: str, role: Role,
+                         attachments: list[dict] | None = None):
+    """Yordamchidan javob oladi. Javob tayyorlanguncha chatda "yozmoqda..." indikatori turadi —
+    alohida kutish xabari yuborilmaydi."""
     user = message.from_user
-    return await ask_with_files(
-        user.id, text, role=role, on_tool_start=_notify_working,
-        user_name=user.full_name or "", actor_id=user.id, chat_id=message.chat.id, attachments=attachments,
-    )
+    async with delivery.typing(bot, message.chat.id):
+        return await ask_with_files(
+            user.id, text, role=role,
+            user_name=user.full_name or "", actor_id=user.id, chat_id=message.chat.id, attachments=attachments,
+        )
 
 
 # ─── /start ─────────────────────────────────────────────────────────────────
@@ -677,7 +676,7 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
     # 2) CEO — to'liq yordamchi (barcha bo'limlar)
     if is_ceo:
         try:
-            result = await _ask_assistant(message, text, Role.CEO, blocks)
+            result = await _ask_assistant(message, bot, text, Role.CEO, blocks)
         except Exception as e:
             log.exception("on_private_dm_message (CEO): ask_with_files xatosi")
             await message.answer(f"⚠️ Javob tayyorlashda xatolik yuz berdi: {friendly_error(e)}")
@@ -705,7 +704,7 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
     role = role_map.get(manager.department, Role.NONE)
 
     try:
-        result = await _ask_assistant(message, text, role, blocks)
+        result = await _ask_assistant(message, bot, text, role, blocks)
     except Exception as e:
         log.exception("on_private_dm_message (manager): ask_with_files xatosi")
         await message.answer(f"⚠️ Javob tayyorlashda xatolik yuz berdi: {friendly_error(e)}")

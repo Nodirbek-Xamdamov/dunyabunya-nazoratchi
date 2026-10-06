@@ -1,10 +1,11 @@
 """Report/format yetkazib berish: Excel/HTML/Matn tugmalari va fayllarni yuborish.
 
 Assistant javob bergan har bir ma'lumotli so'rovdan so'ng chaqiruvchi
-`offer_formats()` orqali kontekstni saqlaydi va tugmalarni oladi: ro'yxat/jadval
-so'rovida 3 ta (Excel / HTML / Matn), fayl allaqachon yuborilgan bo'lsa — shu
-ma'lumotni chatning o'zida matn qilib olish uchun "Matn" tugmasi. Tugma
-bosilganda callback so'rovni shu formatda qayta ishlaydi.
+`offer_formats()` orqali kontekstni saqlaydi va tugmalarni oladi: yordamchi format
+so'ragan ro'yxat/jadval so'rovida Excel / HTML (ro'yxat 30 tadan oshmasa "Matn" ham);
+fayl allaqachon yuborilgan bo'lsa format qayta so'ralmaydi — faqat qisqa ro'yxat yoki
+hisobotni chatning o'zida matn qilib olish uchun "Matn" tugmasi. Tugma bosilganda
+callback so'rovni shu formatda qayta ishlaydi.
 
 Natijada: barcha turdagi fayllar (Excel, HTML, PDF) haqiqiy hujjat sifatida
 Telegram orqali yuboriladi — server manzili (PUBLIC_BASE_URL, odatda lokal
@@ -14,6 +15,8 @@ foydalanuvchi faylni istalgan joydan (ofis tarmog'idan tashqarida ham) ochadi.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -30,7 +33,13 @@ from aiogram.types import (
 
 from app import ceo_state, metrics
 from app.rbac import Role
-from app.services.assistant import FILE_TOOLS, AssistantResult, ask_with_files
+from app.services.assistant import (
+    FILE_TOOLS,
+    TEXT_OFFER_MAX_ROWS,
+    AssistantResult,
+    ask_with_files,
+    rows_in_answer,
+)
 from app.services.errors import friendly_error
 from app.telegram.tg_format import TG_LIMIT, split_message, to_telegram_html
 
@@ -48,7 +57,7 @@ _TABULAR_KEYWORDS = (
     "ro'yxat", "royxat", "royhat", "ro'yhat", "ruyxat", "list", "jadval",
     "jadvali", "table", "jadvalini", "jadval ko'rinishida",
     # Model format so'ragan javoblar ham tugma ko'rsatishi uchun:
-    "qaysi formatda", "excel yoki html", "formatda tayyorlab",
+    "qaysi formatda", "excel yoki html", "html yoki excel", "formatda tayyorlab",
     "ko'rinishida tayyorlab", "qaysi ko'rinishda",
 )
 
@@ -75,6 +84,38 @@ def wants_format_buttons(question: str) -> bool:
 
 _ENTRIES_MAX = 500  # xotirada cheksiz o'sib ketmasligi uchun — eskisi bosilmasa ham chegara
 
+_TYPING_REFRESH_SECONDS = 4.0  # Telegram "yozmoqda..." belgisini ~5 soniyadan keyin o'zi o'chiradi
+_TEXT_OFFER_RE = re.compile(r"matn|текст|\btext\b", re.IGNORECASE)
+
+
+@contextlib.asynccontextmanager
+async def typing(bot: Bot, chat_id: int, thread_id: int | None = None):
+    """Javob tayyorlanayotgan paytda chatda "yozmoqda..." belgisini ushlab turadi. Alohida
+    "so'rovingiz tayyorlanmoqda, biroz kuting" xabari o'rnida: u har savol va har tugmadan keyin
+    takrorlanib, chatda qolib ketardi."""
+    async def pulse() -> None:
+        while True:
+            try:
+                await bot.send_chat_action(chat_id=chat_id, action="typing", message_thread_id=thread_id)
+            except Exception:
+                pass  # indikator yuborilmasa ham javobning o'zi ketadi
+            await asyncio.sleep(_TYPING_REFRESH_SECONDS)
+
+    task = asyncio.create_task(pulse())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def text_offer_fits(result: AssistantResult) -> bool:
+    """Shu javobdagi ma'lumotni chatda matn qilib berishni taklif qilish o'rinlimi.
+    Fayldagi ro'yxat 30 tadan uzun bo'lsa — yo'q; hisobot (qatorlar soni yo'q) uchun — ha."""
+    rows = getattr(result, "list_rows", None)
+    return rows is None or rows <= TEXT_OFFER_MAX_ROWS
+
 
 def remember(scope: str, *, chat_id: int, thread_id: int | None,
              question: str, user_key: int, role: Role = Role.CEO,
@@ -98,15 +139,15 @@ def _text_button(scope: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text="📝 Matn (shu chatda)", callback_data=f"fmt:text:{scope}")
 
 
-def format_keyboard(scope: str) -> InlineKeyboardMarkup:
-    """Excel / HTML / Matn tanlash tugmalari."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📊 Excel fayl", callback_data=f"fmt:excel:{scope}"),
-            InlineKeyboardButton(text="📈 HTML hisobot", callback_data=f"fmt:html:{scope}"),
-        ],
-        [_text_button(scope)],
-    ])
+def format_keyboard(scope: str, with_text: bool = True) -> InlineKeyboardMarkup:
+    """Excel / HTML tanlash tugmalari; `with_text` — "Matn (shu chatda)" ham (qisqa ro'yxat uchun)."""
+    rows = [[
+        InlineKeyboardButton(text="📊 Excel fayl", callback_data=f"fmt:excel:{scope}"),
+        InlineKeyboardButton(text="📈 HTML hisobot", callback_data=f"fmt:html:{scope}"),
+    ]]
+    if with_text:
+        rows.append([_text_button(scope)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def text_keyboard(scope: str) -> InlineKeyboardMarkup:
@@ -122,24 +163,38 @@ def offer_formats(scope: str, question: str, result: AssistantResult, *,
     bosilganda qayta ishlatish uchun savol kontekstini ham eslab qoladi.
 
     - Odoo bilan aloqa yo'q bo'lsa — tugma yo'q (qaysi format tanlanmasin, natija bir xil xato);
-    - ro'yxat/jadval so'rovi — Excel / HTML / Matn;
-    - boshqa so'rov, lekin fayl yuborilgan (masalan avtomatik HTML hisobot) — faqat "Matn".
+    - ro'yxat shu javobda matn bo'lib yuborilgan (export_text) — tugma yo'q;
+    - fayl yuborilgan — format QAYTA so'ralmaydi (ilgari "html ko'rinishida ber" degan so'rovga
+      fayl bilan birga yana Excel / HTML / Matn tugmalari chiqardi); faqat "Matn" — hisobot yoki
+      30 tadan oshmaydigan ro'yxat uchun;
+    - ro'yxat/jadval so'rovi, fayl hali yo'q — Excel / HTML; ro'yxat 30 tadan oshmasa "Matn" ham.
 
     Har bir javob O'Z kaliti bilan eslab qolinadi (`scope` + tasodifiy qo'shimcha). Ilgari
     kalit faqat chat edi: yangi savol eskisini bosib ketar va OLDINGI javob ostidagi
     "Excel" tugmasi bosilganda KEYINGI savolning ma'lumoti kelardi."""
     if result.odoo_error:
         return None
+    if result.texts and not result.files:
+        return None
     # Savoldagi "ro'yxat/jadval" so'zi faqat javob uchun ma'lumot o'qilgan bo'lsa hisobga olinadi —
     # "xodimlarga xat yoz, ro'yxat bilan" kabi matn ishiga eksport tugmalari qo'yilmaydi
-    wants_table = (wants_format_buttons(question) and getattr(result, "used_data", True)) \
+    wants_table =(wants_format_buttons(question) and getattr(result, "used_data", True)) \
         or wants_format_buttons(result.text)
-    if not wants_table and not result.files:
+    if result.files:
+        if not text_offer_fits(result):
+            return None
+    elif not wants_table:
         return None
     key = f"{scope}-{uuid.uuid4().hex[:8]}"
     remember(key, chat_id=chat_id, thread_id=thread_id, question=question,
              user_key=user_key, role=role, group_chat_id=group_chat_id)
-    return format_keyboard(key) if wants_table else text_keyboard(key)
+    if result.files:
+        return text_keyboard(key)
+    # "Matn" tugmasi faqat yordamchi matn variantini o'zi taklif qilgan bo'lsa va ro'yxat
+    # (javobda aytilgan son) 30 tadan oshmasa qo'yiladi
+    rows = rows_in_answer(result.text)
+    with_text = bool(_TEXT_OFFER_RE.search(result.text or "")) and (rows is None or rows <= TEXT_OFFER_MAX_ROWS)
+    return format_keyboard(key, with_text=with_text)
 
 
 def task_keyboard(result: AssistantResult) -> InlineKeyboardMarkup | None:
@@ -371,26 +426,24 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
     group_chat_id = entry["group_chat_id"]
 
     request = format_request(fmt)
-
-    # Fayl tool'i majburlangani uchun odatda 1-2 soniyada tayyor bo'ladi — alohida
-    # "Tayyorlanmoqda..." xabari foydalanuvchi buni ko'rguncha allaqachon eskirib, keyin
-    # o'chirilib ketadigan ortiqcha xabar bo'lardi; "typing" indikatori yetarli.
-    try:
-        await bot.send_chat_action(chat_id=chat_id, action="typing", message_thread_id=thread_id)
-    except Exception as e:
-        log.warning("fmt callback prep failed: %s", e)
+    presser = getattr(callback, "from_user", None)
+    # Kim qaysi tugmani bosgani logda qoladi: bazada tugma bosilishi ham asl savol matni bilan
+    # saqlanadi va qayta yozilgan savoldan farq qilmaydi
+    log.info("format tugmasi: fmt=%s scope=%s user=%s", fmt, scope, getattr(presser, "id", None))
 
     try:
         # Ko'rsatma savolga qo'shilib emas, system prompt'ga tizim ko'rsatmasi
         # sifatida uzatiladi (foydalanuvchi matni <user_input> ichida qoladi).
-        result = await ask_with_files(
-            user_key, question,
-            role=role, group_chat_id=group_chat_id,
-            **request,
-            actor_id=getattr(getattr(callback, "from_user", None), "id", None),
-            user_name=getattr(getattr(callback, "from_user", None), "full_name", "") or "",
-            chat_id=chat_id, thread_id=thread_id,
-        )
+        # Alohida "Tayyorlanmoqda..." xabari yo'q — "yozmoqda..." indikatori turadi.
+        async with typing(bot, chat_id, thread_id):
+            result = await ask_with_files(
+                user_key, question,
+                role=role, group_chat_id=group_chat_id,
+                **request,
+                actor_id=getattr(presser, "id", None),
+                user_name=getattr(presser, "full_name", "") or "",
+                chat_id=chat_id, thread_id=thread_id,
+            )
     except Exception as e:
         log.exception("fmt regeneration failed")
         try:
@@ -402,9 +455,9 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
             pass
         return
 
-    # Fayl yuborilgach — shu ma'lumotni chatda matn qilib olish taklifi ham beriladi
+    # Fayl yuborilgach — shu ma'lumotni chatda matn qilib olish taklifi (uzun ro'yxatga emas)
     follow_up = None
-    if fmt != "text" and result.files:
+    if fmt != "text" and result.files and text_offer_fits(result):
         remember(scope, chat_id=chat_id, thread_id=thread_id, question=question,
                  user_key=user_key, role=role, group_chat_id=group_chat_id)
         follow_up = text_keyboard(scope)

@@ -3,10 +3,6 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app.config import settings
 
 
-def assistant_thinking_text() -> str:
-    return "⏳ So'rovingiz tayyorlanmoqda, biroz kuting..."
-
-
 def task_action_keyboard(task_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

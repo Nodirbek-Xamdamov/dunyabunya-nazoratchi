@@ -8,6 +8,7 @@ Barcha testlar mok'langan — tarmoqqa chiqilmaydi.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import types
 
@@ -217,15 +218,74 @@ def _keys(markup) -> list[str]:
     return [c.split(":", 2)[2] for c in _callbacks(markup)]
 
 
-def test_list_question_offers_all_three_formats():
+def test_short_list_question_offers_all_three_formats():
+    answer = "Jami 18 ta yozuv topildi. Qaysi formatda tayyorlab beray: Excel, HTML yoki matn (shu chatda)?"
     markup = delivery.offer_formats(
-        "dm-1", "xodimlar ro'yxatini ber", AssistantResult(text="Jami 187 ta."),
+        "dm-1", "xodimlar ro'yxatini ber", AssistantResult(text=answer),
         chat_id=1, thread_id=None, user_key=1,
     )
     (key,) = set(_keys(markup))
     assert key.startswith("dm-1-")
     assert _callbacks(markup) == [f"fmt:excel:{key}", f"fmt:html:{key}", f"fmt:text:{key}"]
     assert delivery._entries[key]["question"] == "xodimlar ro'yxatini ber"
+
+
+def test_long_list_is_offered_as_excel_or_html_only():
+    """30 tadan uzun ro'yxat "shu chatda" qilib taklif qilinmaydi — yordamchi adashib taklif qilsa ham."""
+    kw = dict(chat_id=1, thread_id=None, user_key=1)
+    for answer in ("Jami 187 ta yozuv topildi. Excel yoki HTML qilib beraymi?",
+                   "Jami 1 187 ta yozuv topildi. Qaysi formatda tayyorlab beray: Excel, HTML yoki matn (shu chatda)?",
+                   "187 ta xodim topildi: Savdo bo'limi 9 ta, qolganlari boshqa bo'limlarda. "
+                   "Qaysi formatda tayyorlab beray: Excel, HTML yoki matn?",
+                   "Jami 187 ta."):
+        markup = delivery.offer_formats("dm-1", "xodimlar ro'yxatini ber", AssistantResult(text=answer), **kw)
+        assert [c.split(":")[1] for c in _callbacks(markup)] == ["excel", "html"]
+    # 30 ta — hali chatga sig'adi
+    edge = AssistantResult(text="Jami 30 ta yozuv topildi. Excel, HTML yoki matn (shu chatda)?")
+    assert [c.split(":")[1] for c in _callbacks(delivery.offer_formats("dm-1", "xodimlar ro'yxati", edge, **kw))] \
+        == ["excel", "html", "text"]
+
+
+def test_file_already_sent_does_not_ask_the_format_again(tmp_path):
+    """ "... ro'yxatini html ko'rinishida ber" — fayl keladi; ilgari ostida yana Excel / HTML / Matn
+    tugmalari chiqardi (format go'yo fayl yaratilgandan KEYIN so'ralardi)."""
+    kw = dict(chat_id=-100, thread_id=None, user_key=-100)
+    question = "xodimlar ro'yxatini html ko'rinishida ber"
+    long_list = AssistantResult(text="Hisobot tayyorlandi", files=[_file(tmp_path)], list_rows=132)
+    assert delivery.offer_formats("grp-main", question, long_list, **kw) is None
+    assert delivery._entries == {}
+
+    short_list = AssistantResult(text="Hisobot tayyorlandi", files=[_file(tmp_path)], list_rows=12)
+    (only,) = _callbacks(delivery.offer_formats("grp-main", question, short_list, **kw))
+    assert only.startswith("fmt:text:grp-main-")
+
+
+def test_list_already_sent_as_text_gets_no_buttons():
+    result = AssistantResult(text="Jami 12 ta xodim.", texts=["1. <b>Aziz</b>"], list_rows=12)
+    assert delivery.offer_formats("dm-1", "xodimlar ro'yxatini shu yerga yoz", result,
+                                  chat_id=1, thread_id=None, user_key=1) is None
+
+
+async def test_typing_indicator_is_kept_alive_until_the_answer_is_ready(monkeypatch):
+    """Alohida "tayyorlanmoqda, biroz kuting" xabari o'rniga — "yozmoqda..." belgisi; Telegram uni
+    ~5 soniyada o'chiradi, shuning uchun javob tayyor bo'lguncha qayta-qayta yuboriladi."""
+    monkeypatch.setattr(delivery, "_TYPING_REFRESH_SECONDS", 0.01)
+    bot = _FakeBot()
+    async with delivery.typing(bot, 5, 7):
+        await asyncio.sleep(0.06)
+    sent = len(bot.chat_actions)
+    assert sent >= 2 and bot.chat_actions[0] == {"chat_id": 5, "action": "typing", "message_thread_id": 7}
+    await asyncio.sleep(0.04)
+    assert len(bot.chat_actions) == sent and bot.sent == []  # javobdan keyin to'xtaydi; xabar yuborilmaydi
+
+
+async def test_typing_indicator_failure_does_not_break_the_answer():
+    class _Broken:
+        async def send_chat_action(self, **kwargs):
+            raise RuntimeError("flood control")
+
+    async with delivery.typing(_Broken(), 5):
+        await asyncio.sleep(0)
 
 
 def test_file_answer_offers_text_version(tmp_path):
@@ -377,6 +437,23 @@ async def test_excel_button_then_offers_text_under_the_file(monkeypatch, tmp_pat
 
     assert _callbacks(bot.docs[0]["reply_markup"]) == ["fmt:text:dm-1"]
     assert "dm-1" in delivery._entries  # "Matn" tugmasi bosilganda savol qayta ishlatiladi
+    assert bot.sent == []  # "Tayyorlanmoqda... biroz kuting" xabari yuborilmaydi
+
+
+async def test_file_button_for_a_long_list_offers_no_text_version(monkeypatch, tmp_path):
+    f = _file(tmp_path, "xodimlar_abc12345.xlsx")
+
+    async def fake_ask_with_files(user_key, question, **kw):
+        return AssistantResult(text=f"Hisobot tayyorlandi: {f.url}", files=[f], list_rows=132)
+
+    monkeypatch.setattr(delivery, "ask_with_files", fake_ask_with_files)
+    delivery.remember("dm-1", chat_id=1, thread_id=None, question="xodimlar ro'yxati", user_key=1)
+    bot = _FakeBot()
+    callback, _ = _callback("fmt:excel:dm-1")
+    await delivery.on_format_choice(callback, bot)
+
+    assert len(bot.docs) == 1 and bot.docs[0]["reply_markup"] is None
+    assert bot.sent == [] and "dm-1" not in delivery._entries
 
 
 async def test_format_button_with_unreachable_odoo_shows_reason_once(monkeypatch):

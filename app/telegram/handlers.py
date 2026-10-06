@@ -889,20 +889,14 @@ async def _is_for_another_user(text: str | None, bot: Bot) -> bool:
 
 async def _assistant_reply(bot: Bot, text: str, thread_id: int | None = None, *,
                            user=None, attachments: list[dict] | None = None) -> None:
-    await bot.send_chat_action(chat_id=settings.TELEGRAM_GROUP_ID, action="typing", message_thread_id=thread_id)
-
-    async def _notify_working() -> None:
-        # Faqat model haqiqatan ma'lumot qidira boshlaganda chiqadi — oddiy suhbatda
-        # (salom, savol-javob) "tayyorlanmoqda" xabari yuborilmaydi.
-        await bot.send_message(chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=thread_id,
-                               text=replies.assistant_thinking_text())
-
     try:
-        result = await ask_with_files(
-            _GENERAL_CHAT_KEY, text, group_chat_id=_GENERAL_CHAT_KEY, on_tool_start=_notify_working,
-            user_name=(user.full_name if user else ""), actor_id=(user.id if user else None),
-            chat_id=settings.TELEGRAM_GROUP_ID, thread_id=thread_id, attachments=attachments,
-        )
+        # Javob tayyorlanguncha "yozmoqda..." indikatori turadi — alohida kutish xabari yuborilmaydi
+        async with delivery.typing(bot, settings.TELEGRAM_GROUP_ID, thread_id):
+            result = await ask_with_files(
+                _GENERAL_CHAT_KEY, text, group_chat_id=_GENERAL_CHAT_KEY,
+                user_name=(user.full_name if user else ""), actor_id=(user.id if user else None),
+                chat_id=settings.TELEGRAM_GROUP_ID, thread_id=thread_id, attachments=attachments,
+            )
     except Exception as e:
         # Ilgari bu yerda xato bo'lsa foydalanuvchi hech qanday javob olmasdan
         # abadiy kutib qolardi.

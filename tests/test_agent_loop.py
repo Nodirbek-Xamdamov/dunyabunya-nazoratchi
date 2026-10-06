@@ -322,3 +322,48 @@ async def test_attachment_stays_visible_for_the_follow_up_question(agent):
     first_user = agent.calls[1]["messages"][0]["content"]
     assert first_user[0] == image and "bu nima?" in first_user[1]["text"]  # rasm tarixga qayta biriktirildi
     assert isinstance(agent.calls[1]["messages"][-1]["content"], str)
+
+
+# ── Ro'yxat uzunligi (format tugmalari uchun) ───────────────────────────────
+
+async def test_list_length_is_taken_from_the_export_result(agent):
+    url = assistant.settings.PUBLIC_BASE_URL.rstrip("/") + "/reports/xodimlar_abc.xlsx"
+    agent.tools = {"export_excel": {"url": url, "rows_in_file": 132, "rows_total": 132}}
+    agent.model(reply(tool("export_excel"), stop="tool_use"), reply(text(f"Hisobot tayyorlandi: {url}")))
+    assert (await assistant.ask_with_files(1, "xodimlar ro'yxatini excelda ber")).list_rows == 132
+
+    agent.tools = {"export_text": {"text_export": "yo'q", "rows_shown": 300, "rows_total": 84207}}
+    agent.model(reply(tool("export_text"), stop="tool_use"), reply(text("Jami 84 207 ta.")))
+    assert (await assistant.ask_with_files(1, "mahsulotlarni shu yerga yoz")).list_rows == 84207
+
+    agent.model(reply(tool("odoo_count"), stop="tool_use"), reply(text("Jami 12 ta buyurtma.")))
+    assert (await assistant.ask_with_files(1, "nechta buyurtma?")).list_rows is None
+
+
+async def test_long_list_is_never_offered_as_chat_text(agent):
+    """30 tadan uzun ro'yxat uchun "shu chatda beraymi" so'ralmaydi — model taklif qilib yuborsa ham."""
+    agent.model(reply(tool("odoo_count"), stop="tool_use"),
+                reply(text("132 ta xodim topildi. Qaysi formatda tayyorlab beray: Excel, HTML yoki matn (shu chatda)?")))
+    result = await assistant.ask_with_files(1, "xodimlar ro'yxatini ber")
+    assert result.text == "132 ta xodim topildi. Excel yoki HTML qilib beraymi?"
+    assert agent.saved[-1] == ("assistant", result.text)  # suhbat tarixida ham shu ko'rinishda
+
+    for untouched in ("Jami 18 ta yozuv topildi. Qaysi formatda tayyorlab beray: Excel, HTML yoki matn (shu chatda)?",
+                      "Jami 132 ta yozuv topildi. Excel yoki HTML qilib beraymi?",
+                      "Excel, HTML yoki matn — qaysi biri qulay?"):
+        agent.model(reply(text(untouched)))
+        assert (await assistant.ask_with_files(1, "ro'yxat")).text == untouched
+
+
+def test_list_length_mentioned_in_an_answer():
+    assert assistant.rows_in_answer("Jami 1 187 ta yozuv topildi.") == 1187
+    assert assistant.rows_in_answer("38 ta xodim: Savdo bo'limi 9 ta, Shiribom 16 ta") == 38
+    assert assistant.rows_in_answer("2026-10-06 holatiga 30 tadan ko'p emas") is None
+    assert assistant.rows_in_answer("Telefon: +998 97 700 65 90") is None
+
+
+def test_company_name_stays_lowercase_and_technical_notes_are_dropped():
+    tidy = assistant._tidy_answer
+    assert tidy("Dunyabunya® (company_id=1) kompaniyasida 35 kishi.") == "dunyabunya® kompaniyasida 35 kishi."
+    assert tidy("dunyabunya logistika (company_id = 2) — 56 kishi") == "dunyabunya logistika — 56 kishi"
+    assert tidy("Savdo bo'limi (9 kishi), dunyabunya®") == "Savdo bo'limi (9 kishi), dunyabunya®"

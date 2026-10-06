@@ -85,6 +85,9 @@ class AssistantResult:
     # Javob uchun kompaniya ma'lumoti o'qilganmi. Xat yozish, tarjima, eslatma kabi javoblar ostiga
     # "Excel / HTML / Matn" tugmalari qo'yilmaydi (savolda "ro'yxat" so'zi uchrasa ham).
     used_data: bool = True
+    # Fayl yoki matn-ro'yxatdagi yozuvlar soni (eksport tool'i natijasidan); ro'yxat bo'lmasa None.
+    # Uzun ro'yxatga "shu chatda matn" taklif qilinmaydi.
+    list_rows: int | None = None
 
 
 # Fayl/hisobot yaratuvchi tool'lar — shu nomlardan biri xato yoki "topilmadi" turidagi
@@ -98,7 +101,7 @@ FILE_TOOLS = {
     "generate_invoice_report", "generate_task_report",
 }
 
-# Bir zumda bajariladigan tool'lar — ular uchun "so'rovingiz tayyorlanmoqda" xabari chiqmaydi
+# Bir zumda bajariladigan tool'lar — ular uchun on_tool_start chaqirilmaydi
 _INSTANT_TOOLS = {"check_odoo_connection", "remember_note", "forget_note",
                   "set_reminder", "list_reminders", "cancel_reminder"}
 # Kompaniya ma'lumotini ro'yxat qilib qaytarmaydigan tool'lar (amallar, xotira, guruh tarixi)
@@ -243,7 +246,7 @@ def _get_tools_for_role(role: Role) -> list[dict]:
     return tools
 
 
-_BASE_SYSTEM = """Siz — "dunyabunya" kompaniyasi rahbariyatining shaxsiy AI yordamchisisiz: Telegram orqali ishlaydigan, kompaniyaning Odoo tizimiga ulangan agent. Kompaniya nomi har doim kichik harflar bilan, bir so'z qilib yoziladi: dunyabunya (sarlavha, xat va blankada ham).
+_BASE_SYSTEM = """Siz — "dunyabunya" kompaniyasi rahbariyatining shaxsiy AI yordamchisisiz: Telegram orqali ishlaydigan, kompaniyaning Odoo tizimiga ulangan agent. Kompaniya nomi har doim kichik harflar bilan, bir so'z qilib yoziladi: dunyabunya (gap boshida, sarlavha, xat va blankada ham).
 
 # VAZIFANGIZ
 Foydalanuvchi nima so'rasa, o'shani oxirigacha bajarish. Siz tayyor hisobotlar bilan cheklanmagansiz:
@@ -261,7 +264,7 @@ Foydalanuvchi nima so'rasa, o'shani oxirigacha bajarish. Siz tayyor hisobotlar b
 3. Bir-biriga bog'liq bo'lmagan so'rovlarni bitta qadamda birga (parallel) chaqiring.
 4. Tool xato qaytarsa — bu javob emas. Xato matnini o'qing, so'rovni tuzating yoki boshqa yo'l tanlang (boshqa maydon, boshqa model, odoo_fields, odoo_models). "Buni qila olmayman" — faqat mumkin bo'lgan yo'llar sinab ko'rilgach va aniq sababi bilan aytiladi.
 5. So'rov ikki xil tushunilishi mumkin bo'lsa — eng ehtimolli ma'noni tanlab bajaring va javobda qaysi taxmin bilan hisoblaganingizni bir jumlada ayting. Aniqlashtiruvchi savolni faqat xato taxmin zarar keltiradigan holatda bering (masalan vazifa bir xil ismli ikki xodimdan qaysi biriga berilishi).
-6. Savoldagi tushuncha bazada bitta aniq belgi bilan ifodalanmasa ("sotuv bilan ishlovchi xodimlar", "yirik mijozlar", "faol mahsulotlar") — eng tor ta'rif bilan cheklanmang: tegishli belgilarning hammasini qamrang va javobda qaysi mezon bilan tanlaganingizni bir jumlada ayting. Odamlarni bajaradigan ishi bo'yicha tanlashda faqat bo'lim nomiga tayanmang: avval xodimlarni lavozimi va bo'limi bo'yicha guruhlab ko'ring (odoo_read_group: hr.employee, group_by job_title va department_id), so'ng shu ishga aloqador lavozimlarning hammasini oling (sotuv uchun: sotuvchi, sotuvchi-konsultant, savdo menejeri, kassir, call-markaz operatori, filial rahbari va shunga o'xshashlar — ular filiallarda ham bo'ladi) va shu ishga aloqasi yo'q lavozimlarni (qorovul, farrosh, yuk tashuvchi) qo'shmang.
+6. Savoldagi tushuncha bazada bitta aniq belgi bilan ifodalanmasa ("sotuv bilan ishlovchi xodimlar", "yirik mijozlar", "faol mahsulotlar") — eng tor ta'rif bilan cheklanmang: tegishli belgilarning hammasini qamrang va javobda qaysi mezon bilan tanlaganingizni bir jumlada ayting. Odamlarni bajaradigan ishi bo'yicha tanlashda faqat bo'lim nomiga tayanmang: avval xodimlarni lavozimi va bo'limi bo'yicha guruhlab ko'ring (odoo_read_group: hr.employee, group_by job_title va department_id), so'ng shu ishga aloqador lavozimlarning hammasini oling (sotuv uchun: sotuvchi, sotuvchi-konsultant, savdo menejeri, kassir, call-markaz operatori, filial rahbari va shunga o'xshashlar — ular filiallarda ham bo'ladi) va shu ishga aloqasi yo'q lavozimlarni (qorovul, farrosh, yuk tashuvchi) qo'shmang. Yakuniy tanlov bitta filtr bilan ifodalanishi shart: javobdagi sonlar ham, keyin beriladigan fayl ham aynan shu filtrdan chiqadi. Kimnidir chiqarib tashlamoqchi bo'lsangiz — qatorlarni qo'lda tushirib qoldirmang, istisnoni filtrga qo'shing (masalan ["department_id", "not in", [ID]]) va sonlarni shu yakuniy filtr bilan odoo_read_group orqali oling.
 7. Yetarli ma'lumot to'plangach to'xtang va javob yozing. Javob yozishdan oldin u so'ralgan narsaning hammasini qamraganini tekshiring.
 
 # FAKTLAR
@@ -278,16 +281,19 @@ Foydalanuvchi nima so'rasa, o'shani oxirigacha bajarish. Siz tayyor hisobotlar b
 - Telefon ekraniga mos, qisqa va zich yozing. Jadval faqat 2-4 ustunli qisqa solishtirish uchun; boshqa hollarda oddiy qatorlar. Ajratuvchi chiziqlar (---) va ko'p pog'onali sarlavhalar kerak emas.
 - Pul: katta summalar ixcham yoziladi (26,7 mlrd so'm; 1,24 mln so'm; 3 784 USD), har doim valyutasi bilan. Aniq raqam so'ralsa to'liq yozing.
 - Salom, rahmat, "ishlayapsanmi?" kabi oddiy gaplarga tool chaqirmasdan bir-ikki jumla bilan xushmuomala javob bering.
-- Javobga o'ylash jarayoni, o'z-o'zini tuzatish ("... yo'q, aslida ...") va tool nomlari yozilmaydi — faqat tekshirilgan, tayyor natija.
+- Javobga o'ylash jarayoni, o'z-o'zini tuzatish ("... yo'q, aslida ...") va tool nomlari yozilmaydi — faqat tekshirilgan, tayyor natija. Texnik belgilar ham yozilmaydi: model va maydon nomlari, "company_id = 1" kabi filtrlar, yozuvlarning ID raqamlari (bo'lim yoki kompaniya nomi yonida qavsda ID bermang — qavsdagi son foydalanuvchiga "nechta" bo'lib ko'rinadi).
 
 # RO'YXATLAR VA FAYLLAR
 - 10 tagacha qatorli ro'yxat to'g'ridan-to'g'ri chatda yoziladi.
-- Uzunroq ro'yxat chatga to'kilmaydi. Jami sonini ayting va so'rang: "Jami N ta yozuv topildi. Qaysi formatda tayyorlab beray: Excel, HTML yoki matn (shu chatda)?" Foydalanuvchi formatni oldindan aytgan bo'lsa — so'ramasdan o'sha formatda bering.
+- Uzunroq ro'yxat chatga to'kilmaydi va fayl ham so'ramasdan yaratilmaydi: jami sonini ayting va formatni so'rang. Savol yozuvlar soniga bog'liq:
+  - 30 tadan ko'p yozuv — faqat fayl taklif qilinadi: "Jami N ta yozuv topildi. Excel yoki HTML qilib beraymi?" Bunday uzun ro'yxat uchun "matn" yoki "shu chatda" variantini tilga olmang (foydalanuvchi o'zi "matn qilib ber", "shu yerga yoz" desa — export_text bilan beriladi).
+  - 11-30 ta yozuv — "Jami N ta yozuv topildi. Qaysi formatda tayyorlab beray: Excel, HTML yoki matn (shu chatda)?"
+- Foydalanuvchi formatni savolning o'zida aytgan bo'lsa (excel, html, pdf, word, matn) — so'ramasdan o'sha formatda bering.
 - Format taklifi faqat ro'yxatni bitta model va filtr bilan eksport qilish mumkin bo'lganda beriladi. Hisoblab chiqarilgan natija (reyting, odoo_compare solishtiruvi) uchun eng muhim 10-15 qatorni chatda yozing.
 - Ro'yxat "... bo'yicha ajratib", "guruhlab", "bo'limlar kesimida" so'ralsa — fayl va matn tool'lariga group_by bering (xodimlar uchun department_id, buyurtmalar uchun user_id yoki partner_id): har guruh o'z sarlavhasi ostida chiqadi. Bunday ro'yxat uzun bo'lsa, chatda guruhlar bo'yicha sonlarni qisqa yozing (qaysi guruhda nechta) va to'liq ro'yxat uchun format so'rang. Saralash kerak bo'lsa — order.
-- Savolda format so'zi aniq aytilgan bo'lsa — qaysi tool chaqirilishi majburiy va bir ma'noli: excel/xlsx → export_excel; html → generate_html_report yoki mos generate_*_report; word/docx → export_word; pdf → export_pdf; csv → export_csv; "matn", "shu yerga yoz" → export_text (to'liq ro'yxatni bot o'zi yuboradi — siz qayta yozmang, bir jumla yozing). Boshqa hech narsa (oldingi javoblar, xotiradagi so'rovlar, "qulayroq" tuyulgan format) bu tanlovni o'zgartirmaydi — savolda "html" deyilgan bo'lsa natija HAR DOIM .html, "excel" deyilgan bo'lsa HAR DOIM .xlsx bo'ladi.
+- excel → export_excel; html → generate_html_report yoki mos generate_*_report; word / pdf / csv → export_word / export_pdf / export_csv; "matn", "shu yerga yoz" → export_text (to'liq ro'yxatni bot o'zi yuboradi — siz qayta yozmang, bir jumla yozing).
 - Grafik, dinamika, "statistika", "hisobot", "dashboard" so'ralsa so'ramasdan mos generate_* toolini chaqiring: kompaniya bo'yicha umumiy → generate_company_report; sotuv → generate_sales_report; fakturalar → generate_invoice_report; vazifalar → generate_task_report; bitta model jadvali → generate_html_report. Bitta so'rovga bitta hisobot.
-- Fayl yaratilganda javob shunday: "Hisobot tayyorlandi: {tool qaytargan havola}" — faylni bot o'zi biriktiradi.
+- Fayl yaratilganda javob shunday: "Hisobot tayyorlandi: {tool natijasidagi havola (url)}" — faylni bot o'zi biriktiradi. Fayldagi yozuvlar sonini aytsangiz, uni tool natijasidan oling (rows_in_file) — oldingi javobdagi sonni takrorlamang; u oldin aytilgan sondan farq qilsa, sababini bir jumlada ayting.
 - Fayl faqat so'ralganda yoki uzun ro'yxat uchun yaratiladi. Tahlil savoliga fayl bilan emas, javob bilan javob bering.
 
 # ODOO BILAN ISHLASH
@@ -483,6 +489,22 @@ def _collect_text_exports(raw: str, found: list[str]) -> None:
             found.append(text)
 
 
+def _list_rows_from(raw: str) -> int | None:
+    """Eksport tool'i natijasidagi yozuvlar soni (bazadagi jami; bo'lmasa fayl/matndagi)."""
+    if '"rows_' not in raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    for key in ("rows_total", "rows_in_file", "rows_shown"):
+        if isinstance(parsed.get(key), int):
+            return parsed[key]
+    return None
+
+
 def _is_error_result(raw: str) -> bool:
     if not raw.startswith('{"error"'):
         return False
@@ -592,6 +614,44 @@ def _fix_mixed_script(text: str) -> str:
     return _MIXED_SCRIPT_RE.sub(repair, text)
 
 
+# Bundan uzun ro'yxat "shu chatda matn" qilib taklif qilinmaydi — faqat Excel yoki HTML
+TEXT_OFFER_MAX_ROWS = 30
+_COUNT_IN_ANSWER_RE = re.compile(r"(\d[\d \u00a0\u202f]*)\s*ta\b")
+_TEXT_OFFER_QUESTION_RE = re.compile(
+    r"[^.!?\n]*\bexcel\b[^.!?\n]*\bhtml\b[^.!?\n]*(?:\bmatn\b|shu chatda)[^.!?\n]*\?", re.IGNORECASE)
+
+
+def rows_in_answer(text: str) -> int | None:
+    """Javobda aytilgan eng katta "N ta" soni — format so'ralayotgan ro'yxatning uzunligi
+    ("Jami 132 ta yozuv topildi", "132 ta xodim: Savdo 9 ta, ...")."""
+    counts = [int(digits) for digits in (re.sub(r"\D", "", m) for m in _COUNT_IN_ANSWER_RE.findall(text or ""))
+              if digits]
+    return max(counts) if counts else None
+
+
+def _long_list_question(answer: str) -> str:
+    """30 tadan uzun ro'yxat uchun format savolidan "matn (shu chatda)" variantini olib tashlaydi.
+    Ko'rsatmada bu aytilgan, lekin jonli sinovda model 132 ta yozuv uchun ham uch variantni
+    taklif qilgan — shuning uchun qoida shu yerda ham ta'minlanadi."""
+    question = _TEXT_OFFER_QUESTION_RE.search(answer)
+    rows = rows_in_answer(answer)
+    if not question or rows is None or rows <= TEXT_OFFER_MAX_ROWS:
+        return answer
+    sentence = question.group(0)
+    lead = sentence[:len(sentence) - len(sentence.lstrip())]
+    return answer[:question.start()] + lead + "Excel yoki HTML qilib beraymi?" + answer[question.end():]
+
+
+_COMPANY_NAME_RE = re.compile(r"\b(?:Dunyabunya|DUNYABUNYA|DunyaBunya)\b")
+_TECHNICAL_NOTE_RE = re.compile(r"\s*\((?:company_id|id)\s*=\s*\d+\)")
+
+
+def _tidy_answer(answer: str) -> str:
+    """Kompaniya nomi gap boshida ham kichik harf bilan qoladi; "(company_id=1)" kabi texnik izoh
+    javobdan olinadi — ko'rsatmada aytilgan, lekin model ba'zan yozib yuboradi."""
+    return _TECHNICAL_NOTE_RE.sub("", _COMPANY_NAME_RE.sub("dunyabunya", answer))
+
+
 def _final_text(content) -> str:
     """Javob matni: oxirgi tool chaqiruvidan KEYIN yozilgan matn bloklari. Tool chaqiruvidan
     oldingi izohlar ("avval sotuvni ko'raman...") javobga kirmaydi."""
@@ -648,20 +708,9 @@ def _dynamic_context(who: agent_context.Actor, *, in_group: bool, scheduled: boo
     notes = agent_memory.render(who.memory_owner)
     if notes:
         lines.append("Eslab qolingan qaydlar (foydalanuvchi aytgan afzallik va faktlar — hisobga oling):\n" + notes)
-    recent = _recent_work.get(who.user_key, ())
-    for question, calls in recent:
-        lines.append(f"Oldingi savol \"{question}\" uchun ishlatilgan so'rovlar (davom savolida — \"shuni "
-                     "excelda ber\" kabi — shu model va filtrlardan foydalaning):\n"
-                     + "\n".join(f"- {c}" for c in calls))
-    if recent:
-        # Jonli sinovda ko'rilgan xato: bir xil savol ketma-ket bir necha marta yuborilganda bu
-        # tarix turlicha tool bilan javob berilgan holatlarni ko'rsatib, modelni adashtirib qo'ygan
-        # (masalan "html ko'rinishida ber" so'ralgan-u, oldingi urinishlar orasida matn/excel ham
-        # bo'lgani uchun, joriy so'rovga ham excel bilan javob berilgan). Shuning uchun: joriy
-        # savolning o'zida format aniq aytilgan bo'lsa (excel/html/pdf/word/csv/matn), yuqoridagi
-        # tarix e'tiborga olinmaydi — faqat JORIY savoldagi so'z hal qiladi.
-        lines.append("Joriy savolning o'zida format so'zi (excel/html/pdf/word/csv/matn) bo'lsa — "
-                     "yuqoridagi tarixga qaramasdan FAQAT shu so'zga mos tool chaqiriladi.")
+    for question, calls in _recent_work.get(who.user_key, ()):
+        lines.append(f"Oldingi savol \"{question}\" uchun ishlatilgan so'rovlar (davom savolida shu model va "
+                     "filtrlardan foydalaning):\n" + "\n".join(f"- {c}" for c in calls))
     return "JORIY HOLAT\n" + "\n".join(lines)
 
 
@@ -731,13 +780,14 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
     yaratuvchi tool'larsiz).
 
     `on_tool_start`: model BIRINCHI marta tool so'raganda (ya'ni haqiqatan ma'lumot
-    qidirish boshlanganda) bir marta chaqiriladi — chaqiruvchi "so'rovingiz
-    tayyorlanmoqda" xabarini shu yerda yuboradi. Oddiy suhbatda (model tool'siz
-    darhol javob bersa) umuman chaqirilmaydi.
+    qidirish boshlanganda) bir marta chaqiriladi; oddiy suhbatda (model tool'siz darhol
+    javob bersa) umuman chaqirilmaydi. Telegram tomonda hozir ishlatilmaydi — kutish
+    xabari o'rniga "yozmoqda..." indikatori turadi (delivery.typing).
     """
     found_files: dict[str, FileOut] = {}
     found_texts: list[str] = []
     task_ids: list[int] = []
+    list_rows: int | None = None
     work: list[tuple[str, dict]] = []
     odoo_failure: dict | None = None
     notified = False
@@ -901,6 +951,9 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
             _collect_report_files(r, found_files)
             _collect_text_exports(r, found_texts)
             task_ids.extend(_task_ids_from(b.name, r))
+            rows_in_result = _list_rows_from(r)
+            if rows_in_result is not None:
+                list_rows = rows_in_result
             work.append((b.name, b.input))
             if b.name in FILE_TOOLS:
                 file_tool_results.append((b.name, r))
@@ -927,7 +980,7 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
         answer = ("Kechirasiz, bu so'rovga javob tayyorlab bo'lmadi. Savolni qisqaroq yoki aniqroq qilib "
                   "qayta yozib ko'ring.")
 
-    answer = _fix_mixed_script(answer)
+    answer = _long_list_question(_tidy_answer(_fix_mixed_script(answer)))
     # Model matnida ham fayl havolasi bo'lishi mumkin — tekshirib olamiz
     _collect_report_files(answer, found_files)
 
@@ -957,6 +1010,7 @@ async def ask_with_files(telegram_user_id: int, question: str, role: Role = Role
         text=answer, files=list(found_files.values()), file_error=file_error, texts=found_texts,
         odoo_error=odoo_failure["odoo_connection"] if odoo_failure else None, task_ids=task_ids,
         used_data=any(name not in _NON_DATA_TOOLS for name, _args in work),
+        list_rows=list_rows,
     )
 
 
