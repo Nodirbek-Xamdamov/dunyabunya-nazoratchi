@@ -285,7 +285,7 @@ Foydalanuvchi nima so'rasa, o'shani oxirigacha bajarish. Siz tayyor hisobotlar b
 - Uzunroq ro'yxat chatga to'kilmaydi. Jami sonini ayting va so'rang: "Jami N ta yozuv topildi. Qaysi formatda tayyorlab beray: Excel, HTML yoki matn (shu chatda)?" Foydalanuvchi formatni oldindan aytgan bo'lsa — so'ramasdan o'sha formatda bering.
 - Format taklifi faqat ro'yxatni bitta model va filtr bilan eksport qilish mumkin bo'lganda beriladi. Hisoblab chiqarilgan natija (reyting, odoo_compare solishtiruvi) uchun eng muhim 10-15 qatorni chatda yozing.
 - Ro'yxat "... bo'yicha ajratib", "guruhlab", "bo'limlar kesimida" so'ralsa — fayl va matn tool'lariga group_by bering (xodimlar uchun department_id, buyurtmalar uchun user_id yoki partner_id): har guruh o'z sarlavhasi ostida chiqadi. Bunday ro'yxat uzun bo'lsa, chatda guruhlar bo'yicha sonlarni qisqa yozing (qaysi guruhda nechta) va to'liq ro'yxat uchun format so'rang. Saralash kerak bo'lsa — order.
-- excel → export_excel; html → generate_html_report yoki mos generate_*_report; word / pdf / csv → export_word / export_pdf / export_csv; "matn", "shu yerga yoz" → export_text (to'liq ro'yxatni bot o'zi yuboradi — siz qayta yozmang, bir jumla yozing).
+- Savolda format so'zi aniq aytilgan bo'lsa — qaysi tool chaqirilishi majburiy va bir ma'noli: excel/xlsx → export_excel; html → generate_html_report yoki mos generate_*_report; word/docx → export_word; pdf → export_pdf; csv → export_csv; "matn", "shu yerga yoz" → export_text (to'liq ro'yxatni bot o'zi yuboradi — siz qayta yozmang, bir jumla yozing). Boshqa hech narsa (oldingi javoblar, xotiradagi so'rovlar, "qulayroq" tuyulgan format) bu tanlovni o'zgartirmaydi — savolda "html" deyilgan bo'lsa natija HAR DOIM .html, "excel" deyilgan bo'lsa HAR DOIM .xlsx bo'ladi.
 - Grafik, dinamika, "statistika", "hisobot", "dashboard" so'ralsa so'ramasdan mos generate_* toolini chaqiring: kompaniya bo'yicha umumiy → generate_company_report; sotuv → generate_sales_report; fakturalar → generate_invoice_report; vazifalar → generate_task_report; bitta model jadvali → generate_html_report. Bitta so'rovga bitta hisobot.
 - Fayl yaratilganda javob shunday: "Hisobot tayyorlandi: {tool qaytargan havola}" — faylni bot o'zi biriktiradi.
 - Fayl faqat so'ralganda yoki uzun ro'yxat uchun yaratiladi. Tahlil savoliga fayl bilan emas, javob bilan javob bering.
@@ -648,9 +648,20 @@ def _dynamic_context(who: agent_context.Actor, *, in_group: bool, scheduled: boo
     notes = agent_memory.render(who.memory_owner)
     if notes:
         lines.append("Eslab qolingan qaydlar (foydalanuvchi aytgan afzallik va faktlar — hisobga oling):\n" + notes)
-    for question, calls in _recent_work.get(who.user_key, ()):
-        lines.append(f"Oldingi savol \"{question}\" uchun ishlatilgan so'rovlar (davom savolida shu model va "
-                     "filtrlardan foydalaning):\n" + "\n".join(f"- {c}" for c in calls))
+    recent = _recent_work.get(who.user_key, ())
+    for question, calls in recent:
+        lines.append(f"Oldingi savol \"{question}\" uchun ishlatilgan so'rovlar (davom savolida — \"shuni "
+                     "excelda ber\" kabi — shu model va filtrlardan foydalaning):\n"
+                     + "\n".join(f"- {c}" for c in calls))
+    if recent:
+        # Jonli sinovda ko'rilgan xato: bir xil savol ketma-ket bir necha marta yuborilganda bu
+        # tarix turlicha tool bilan javob berilgan holatlarni ko'rsatib, modelni adashtirib qo'ygan
+        # (masalan "html ko'rinishida ber" so'ralgan-u, oldingi urinishlar orasida matn/excel ham
+        # bo'lgani uchun, joriy so'rovga ham excel bilan javob berilgan). Shuning uchun: joriy
+        # savolning o'zida format aniq aytilgan bo'lsa (excel/html/pdf/word/csv/matn), yuqoridagi
+        # tarix e'tiborga olinmaydi — faqat JORIY savoldagi so'z hal qiladi.
+        lines.append("Joriy savolning o'zida format so'zi (excel/html/pdf/word/csv/matn) bo'lsa — "
+                     "yuqoridagi tarixga qaramasdan FAQAT shu so'zga mos tool chaqiriladi.")
     return "JORIY HOLAT\n" + "\n".join(lines)
 
 

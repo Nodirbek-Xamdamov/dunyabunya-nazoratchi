@@ -372,15 +372,13 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
 
     request = format_request(fmt)
 
+    # Fayl tool'i majburlangani uchun odatda 1-2 soniyada tayyor bo'ladi — alohida
+    # "Tayyorlanmoqda..." xabari foydalanuvchi buni ko'rguncha allaqachon eskirib, keyin
+    # o'chirilib ketadigan ortiqcha xabar bo'lardi; "typing" indikatori yetarli.
     try:
         await bot.send_chat_action(chat_id=chat_id, action="typing", message_thread_id=thread_id)
-        working = await bot.send_message(
-            chat_id=chat_id, message_thread_id=thread_id,
-            text="⏳ Tayyorlanmoqda... biroz kuting",
-        )
     except Exception as e:
         log.warning("fmt callback prep failed: %s", e)
-        working = None
 
     try:
         # Ko'rsatma savolga qo'shilib emas, system prompt'ga tizim ko'rsatmasi
@@ -403,13 +401,6 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
         except Exception:
             pass
         return
-
-    # "Tayyorlanmoqda..." xabarini o'chirib, natijani yuboramiz
-    if working is not None:
-        try:
-            await working.delete()
-        except Exception:
-            pass
 
     # Fayl yuborilgach — shu ma'lumotni chatda matn qilib olish taklifi ham beriladi
     follow_up = None
