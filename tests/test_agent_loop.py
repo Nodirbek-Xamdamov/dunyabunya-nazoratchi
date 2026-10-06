@@ -126,11 +126,15 @@ async def test_error_results_are_flagged_and_created_tasks_are_reported(agent):
     assert result.task_ids == [175]
 
 
-def test_large_floats_are_grouped_so_the_model_cannot_drop_digits():
-    """Sinovda model 22043045.11 ni "22 045" deb o'qigan."""
-    raw = assistant._serialize_tool_result({"jami": 22043045.11, "id": 97551, "soni": 13313,
-                                            "kurs": 8.442380751371887e-05, "narx": 5.6013329999999995})
-    assert json.loads(raw) == {"jami": "22 043 045.11", "id": 97551, "soni": 13313, "kurs": 8.44238e-05, "narx": 5.6}
+def test_large_floats_carry_a_ready_compact_form_so_the_model_cannot_misread_them():
+    """Sinovda model 22043045.11 ni ikki marta "22 ming" deb o'qigan."""
+    raw = assistant._serialize_tool_result({
+        "jami": 22043045.11, "sotuv": 26674071239.71, "qoldiq": 829500.0, "manfiy": -193900000.0,
+        "id": 97551, "soni": 13313, "kurs": 8.442380751371887e-05, "narx": 5.6013329999999995})
+    assert json.loads(raw) == {
+        "jami": "22 043 045.11 (22,04 mln)", "sotuv": "26 674 071 239.71 (26,67 mlrd)",
+        "qoldiq": "829 500 (829,5 ming)", "manfiy": "-193 900 000 (-193,90 mln)",
+        "id": 97551, "soni": 13313, "kurs": 8.44238e-05, "narx": 5.6}
 
 
 def test_oversized_grouped_result_is_cut_by_whole_rows(monkeypatch):

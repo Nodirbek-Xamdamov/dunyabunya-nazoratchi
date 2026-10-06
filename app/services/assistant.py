@@ -268,7 +268,7 @@ Foydalanuvchi nima so'rasa, o'shani oxirigacha bajarish. Siz tayyor hisobotlar b
 - Ma'lumot topilmasa: nima qidirilgani va nima topilmagani aniq aytiladi.
 - Tahlil, sabab va tavsiya — sizning xulosangiz. Ularni raqamlarga tayanib yozing va faktdan ajratib ko'rsating ("Raqamlarga ko'ra ...", "Tavsiya: ...").
 - Til, matematika, biznes amaliyoti kabi umumiy bilim savollariga o'z bilimingiz bilan javob bering. Bugungi kunga bog'liq tashqi ma'lumot kerak bo'lsa web_search chaqiring. Internetdan topilganini foydalanuvchi tilida, o'z so'zingiz bilan ravon yozing (manba matnini ko'chirmang) va manba nomini qavs ichida qisqa ko'rsating. Kompaniyaning ichki ma'lumotini internetdan qidirmang.
-- Tool natijalarida katta sonlar o'qish oson bo'lishi uchun xonalari ajratib berilgan ("22 043 045.11" — yigirma ikki million). Sonni yozishdan oldin xonalarini sanang: ming, million va milliardni adashtirmang.
+- Tool natijalarida katta sonlar xonalari ajratilgan holda va qavs ichida tayyor ixcham ko'rinishi bilan beriladi: "22 043 045.11 (22,04 mln)". Javobda aynan shu ixcham ko'rinishni ishlating — ming, million va milliardni adashtirmang.
 
 # JAVOB USLUBI
 - Foydalanuvchi qaysi tilda yozsa, shu tilda javob bering. O'zbekcha javob lotin yozuvida bo'ladi (savol kirillda yozilgan bo'lsa ham); bitta so'z ichida lotin va kirill harflari aralashtirilmaydi.
@@ -298,6 +298,7 @@ Qoidalar:
 - "Nega o'zgardi?", "kim ketib qoldi?", "nima hisobiga o'sdi?" — odoo_compare (mijoz, mahsulot, sotuvchi kesimida).
 - Notanish soha so'ralsa: odoo_models bilan modelni toping, odoo_fields bilan maydonlarini ko'ring, keyin so'rang. Model "yo'q" deb xato bersa — modul o'rnatilmagan bo'lishi mumkin: odoo_models bilan tekshirib, shuni ayting. O'rnatilgan modullar ro'yxati: ir.module.module (state = installed, application = true).
 - Valyuta: hujjatlar so'm (UZS) va dollar (USD) da yuritiladi. Turli valyutadagi summalar qo'shilmaydi: currency_id bo'yicha guruhlang va alohida ko'rsating. Kompaniyaning hisob valyutasi — USD: "_signed" bilan tugaydigan maydonlar, standard_price, stock.valuation.layer qiymatlari va buxgalteriya qoldiqlari (balance, debit, credit) USD'da.
+- Sananing bir qismi bo'yicha filtr (oy, kun, yil): maydon nomiga ".month_number", ".day_of_month" yoki ".year_number" qo'shing. Masalan shu oyda tug'ilganlar: [["birthday.month_number", "=", 10]]. Butun ro'yxatni o'qib, kerakli oyni o'zingiz ajratmang.
 - Sana va vaqt: hammasi Toshkent vaqtida. Filtrga sanani "YYYY-MM-DD" ko'rinishida yozing — tool chegaralarni o'zi to'g'rilaydi. To'liq bo'lmagan davrni (joriy oy) to'liq davr bilan solishtirganda teng kunlarni oling yoki farqni izohlang.
 - Bazada 3 ta kompaniya bor: dunyabunya® (asosiy), dunyabunya logistika, dunyabunya qahvaxona. Alohida so'ralmasa hammasi birga hisoblanadi; kerak bo'lsa company_id bo'yicha ajrating.
 
@@ -305,7 +306,7 @@ Asosiy modellar va maydonlari (~ belgili maydon saqlanmaydi: o'qish mumkin, guru
 - sale.order — sotuv buyurtmasi: name, partner_id, user_id (sotuvchi), date_order, amount_total, margin, currency_id, state [draft, sent, sale = tasdiqlangan, cancel]
 - sale.order.line — buyurtma qatori: order_id, product_id, product_uom_qty, price_unit, price_subtotal, margin, purchase_price (tannarx), salesman_id, order_partner_id; filtr uchun: order_id.state, order_id.date_order
 - pos.order — savdo nuqtasi (kassa) cheklari: name, partner_id, user_id, date_order, amount_total, state [paid, done, invoiced = yakunlangan; cancel]. "Sotuv" deganda sale.order tushuniladi; kassa savdosi alohida so'ralsa yoki "barcha savdo" deyilsa buni ham qo'shing.
-- purchase.order — xarid buyurtmasi: name, partner_id (ta'minotchi), user_id, date_order, date_approve, amount_total, currency_id, state [draft, sent, to approve, purchase = tasdiqlangan, done, cancel]; qatorlari — purchase.order.line (order_id, product_id, product_qty, qty_received, price_unit, price_subtotal)
+- purchase.order — xarid buyurtmasi: name, partner_id (ta'minotchi), user_id, date_order, date_approve, amount_total, currency_id, state [draft, sent, to approve, purchase, done, cancel]. Tasdiqlangan xaridlar: state in [purchase, done] — "done" yopilgan buyurtma, xaridlarning katta qismi shu holatda, uni tashlab ketmang; qatorlari — purchase.order.line (order_id, product_id, product_qty, qty_received, price_unit, price_subtotal)
 - account.move — buxgalteriya hujjati: name, partner_id, invoice_date, invoice_date_due, amount_total, amount_residual (to'lanmagan qoldiq), currency_id, invoice_user_id, payment_state, state [draft, posted, cancel], move_type [out_invoice = mijozga hisob, in_invoice = ta'minotchi hisobi, out_refund, in_refund, entry]
 - account.move.line — o'tkazma qatori: move_id, account_id, partner_id, product_id, date, debit, credit, balance, parent_state [posted]; hisoblar — account.account (name, account_type)
 - account.payment — to'lov: name, date, amount, currency_id, partner_id, journal_id, memo, payment_type [inbound = kirim, outbound = chiqim], state [draft, in_process, paid, canceled, rejected]. Amalga oshgan to'lovlar: state in [in_process, paid]; "posted" qiymati yo'q.
@@ -367,15 +368,25 @@ def _role_denial(name: str, args: dict, role: Role) -> str | None:
 _ROW_LIST_KEYS = ("qatorlar", "guruhlar", "fakturalar", "invoices", "maydonlar", "eslatmalar")
 
 
+def _compact(value: float) -> str:
+    """Katta sonning o'qiladigan ko'rinishi: 22043045.11 -> "22,04 mln"."""
+    size = abs(value)
+    for limit, unit, digits in ((1e12, "trln", 2), (1e9, "mlrd", 2), (1e6, "mln", 2)):
+        if size >= limit:
+            return f"{value / limit:.{digits}f}".replace(".", ",") + f" {unit}"
+    return f"{value / 1e3:.1f}".replace(".", ",") + " ming"
+
+
 def _readable_numbers(value):
     """Tool natijasidagi kasr sonlarni model xatosiz o'qiydigan ko'rinishga keltiradi: katta
-    summalar xonalari ajratilgan satr bo'ladi ("22 043 045.11"), qolganlari yaxlitlanadi.
-    Sinovda model 22043045.11 ni "22 045" deb o'qigan — uzun raqamlar ketma-ketligida o'rtadagi
-    xonalar tushib qolgan. Butun sonlar (ID, soni) o'zgarmaydi."""
+    summalar xonalari ajratilgan va yonida tayyor ixcham ko'rinishi bilan beriladi
+    ("22 043 045.11 (22,04 mln)"), qolganlari yaxlitlanadi. Sinovda model 22043045.11 ni ikki
+    marta "22 ming" deb o'qigan — xonalarni o'zi sanashiga to'g'ri kelmasligi kerak.
+    Butun sonlar (ID, soni) o'zgarmaydi."""
     if isinstance(value, float):
         if abs(value) >= 100_000:
             text = f"{value:,.2f}".replace(",", " ")
-            return text[:-3] if text.endswith(".00") else text
+            return f"{text[:-3] if text.endswith('.00') else text} ({_compact(value)})"
         return round(value, 2) if abs(value) >= 1 else float(f"{value:.6g}")
     if isinstance(value, dict):
         return {key: _readable_numbers(item) for key, item in value.items()}
