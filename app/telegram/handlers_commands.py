@@ -26,18 +26,31 @@ router = Router()
 
 HELP_CEO = """<b>dunyabunya yordamchisi</b>
 
-<b>Savol bering</b> — shu chatga yoki guruhning General mavzusiga yozing (ovozli xabar ham bo'ladi):
-• Shu oydagi sotuv qancha?
-• Eng ko'p qarzdor 10 ta mijoz
-• Sement qoldig'i qancha?
+Oddiy gap bilan yozing yoki ovozli xabar yuboring — shu chatda yoki guruhning General mavzusida.
+
+<b>Savol va tahlil</b>
+• Shu oydagi sotuv qancha, o'tgan oyga nisbatan-chi?
+• Eng katta 5 ta qarzdor kim?
+• Sotuv nega tushdi — qaysi mijozlar hisobiga?
+• Rotband qoldig'i qaysi omborlarda?
+• Bugun dollar kursi qancha?
+
+<b>Hisobot va fayllar</b>
 • Xodimlar ro'yxatini Excelda ber
 • Kompaniya statistikasi — grafikli hisobot
+• Rasm, PDF, Excel yoki Word fayl yuboring — o'qib, kerakli ma'lumotni ajratib beraman
 
-Ro'yxat so'ralganda javob ostida Excel / HTML / Matn tugmalari chiqadi.
+<b>Topshiriq va eslatma</b>
+• Sardorga vazifa ber: ertagacha ombor qoldig'ini tekshirsin
+• 123-vazifaning muddatini jumaga sur
+• Ertaga 9 da eslat: bank bilan uchrashuv
+• Har kuni 18:00 da bugungi sotuvni yuborib tur
+• Eslab qol: summalarni doim dollarda ham ko'rsat
 
-<b>Vazifa bering</b> — guruhdagi bo'lim mavzusiga yozing:
-• Sardorga ertagacha ombor qoldig'ini tekshirishni topshir
-Bot vazifani Odoo'ga yozadi va xodimga xabar yuboradi. Noto'g'ri yozilgan bo'lsa — xabar ostidagi «O'chirish» tugmasi.
+<b>Boshqa ishlar</b>
+Xat va e'lon yozish, tarjima, hisob-kitob, maslahat.
+
+Guruhdagi bo'lim mavzusiga yozilgan topshiriq avvalgidek Odoo'ga vazifa bo'lib yoziladi; noto'g'ri yozilgan bo'lsa — xabar ostidagi «O'chirish» tugmasi.
 
 <b>Buyruqlar</b>
 /brifing — bugungi qisqa xulosa
@@ -48,7 +61,9 @@ Bot vazifani Odoo'ga yozadi va xodimga xabar yuboradi. Noto'g'ri yozilgan bo'lsa
 
 HELP_MANAGER = """<b>dunyabunya yordamchisi</b>
 
-Shu chatga o'z bo'limingiz bo'yicha savol yozing (ovozli xabar ham bo'ladi) — masalan ro'yxat, qoldiq yoki hisobot so'rang. Ro'yxat so'ralganda Excel / HTML / Matn tugmalari chiqadi.
+Shu chatga o'z bo'limingiz bo'yicha oddiy gap bilan yozing yoki ovozli xabar yuboring: ro'yxat, qoldiq, yig'indi, solishtirish yoki hisobot so'rang. Uzun ro'yxat uchun Excel / HTML / Matn tugmalari chiqadi. Rasm, PDF, Excel yoki Word fayl yuborsangiz — o'qib beraman.
+
+Eslatma ham qo'ya olasiz: «ertaga 10 da eslat: inventarizatsiya».
 
 <b>Buyruqlar</b>
 /otask &lt;raqam&gt; — o'zingiz yaratgan vazifani o'chirish

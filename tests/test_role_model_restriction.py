@@ -18,6 +18,22 @@ import app.services.assistant as assistant_module
 from app.rbac import Role
 
 
+def _odoo_stub(monkeypatch, rows, *, total=None, fields=("id", "name")):
+    """Odoo o'rniga: maydonlar sxemasi (fields_get), yozuvlar va ularning soni."""
+    seen = []
+
+    async def fake_execute_kw(model, method, args, kwargs=None):
+        seen.append((model, method, args, kwargs or {}))
+        if method == "fields_get":
+            return {f: {"type": "integer" if f == "id" else "char", "string": f, "store": True} for f in fields}
+        if method == "search_count":
+            return len(rows) if total is None else total
+        return rows(kwargs or {}) if callable(rows) else rows
+
+    monkeypatch.setattr(assistant_module._odoo, "execute_kw", fake_execute_kw)
+    return seen
+
+
 async def test_sotuv_cannot_read_finance_model(monkeypatch):
     async def fake_execute_kw(model, method, args, kwargs=None):
         raise AssertionError(f"Odoo'ga chiqilmasligi kerak edi (model={model})")
@@ -34,11 +50,7 @@ async def test_sotuv_cannot_read_finance_model(monkeypatch):
 
 
 async def test_sotuv_can_read_own_model(monkeypatch):
-    async def fake_execute_kw(model, method, args, kwargs=None):
-        assert model == "sale.order"
-        return [{"id": 1, "name": "S00001"}]
-
-    monkeypatch.setattr(assistant_module._odoo, "execute_kw", fake_execute_kw)
+    seen = _odoo_stub(monkeypatch, [{"id": 1, "name": "S00001"}])
 
     raw = await assistant_module._exec_tool(
         "odoo_search_read",
@@ -47,6 +59,7 @@ async def test_sotuv_can_read_own_model(monkeypatch):
     )
     result = json.loads(raw)
     assert result == [{"id": 1, "name": "S00001"}]
+    assert {model for model, *_ in seen} == {"sale.order"}
 
 
 async def test_hr_cannot_read_sales_model(monkeypatch):
@@ -75,10 +88,7 @@ async def test_hr_can_read_employee_model(monkeypatch):
 
 
 async def test_ceo_unrestricted_across_any_model(monkeypatch):
-    async def fake_execute_kw(model, method, args, kwargs=None):
-        return [{"id": 1}]
-
-    monkeypatch.setattr(assistant_module._odoo, "execute_kw", fake_execute_kw)
+    _odoo_stub(monkeypatch, [{"id": 1}])
 
     for model in ("account.move", "sale.order", "hr.employee", "stock.quant"):
         raw = await assistant_module._exec_tool(

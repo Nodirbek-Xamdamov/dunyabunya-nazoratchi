@@ -8,12 +8,17 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 STARTED_AT = time.time()
 
 # main.py o'rnatadi: () -> (sog'lommi, {"polling": ..., "seconds_since_last_poll": ...})
 polling_health: Callable[[], tuple[bool, dict]] | None = None
+
+# main.py o'rnatadi: yordamchi yaratgan vazifa haqida mas'ul xodimga Telegram xabari yuboradi
+# (task_id, title, description, topic_name, odoo_user_id, assignee_name) -> natija matni.
+# None bo'lsa (testlar, skriptlar) xabar yuborilmaydi.
+task_notifier: Callable[..., Awaitable[str]] | None = None
 
 
 def uptime_seconds() -> int:

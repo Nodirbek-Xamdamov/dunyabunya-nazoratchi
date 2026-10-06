@@ -90,14 +90,16 @@ async def test_system_prompt_is_sent_as_a_cached_block_with_instruction_after_it
     monkeypatch.setattr(assistant_module.repo, "get_recent_conversation", fake_get_recent)
     monkeypatch.setattr(assistant_module.repo, "add_conversation_message", fake_add)
     monkeypatch.setattr(assistant_module, "SessionLocal", lambda: _Session())
-    monkeypatch.setattr(assistant_module._client.messages, "create", fake_create)
+    monkeypatch.setattr(assistant_module, "_call_model", fake_create)
 
     await assistant_module.ask_with_files(1, "salom", instruction="Excel qilib bering")
 
-    stable, extra = seen["system"]
+    stable, current, extra = seen["system"]
     # Keshlanadigan blok — har so'rovda bir xil bo'lishi shart bo'lgan qism; o'zgaruvchan
-    # ko'rsatma undan KEYIN turadi (aks holda kesh har so'rovda yangidan yozilardi)
+    # qismlar (sana-vaqt, ko'rsatma) undan KEYIN turadi (aks holda kesh har so'rovda yangidan yozilardi)
     assert stable["cache_control"] == {"type": "ephemeral"} and "XAVFSIZLIK" in stable["text"]
+    assert "cache_control" not in current and "Hozir:" in current["text"]
+    assert "Hozir:" not in stable["text"] and str(metrics._today())[:4] not in stable["text"]
     assert "cache_control" not in extra and "Excel qilib bering" in extra["text"]
     assert "Excel qilib bering" not in stable["text"]
     # Token sarfi hisoblagichlarga tushadi (kesh ulushi /status da ko'rinadi)
@@ -254,7 +256,7 @@ async def test_help_text_depends_on_who_asks(monkeypatch, ceo_user):
 
     ceo = _Message()
     await commands.on_help(ceo)
-    assert "/brifing" in ceo.answers[0] and "Vazifa bering" in ceo.answers[0]
+    assert "/brifing" in ceo.answers[0] and "vazifa ber" in ceo.answers[0] and "eslat" in ceo.answers[0]
 
     employee = _Message(uid=7, username="xodim")
     await commands.on_help(employee)

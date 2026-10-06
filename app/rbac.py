@@ -17,9 +17,10 @@ ROLE_TOOLS: dict[Role, list[str]] = {
     Role.CEO: [
         # Analytics
         "odoo_search_read", "odoo_read_group", "odoo_count",
+        # Faqat CEO: istalgan modelni topish, vazifa amallari, guruh yozishmalari tarixi
+        "odoo_models", "create_task", "update_task", "add_task_comment", "get_group_history",
         "export_excel", "generate_html_report",
         "export_word", "export_pdf", "export_csv", "export_text",
-        "aggregate_data", "growth_dynamics",
         "search_employees_readonly",
         # Extra analytics
         "get_top_debtors", "get_overdue_invoices", "get_cashflow_summary",

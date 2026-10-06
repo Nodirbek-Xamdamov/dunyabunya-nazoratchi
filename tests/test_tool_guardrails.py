@@ -14,6 +14,22 @@ import app.services.odoo_tools as odoo_tools
 from app.rbac import Role
 
 
+def _odoo_stub(monkeypatch, rows, *, total=None, fields=("id", "name")):
+    """Odoo o'rniga: maydonlar sxemasi (fields_get), yozuvlar va ularning soni."""
+    seen = []
+
+    async def fake_execute_kw(model, method, args, kwargs=None):
+        seen.append((model, method, args, kwargs or {}))
+        if method == "fields_get":
+            return {f: {"type": "integer" if f == "id" else "char", "string": f, "store": True} for f in fields}
+        if method == "search_count":
+            return len(rows) if total is None else total
+        return rows(kwargs or {}) if callable(rows) else rows
+
+    monkeypatch.setattr(assistant_module._odoo, "execute_kw", fake_execute_kw)
+    return seen
+
+
 def _forbid_odoo(monkeypatch):
     async def fake_execute_kw(model, method, args, kwargs=None):
         raise AssertionError(f"Odoo'ga chiqilmasligi kerak edi (model={model})")
@@ -58,13 +74,10 @@ async def test_role_none_cannot_run_any_role_tool(monkeypatch):
 
 
 async def test_long_list_result_is_cut_at_row_boundary_with_a_warning(monkeypatch):
-    """Ilgari JSON 8000-belgida shunchaki kesilardi — model yarim ro'yxatni to'liq deb o'ylardi."""
+    """Ilgari JSON shunchaki kesilardi — model yarim ro'yxatni to'liq deb o'ylardi."""
     rows = [{"id": i, "name": f"Xodim {i:04d} " + "x" * 80} for i in range(400)]
 
-    async def fake_execute_kw(model, method, args, kwargs=None):
-        return rows
-
-    monkeypatch.setattr(assistant_module._odoo, "execute_kw", fake_execute_kw)
+    _odoo_stub(monkeypatch, rows)
     raw = await assistant_module._exec_tool(
         "odoo_search_read", {"model": "hr.employee", "domain": [], "fields": ["name"], "limit": 500}, Role.CEO)
 
@@ -75,33 +88,34 @@ async def test_long_list_result_is_cut_at_row_boundary_with_a_warning(monkeypatc
     assert "odoo_count" in result["ogohlantirish"]
 
 
-async def test_search_read_hitting_its_limit_warns_that_more_may_exist(monkeypatch):
-    async def fake_execute_kw(model, method, args, kwargs=None):
-        return [{"id": i} for i in range(kwargs["limit"])]
-
-    monkeypatch.setattr(assistant_module._odoo, "execute_kw", fake_execute_kw)
+async def test_search_read_hitting_its_limit_reports_the_real_total(monkeypatch):
+    """Limit to'lgan natija JAMI son emas — haqiqiy son shu javobning o'zida qaytadi (model
+    "50 ta xodim bor" deb yubormasligi uchun)."""
+    _odoo_stub(monkeypatch, lambda kwargs: [{"id": i} for i in range(kwargs["limit"])], total=180)
     raw = await assistant_module._exec_tool(
         "odoo_search_read", {"model": "hr.employee", "domain": [], "fields": ["id"]}, Role.CEO)
 
     result = json.loads(raw)
-    assert result["korsatilgan"] == 50 and "Limit (50)" in result["ogohlantirish"]
+    assert result["korsatilgan"] == 50 and result["jami"] == 180 and "180" in result["ogohlantirish"]
+
+
+async def test_search_read_exactly_at_limit_is_returned_as_a_plain_list(monkeypatch):
+    _odoo_stub(monkeypatch, lambda kwargs: [{"id": i} for i in range(kwargs["limit"])], total=50)
+    raw = await assistant_module._exec_tool(
+        "odoo_search_read", {"model": "hr.employee", "domain": [], "fields": ["id"]}, Role.CEO)
+    assert len(json.loads(raw)) == 50
 
 
 async def test_read_group_with_two_groups_is_not_lazy(monkeypatch):
-    seen = {}
-
-    async def fake_execute_kw(model, method, args, kwargs=None):
-        seen.update(kwargs or {})
-        return []
-
-    monkeypatch.setattr(assistant_module._odoo, "execute_kw", fake_execute_kw)
+    seen = _odoo_stub(monkeypatch, [], fields=("amount", "currency_id", "payment_type"))
     await assistant_module._exec_tool(
         "odoo_read_group",
-        {"model": "account.payment", "domain": [], "fields": ["amount"],
+        {"model": "account.payment", "domain": [], "fields": ["amount:sum"],
          "group_by": ["currency_id", "payment_type"]},
         Role.CEO,
     )
-    assert seen == {"lazy": False}
+    kwargs = next(kw for _model, method, _args, kw in seen if method == "read_group")
+    assert kwargs["lazy"] is False
 
 
 async def test_history_starting_with_assistant_message_is_trimmed(monkeypatch):
@@ -135,7 +149,7 @@ async def test_history_starting_with_assistant_message_is_trimmed(monkeypatch):
     monkeypatch.setattr(assistant_module.repo, "get_recent_conversation", fake_get_recent)
     monkeypatch.setattr(assistant_module.repo, "add_conversation_message", fake_add)
     monkeypatch.setattr(assistant_module, "SessionLocal", lambda: _FakeSession())
-    monkeypatch.setattr(assistant_module._client.messages, "create", fake_create)
+    monkeypatch.setattr(assistant_module, "_call_model", fake_create)
 
     await assistant_module.ask_with_files(1, "salom")
     assert seen["roles"] == ["user", "assistant", "user"]

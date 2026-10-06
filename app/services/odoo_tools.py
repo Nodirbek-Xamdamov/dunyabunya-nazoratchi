@@ -176,7 +176,7 @@ async def _fields_meta(model: str) -> dict:
     try:
         meta = await _odoo.execute_kw(
             model, "fields_get", [],
-            {"attributes": ["string", "type", "selection", "relation"], "context": _UZ_CTX},
+            {"attributes": ["string", "type", "selection", "relation", "store"], "context": _UZ_CTX},
         )
     except OdooError as e:
         if e.kind:  # Odoo'ga yetib bo'lmadi — chaqiruvchi aniq sababni ko'rsatadi

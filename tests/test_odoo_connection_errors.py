@@ -168,7 +168,7 @@ def _mock_create(monkeypatch, responses):
         idx = len(calls) - 1
         return responses[idx] if idx < len(responses) else responses[-1]
 
-    monkeypatch.setattr(assistant_module._client.messages, "create", AsyncMock(side_effect=fake_create))
+    monkeypatch.setattr(assistant_module, "_call_model", AsyncMock(side_effect=fake_create))
     return calls
 
 

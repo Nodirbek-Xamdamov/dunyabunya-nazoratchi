@@ -157,7 +157,7 @@ async def test_ask_with_files_collects_text_exports(monkeypatch, fake_odoo):
         calls.append(kwargs)
         return responses[len(calls) - 1]
 
-    monkeypatch.setattr(assistant_module._client.messages, "create", fake_create)
+    monkeypatch.setattr(assistant_module, "_call_model", fake_create)
 
     result = await assistant_module.ask_with_files(
         1, "xodimlar ro'yxati", role=Role.CEO, exclude_tools=assistant_module.FILE_TOOLS,

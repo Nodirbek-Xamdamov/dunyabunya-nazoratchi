@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str
     ANTHROPIC_MODEL: str = "claude-opus-5"
     ANTHROPIC_WORKSPACE_ID: str = ""
+    # Yordamchi qanchalik chuqur o'ylashi: low | medium | high | xhigh | max. Yuqoriroq —
+    # murakkab tahlilda aniqroq, lekin sekinroq va qimmatroq. Chat uchun medium ma'qul.
+    ANTHROPIC_EFFORT: str = "medium"
+    # Yordamchi internetdan qidira olishi (valyuta kursi, yangilik, qonunchilik). Har bir
+    # qidiruv Anthropic tomonidan alohida haq olinadi; faqat CEO roli uchun yoqiladi.
+    WEB_SEARCH_ENABLED: bool = True
+    # Bitta savolga yordamchi eng ko'pi bilan nechta qadam (model chaqiruvi) qilishi mumkin
+    AGENT_MAX_STEPS: int = 14
 
     # OpenAI — arzon/tezkor triage+xulosa (chat), Whisper (STT), TTS
     OPENAI_API_KEY: str = ""

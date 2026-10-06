@@ -64,6 +64,19 @@ def _isolated_scheduler_state(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_agent_state(tmp_path, monkeypatch):
+    """Yordamchining xotirasi (qaydlar, eslatmalar) testlarda haqiqiy storage'ga yozilmaydi;
+    jarayon ichidagi holat (o'chirilgan imkoniyatlar, oldingi so'rovlar izi) har testda yangidan."""
+    from app.services import agent_memory, assistant, reminders
+    monkeypatch.setattr(agent_memory, "_PATH", tmp_path / "agent_memory.json")
+    monkeypatch.setattr(agent_memory, "_MEMORY_DIR", tmp_path / "memory")
+    monkeypatch.setattr(reminders, "_PATH", tmp_path / "reminders.json")
+    monkeypatch.setattr(assistant, "_features", {"thinking": True, "web": True})
+    monkeypatch.setattr(assistant, "_recent_work", {})
+    monkeypatch.setattr(assistant, "_recent_attachments", {})
+
+
+@pytest.fixture(autouse=True)
 def _isolated_ceo_state(tmp_path, monkeypatch):
     """ceo_state.is_ceo() CEO tanilganda ID'ni fonda faylga yozadi — testlar
     haqiqiy storage/ceo_state.json'ni ifloslantirmasligi uchun (ilgari
