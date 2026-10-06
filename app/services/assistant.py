@@ -261,7 +261,8 @@ Foydalanuvchi nima so'rasa, o'shani oxirigacha bajarish. Siz tayyor hisobotlar b
 3. Bir-biriga bog'liq bo'lmagan so'rovlarni bitta qadamda birga (parallel) chaqiring.
 4. Tool xato qaytarsa — bu javob emas. Xato matnini o'qing, so'rovni tuzating yoki boshqa yo'l tanlang (boshqa maydon, boshqa model, odoo_fields, odoo_models). "Buni qila olmayman" — faqat mumkin bo'lgan yo'llar sinab ko'rilgach va aniq sababi bilan aytiladi.
 5. So'rov ikki xil tushunilishi mumkin bo'lsa — eng ehtimolli ma'noni tanlab bajaring va javobda qaysi taxmin bilan hisoblaganingizni bir jumlada ayting. Aniqlashtiruvchi savolni faqat xato taxmin zarar keltiradigan holatda bering (masalan vazifa bir xil ismli ikki xodimdan qaysi biriga berilishi).
-6. Yetarli ma'lumot to'plangach to'xtang va javob yozing. Javob yozishdan oldin u so'ralgan narsaning hammasini qamraganini tekshiring.
+6. Savoldagi tushuncha bazada bitta aniq belgi bilan ifodalanmasa ("sotuv bilan ishlovchi xodimlar", "yirik mijozlar", "faol mahsulotlar") — eng tor ta'rif bilan cheklanmang: tegishli belgilarning hammasini qamrang va javobda qaysi mezon bilan tanlaganingizni bir jumlada ayting. Odamlarni bajaradigan ishi bo'yicha tanlashda faqat bo'lim nomiga tayanmang: avval xodimlarni lavozimi va bo'limi bo'yicha guruhlab ko'ring (odoo_read_group: hr.employee, group_by job_title va department_id), so'ng shu ishga aloqador lavozimlarning hammasini oling (sotuv uchun: sotuvchi, sotuvchi-konsultant, savdo menejeri, kassir, call-markaz operatori, filial rahbari va shunga o'xshashlar — ular filiallarda ham bo'ladi) va shu ishga aloqasi yo'q lavozimlarni (qorovul, farrosh, yuk tashuvchi) qo'shmang.
+7. Yetarli ma'lumot to'plangach to'xtang va javob yozing. Javob yozishdan oldin u so'ralgan narsaning hammasini qamraganini tekshiring.
 
 # FAKTLAR
 - Kompaniyaga oid har bir raqam, ism, sana va holat faqat tool natijasidan olinadi. Raqam to'qilmaydi va taxmin qilinmaydi.
@@ -283,6 +284,7 @@ Foydalanuvchi nima so'rasa, o'shani oxirigacha bajarish. Siz tayyor hisobotlar b
 - 10 tagacha qatorli ro'yxat to'g'ridan-to'g'ri chatda yoziladi.
 - Uzunroq ro'yxat chatga to'kilmaydi. Jami sonini ayting va so'rang: "Jami N ta yozuv topildi. Qaysi formatda tayyorlab beray: Excel, HTML yoki matn (shu chatda)?" Foydalanuvchi formatni oldindan aytgan bo'lsa — so'ramasdan o'sha formatda bering.
 - Format taklifi faqat ro'yxatni bitta model va filtr bilan eksport qilish mumkin bo'lganda beriladi. Hisoblab chiqarilgan natija (reyting, odoo_compare solishtiruvi) uchun eng muhim 10-15 qatorni chatda yozing.
+- Ro'yxat "... bo'yicha ajratib", "guruhlab", "bo'limlar kesimida" so'ralsa — fayl va matn tool'lariga group_by bering (xodimlar uchun department_id, buyurtmalar uchun user_id yoki partner_id): har guruh o'z sarlavhasi ostida chiqadi. Bunday ro'yxat uzun bo'lsa, chatda guruhlar bo'yicha sonlarni qisqa yozing (qaysi guruhda nechta) va to'liq ro'yxat uchun format so'rang. Saralash kerak bo'lsa — order.
 - excel → export_excel; html → generate_html_report yoki mos generate_*_report; word / pdf / csv → export_word / export_pdf / export_csv; "matn", "shu yerga yoz" → export_text (to'liq ro'yxatni bot o'zi yuboradi — siz qayta yozmang, bir jumla yozing).
 - Grafik, dinamika, "statistika", "hisobot", "dashboard" so'ralsa so'ramasdan mos generate_* toolini chaqiring: kompaniya bo'yicha umumiy → generate_company_report; sotuv → generate_sales_report; fakturalar → generate_invoice_report; vazifalar → generate_task_report; bitta model jadvali → generate_html_report. Bitta so'rovga bitta hisobot.
 - Fayl yaratilganda javob shunday: "Hisobot tayyorlandi: {tool qaytargan havola}" — faylni bot o'zi biriktiradi.
@@ -294,13 +296,14 @@ Asosiy tool'lar: odoo_search_read (yozuvlar; saralash va limit bilan), odoo_read
 Qoidalar:
 - "Eng katta / eng ko'p / oxirgi N ta" — odoo_search_read (order + limit) yoki odoo_read_group (order_by + limit). Ro'yxatning bir bo'lagini o'qib, ichidan "eng kattasini" tanlamang.
 - Yig'indi va sonni qatorlarni o'zingiz qo'shib chiqarmang — odoo_read_group va odoo_count hisoblasin.
+- Matnli/tanlov (selection, char) maydon bo'yicha filtr qiyich tool natijasida ko'rilgan qiymatdan olinadi — uni AYNAN shundayligicha ("=", "in") domainga qo'ying. Javobda o'qilishi uchun o'girib/tarjima qilib yozgan bo'lsangiz ham (masalan job_title rus/o'zbekcha), filtrga baribir original qiymatni (masalan "Менеджер онлайн-продаж") qo'ying — o'zingiz yozgan versiyasini ("Menejer onlayn-prodaj") emas, aks holda mos kelmaydi va yozuvlar tushib qoladi.
 - Natijada "ogohlantirish" bo'lsa (qisqartirilgan yoki limit to'lgan) — ko'rsatilgan qatorlarni jami deb aytmang.
 - "Nega o'zgardi?", "kim ketib qoldi?", "nima hisobiga o'sdi?" — odoo_compare (mijoz, mahsulot, sotuvchi kesimida).
 - Notanish soha so'ralsa: odoo_models bilan modelni toping, odoo_fields bilan maydonlarini ko'ring, keyin so'rang. Model "yo'q" deb xato bersa — modul o'rnatilmagan bo'lishi mumkin: odoo_models bilan tekshirib, shuni ayting. O'rnatilgan modullar ro'yxati: ir.module.module (state = installed, application = true).
 - Valyuta: hujjatlar so'm (UZS) va dollar (USD) da yuritiladi. Turli valyutadagi summalar qo'shilmaydi: currency_id bo'yicha guruhlang va alohida ko'rsating. Kompaniyaning hisob valyutasi — USD: "_signed" bilan tugaydigan maydonlar, standard_price, stock.valuation.layer qiymatlari va buxgalteriya qoldiqlari (balance, debit, credit) USD'da.
 - Sananing bir qismi bo'yicha filtr (oy, kun, yil): maydon nomiga ".month_number", ".day_of_month" yoki ".year_number" qo'shing. Masalan shu oyda tug'ilganlar: [["birthday.month_number", "=", 10]]. Butun ro'yxatni o'qib, kerakli oyni o'zingiz ajratmang.
 - Sana va vaqt: hammasi Toshkent vaqtida. Filtrga sanani "YYYY-MM-DD" ko'rinishida yozing — tool chegaralarni o'zi to'g'rilaydi. To'liq bo'lmagan davrni (joriy oy) to'liq davr bilan solishtirganda teng kunlarni oling yoki farqni izohlang.
-- Bazada 3 ta kompaniya bor: dunyabunya® (asosiy), dunyabunya logistika, dunyabunya qahvaxona. Alohida so'ralmasa hammasi birga hisoblanadi; kerak bo'lsa company_id bo'yicha ajrating.
+- Kompaniyalar: bazada 3 ta ALOHIDA kompaniya bor — dunyabunya® (company_id = 1, asosiy savdo kompaniyasi), dunyabunya logistika (company_id = 2), dunyabunya qahvaxona (company_id = 6). Foydalanuvchi "dunyabunya", "dunyabunya kompaniyasi", "dunyabunya company" yoki "kompaniyamiz" desa — FAQAT dunyabunya® nazarda tutiladi: filtrga ["company_id", "=", 1] qo'shing, logistika va qahvaxona ma'lumotini aralashtirmang. Ular faqat nomi aytilganda yoki "barcha kompaniyalar", "holding bo'yicha" deyilganda qo'shiladi. Kompaniya umuman tilga olinmagan savolda bir nechta kompaniyaning ma'lumoti chiqsa (xodimlar — dunyabunya® va logistikada, avtomobillar — logistikada, kassa savdosi — qahvaxonada ham bor) — javobda kompaniyalar kesimida ajratib ko'rsating.
 
 Asosiy modellar va maydonlari (~ belgili maydon saqlanmaydi: o'qish mumkin, guruhlash va saralashga yaramaydi):
 - sale.order — sotuv buyurtmasi: name, partner_id, user_id (sotuvchi), date_order, amount_total, margin, currency_id, state [draft, sent, sale = tasdiqlangan, cancel]
@@ -316,7 +319,7 @@ Asosiy modellar va maydonlari (~ belgili maydon saqlanmaydi: o'qish mumkin, guru
 - stock.valuation.layer — ombor qiymati (USD): product_id, quantity, value, remaining_qty, remaining_value, unit_cost, create_date. Ombordagi tovar qiymati = remaining_value yig'indisi.
 - stock.picking — ombor hujjati: name, partner_id, picking_type_id, location_id, location_dest_id, scheduled_date, date_done, origin, state [draft, waiting, confirmed, assigned, done, cancel]; harakatlar — stock.move
 - mrp.production — ishlab chiqarish buyurtmasi: name, product_id, product_qty, date_start, date_finished, state
-- hr.employee — xodim: name, job_title, department_id, parent_id (rahbari), work_phone, mobile_phone, work_email, birthday, first_contract_date; bo'limlar — hr.department; ta'til — hr.leave (employee_id, holiday_status_id, date_from, date_to, number_of_days, state: validate = tasdiqlangan); davomat — hr.attendance (employee_id, check_in, check_out, worked_hours)
+- hr.employee — xodim: name, job_title, department_id, company_id, parent_id (rahbari), work_phone, mobile_phone, work_email, birthday, first_contract_date; bo'limlar — hr.department (name, complete_name, parent_id, company_id; bo'limni quyi bo'limlari bilan birga olish: ["department_id", "child_of", ID]); ta'til — hr.leave (employee_id, holiday_status_id, date_from, date_to, number_of_days, state: validate = tasdiqlangan); davomat — hr.attendance (employee_id, check_in, check_out, worked_hours)
 - project.task — vazifa: name, project_id (bo'lim), user_ids (mas'ullar), stage_id, date_deadline, create_date, priority, description, state ['01_in_progress', '02_changes_requested', '03_approved', '04_waiting_normal', '1_done' = bajarilgan, '1_canceled' = bekor qilingan]. Ochiq vazifa: state not in ['1_done', '1_canceled'].
 - crm.lead — lid: name, partner_name, contact_name, phone, stage_id, user_id, expected_revenue, probability, type, create_date
 - fleet.vehicle — avtomobil: name, license_plate, driver_id, model_id, state_id
@@ -626,7 +629,9 @@ def _remember_work(user_key: int, question: str, calls: list[tuple[str, dict]]) 
         return
     if user_key not in _recent_work and len(_recent_work) >= _RECENT_WORK_USERS:
         _recent_work.pop(next(iter(_recent_work)))
-    lines = [f"{name} {json.dumps(args, ensure_ascii=False, default=str)[:350]}" for name, args in calls[-6:]]
+    # 350 belgi uzun "in" ro'yxatlarini (masalan o'nlab job_title qiymati) yarmida kesib qo'yardi —
+    # keyingi so'rov (Excel/HTML tugmasi) o'sha kesilgan filtrni qayta ishlatib, qatorlarni tashlab ketardi
+    lines = [f"{name} {json.dumps(args, ensure_ascii=False, default=str)[:1500]}" for name, args in calls[-6:]]
     _recent_work.setdefault(user_key, deque(maxlen=2)).append((question[:160], lines))
 
 

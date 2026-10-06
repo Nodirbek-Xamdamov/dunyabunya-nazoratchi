@@ -287,6 +287,52 @@ async def _safe_edit_markup(message: Message | None, markup=None) -> None:
         pass
 
 
+def format_request(fmt: str) -> dict:
+    """Format tugmasi ("excel" / "html" / "text") bosilganda yordamchiga beriladigan qo'shimcha
+    parametrlar: tizim ko'rsatmasi va qaysi tool'lar majburlanishi yoki olib tashlanishi."""
+    if fmt == "text":
+        return {
+            "instruction": (
+                "\n\n📝 Yuqoridagi savol bo'yicha ma'lumotni FAYLSIZ — shu chatning o'zida MATN "
+                "ko'rinishida bering. Yozuvlar ro'yxati/jadvali bo'lsa 'export_text' toolini "
+                "chaqiring (model, domain, fields; guruhlash kerak bo'lsa group_by) — to'liq "
+                "ro'yxatni bot o'zi chatga yuboradi, siz uni qayta yozmang. Statistika yoki "
+                "hisoblangan ko'rsatkichlar bo'lsa — raqamlarni tegishli tool'lar orqali olib, "
+                "barcha ko'rsatkichlarni qisqartirmasdan matn bilan yozing. Format so'ramang, "
+                "fayl yoki havola bermang."
+            ),
+            # Ro'yxatmi yoki hisoblangan ko'rsatkichmi — model o'zi hal qiladi (majburlanmaydi),
+            # lekin fayl yaratuvchi tool'lar unga umuman berilmaydi.
+            "force_tools": None, "tool_choice": None, "exclude_tools": FILE_TOOLS,
+        }
+    if fmt == "excel":
+        return {
+            "instruction": (
+                "\n\n📊 Iltimos, yuqoridagi savol bo'yicha ma'lumotni EXCEL (.xlsx) fayl "
+                "ko'rinishida tayyorlang — 'export_excel' toolini chaqiring (model, domain, "
+                "fields parametrlarini so'rovga mos bering; savolda guruhlash so'ralgan bo'lsa "
+                "group_by). Javobingiz qisqa bo'lsin va fayl havolasini ko'rsating."
+            ),
+            # Model shu safar HAQIQATDA export_excel'ni chaqirishga MAJBUR qilinadi —
+            # aks holda ba'zan faqat matn bilan javob berib, fayl umuman yaratilmasdi.
+            "force_tools": ["export_excel"], "tool_choice": {"type": "tool", "name": "export_excel"},
+            "exclude_tools": None,
+        }
+    return {
+        "instruction": (
+            "\n\n📈 Iltimos, yuqoridagi savol bo'yicha ma'lumotni HTML hisobot "
+            "(jadval + grafiklar) ko'rinishida tayyorlang — 'generate_html_report' (savolda "
+            "guruhlash so'ralgan bo'lsa group_by bilan) yoki tegishli 'generate_*_report' "
+            "toolini chaqiring. Javobingiz qisqa bo'lsin va fayl havolasini ko'rsating."
+        ),
+        # Aynan qaysi generate_*_report savolga mos kelishini model o'zi tanlasin —
+        # lekin ULARDAN BIRINI albatta chaqirishga majbur (tool_choice=any + tor tools ro'yxati)
+        "force_tools": ["generate_html_report", "generate_company_report",
+                        "generate_sales_report", "generate_invoice_report", "generate_task_report"],
+        "tool_choice": {"type": "any"}, "exclude_tools": None,
+    }
+
+
 @router.callback_query(F.data.startswith("fmt:"))
 async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
     """Excel, HTML yoki Matn tugmasi bosilganda — so'rovni shu formatda qayta bajarish."""
@@ -324,47 +370,7 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
     user_key = entry["user_key"]
     group_chat_id = entry["group_chat_id"]
 
-    exclude_tools = None
-    if fmt == "text":
-        instruction = (
-            "\n\n📝 Yuqoridagi savol bo'yicha ma'lumotni FAYLSIZ — shu chatning o'zida MATN "
-            "ko'rinishida bering. Yozuvlar ro'yxati/jadvali bo'lsa 'export_text' toolini "
-            "chaqiring (model, domain, fields; guruhlash kerak bo'lsa group_by) — to'liq "
-            "ro'yxatni bot o'zi chatga yuboradi, siz uni qayta yozmang. Statistika yoki "
-            "hisoblangan ko'rsatkichlar bo'lsa — raqamlarni tegishli tool'lar orqali olib, "
-            "barcha ko'rsatkichlarni qisqartirmasdan matn bilan yozing. Format so'ramang, "
-            "fayl yoki havola bermang."
-        )
-        # Ro'yxatmi yoki hisoblangan ko'rsatkichmi — model o'zi hal qiladi (majburlanmaydi),
-        # lekin fayl yaratuvchi tool'lar unga umuman berilmaydi.
-        force_tools = None
-        forced_choice = None
-        exclude_tools = FILE_TOOLS
-    elif fmt == "excel":
-        instruction = (
-            "\n\n📊 Iltimos, yuqoridagi savol bo'yicha ma'lumotni EXCEL (.xlsx) fayl "
-            "ko'rinishida tayyorlang — 'export_excel' toolini chaqiring (model, domain, "
-            "fields parametrlarini so'rovga mos bering). Javobingiz qisqa bo'lsin va fayl "
-            "havolasini ko'rsating."
-        )
-        # Model shu safar HAQIQATDA export_excel'ni chaqirishga MAJBUR qilinadi —
-        # aks holda ba'zan faqat matn bilan javob berib, fayl umuman yaratilmasdi.
-        force_tools = ["export_excel"]
-        forced_choice = {"type": "tool", "name": "export_excel"}
-    else:
-        instruction = (
-            "\n\n📈 Iltimos, yuqoridagi savol bo'yicha ma'lumotni HTML hisobot "
-            "(jadval + grafiklar) ko'rinishida tayyorlang — 'generate_html_report' yoki "
-            "tegishli 'generate_*_report' toolini chaqiring. Javobingiz qisqa bo'lsin va "
-            "fayl havolasini ko'rsating."
-        )
-        # Aynan qaysi generate_*_report savolga mos kelishini model o'zi tanlasin —
-        # lekin ULARDAN BIRINI albatta chaqirishga majbur (tool_choice=any + tor tools ro'yxati)
-        force_tools = [
-            "generate_html_report", "generate_company_report",
-            "generate_sales_report", "generate_invoice_report", "generate_task_report",
-        ]
-        forced_choice = {"type": "any"}
+    request = format_request(fmt)
 
     try:
         await bot.send_chat_action(chat_id=chat_id, action="typing", message_thread_id=thread_id)
@@ -382,9 +388,7 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
         result = await ask_with_files(
             user_key, question,
             role=role, group_chat_id=group_chat_id,
-            instruction=instruction,
-            force_tools=force_tools, tool_choice=forced_choice,
-            exclude_tools=exclude_tools,
+            **request,
             actor_id=getattr(getattr(callback, "from_user", None), "id", None),
             user_name=getattr(getattr(callback, "from_user", None), "full_name", "") or "",
             chat_id=chat_id, thread_id=thread_id,

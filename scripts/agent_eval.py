@@ -7,6 +7,11 @@ chiqing — avtomatik baho yo'q. Har ishga tushirish API uchun haq to'lanadi (~4
     .\\.venv\\Scripts\\python scripts\\agent_eval.py natija.md                # hamma savollar
     .\\.venv\\Scripts\\python scripts\\agent_eval.py natija.md purchase web   # nomida shu so'zlar borlari
     .\\.venv\\Scripts\\python scripts\\agent_eval.py natija.md --with-writes  # Odoo'ga yozadiganlari ham
+    .\\.venv\\Scripts\\python scripts\\agent_eval.py natija.md --ask "savol" --ask "davom savoli" --format html
+
+`--ask` — tayyor ssenariylar o'rniga o'z savollaringiz (bitta suhbat sifatida); `--format excel|html|text`
+— oxirgi savoldan keyin shu format tugmasi bosilgandek qayta so'raydi. Yaratilgan fayllar natija
+fayli yonidagi `<natija>_files` papkasiga ko'chiriladi.
 
 Odoo faqat o'qiladi; `--with-writes` bilan vazifa yaratish ssenariysi ham bajariladi va yaratilgan
 vazifa oxirida o'chiriladi. Eslatma va qaydlar vaqtinchalik papkaga yoziladi (bot xotirasiga emas).
@@ -129,6 +134,26 @@ def _isolate() -> None:
     assistant._exec_tool = traced
 
 
+def _keep_file(item, out_path: Path) -> str:
+    """Yaratilgan faylni vaqtinchalik papkadan natija yoniga ko'chiradi (ko'rib chiqish uchun)."""
+    import shutil
+
+    folder = out_path.with_name(out_path.stem + "_files")
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / item.filename
+    shutil.copy2(item.path, target)
+    return str(target)
+
+
+async def _ask(uid: int, question: str, role: Role, fmt: str | None):
+    if fmt is None:
+        return await assistant.ask_with_files(uid, question, role=role, user_name="Sinov foydalanuvchisi")
+    from app.telegram import delivery
+
+    return await assistant.ask_with_files(uid, question, role=role, user_name="Sinov foydalanuvchisi",
+                                          **delivery.format_request(fmt))
+
+
 async def _run_case(index: int, case, gate: asyncio.Semaphore, out_path: Path) -> str:
     name, role, turns, _writes = case
     uid = 1000 + index
@@ -138,20 +163,27 @@ async def _run_case(index: int, case, gate: asyncio.Semaphore, out_path: Path) -
         for question in turns:
             before = len(_calls.get(uid, []))
             started = time.monotonic()
+            fmt = None
+            if isinstance(question, tuple):  # (savol, format) — format tugmasi bosilgandek
+                question, fmt = question
             try:
-                result = await assistant.ask_with_files(uid, question, role=role, user_name="Sinov foydalanuvchisi")
+                result = await _ask(uid, question, role, fmt)
             except Exception as e:  # noqa: BLE001
                 lines.append(f"\n**Q:** {question}\n**XATO** {type(e).__name__}: {str(e)[:500]}")
                 continue
             _created_tasks.extend(result.task_ids)
             calls = _calls.get(uid, [])[before:]
-            lines.append(f"\n**Q:** {question}")
+            lines.append(f"\n**Q:** {question}" + (f"   _[{fmt} tugmasi]_" if fmt else ""))
             lines.append(f"_{time.monotonic() - started:.1f}s, {len(calls)} ta tool, fayllar={[f.kind for f in result.files]}, "
                          f"vazifalar={result.task_ids}, odoo_error={result.odoo_error}, file_error={result.file_error}_")
             for tool, args, raw, took in calls:
                 flag = "  **XATO**" if raw.startswith('{"error"') else ""
                 lines.append(f"- `{tool}` {json.dumps(args, ensure_ascii=False)[:260]} -> "
                              f"{raw[:170].replace(chr(10), ' ')}{flag} ({took:.1f}s)")
+            for item in result.files:
+                lines.append(f"- fayl: {_keep_file(item, out_path)}")
+            for block in result.texts:
+                lines.append("\n**Chatga yuborilgan ro'yxat:**\n" + block)
             lines.append("\n**A:** " + result.text.strip())
         text = "\n".join(lines)
         with open(out_path, "a", encoding="utf-8") as f:  # har bir ssenariy tugashi bilan — uzilsa ham saqlanadi
@@ -161,12 +193,25 @@ async def _run_case(index: int, case, gate: asyncio.Semaphore, out_path: Path) -
 
 
 async def main() -> None:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    argv = sys.argv[1:]
+    asked, formats, args = [], [], []
+    while argv:
+        arg = argv.pop(0)
+        if arg == "--ask" and argv:
+            asked.append(argv.pop(0))
+        elif arg == "--format" and argv:
+            formats.append(argv.pop(0))
+        elif not arg.startswith("--"):
+            args.append(arg)
     if not args:
         sys.exit(__doc__)
     out_path, filters = Path(args[0]), args[1:]
     with_writes = "--with-writes" in sys.argv
-    cases = [c for c in CASES if (with_writes or not c[3]) and (not filters or any(f in c[0] for f in filters))]
+    if asked:
+        turns = asked + [(asked[-1], fmt) for fmt in formats]
+        cases = [("savol", CEO, turns, False)]
+    else:
+        cases = [c for c in CASES if (with_writes or not c[3]) and (not filters or any(f in c[0] for f in filters))]
     _isolate()
     out_path.write_text(f"# Yordamchi sinovi — {len(cases)} ta ssenariy, model={assistant.settings.ANTHROPIC_MODEL}, "
                         f"effort={assistant.settings.ANTHROPIC_EFFORT}\n", encoding="utf-8")
