@@ -27,10 +27,18 @@ from app.services.crypto import decrypt, encrypt
 from app.services.errors import friendly_error
 from app.services.llm import analyze_message
 from app.services.odoo import OdooClient
-from app.telegram import delivery, replies
+from app.telegram import attachments, delivery, replies
 from app.telegram.text_extract import get_message_text
 
-_PLAIN_MESSAGE = (F.text & ~F.text.startswith("/")) | F.voice
+_PLAIN_MESSAGE = (F.text & ~F.text.startswith("/")) | F.voice | F.photo | F.document
+
+# Rasm/hujjat izohsiz yuborilganda yordamchiga beriladigan savol
+_NO_CAPTION_QUESTION = ("(Ilova izohsiz yuborildi.) Ilovada nima borligini qisqa ayting va undagi asosiy "
+                        "ma'lumotlarni ajratib bering.")
+# Albom (bir nechta rasm bitta xabar bo'lib yuborilganda Telegram ularni alohida-alohida beradi):
+# media_group_id -> yig'ilayotgan xabarlar
+_albums: dict[str, list[Message]] = {}
+_ALBUM_WAIT_SECONDS = 1.2
 
 _NOT_YOUR_BUTTON = "⚠️ Bu tugma siz uchun emas."
 
@@ -96,6 +104,37 @@ async def _notify_general(bot: Bot, text: str) -> None:
         pass
 
 
+async def _collect_album(message: Message) -> list[Message] | None:
+    """Albomning birinchi xabari kelganda qisqa kutib, barcha qismlarini yig'ib qaytaradi; keyingi
+    qismlar uchun None (ular birinchisi bilan birga qayta ishlanadi). Oddiy xabar — o'zi."""
+    group_id = message.media_group_id
+    if not group_id:
+        return [message]
+    bucket = _albums.get(group_id)
+    if bucket is not None:
+        bucket.append(message)
+        return None
+    _albums[group_id] = [message]
+    await asyncio.sleep(_ALBUM_WAIT_SECONDS)
+    return _albums.pop(group_id, [message])
+
+
+async def _read_attachments(message: Message, bot: Bot) -> tuple[list[dict] | None, str | None, bool]:
+    """Xabardagi rasm/hujjatlarni o'qiydi. Qaytadi: (bloklar, izoh matni, davom etish kerakmi).
+    Ilova bo'lmasa — (None, None, True)."""
+    if not attachments.has_attachment(message):
+        return None, None, True
+    album = await _collect_album(message)
+    if album is None:
+        return None, None, False
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    blocks, problems = await attachments.extract(album, bot)
+    if problems:
+        await message.answer("⚠️ " + "\n".join(problems))
+    caption = next((m.caption for m in album if m.caption), None)
+    return blocks, caption, bool(blocks)
+
+
 async def _answer_with_format_options(message: Message, bot: Bot, question: str,
                                       result, role: Role) -> None:
     """Assistant natijasini yuborish — ma'lumotli savollarga Excel/HTML/Matn tugmalari bilan."""
@@ -104,16 +143,21 @@ async def _answer_with_format_options(message: Message, bot: Bot, question: str,
         chat_id=message.from_user.id, thread_id=None,
         user_key=message.from_user.id, role=role,
     )
-    await delivery.send_result(bot, message.from_user.id, None, result, reply_markup=markup)
+    await delivery.send_result(bot, message.from_user.id, None, result,
+                               reply_markup=markup or delivery.task_keyboard(result))
 
 
-async def _ask_assistant(message: Message, text: str, role: Role):
+async def _ask_assistant(message: Message, text: str, role: Role, attachments: list[dict] | None = None):
     """Yordamchidan javob oladi. "So'rovingiz tayyorlanmoqda" xabari faqat model
-    haqiqatan Odoo'ga murojaat qilganda chiqadi — oddiy suhbatda yuborilmaydi."""
+    haqiqatan ma'lumot qidira boshlaganda chiqadi — oddiy suhbatda yuborilmaydi."""
     async def _notify_working() -> None:
         await message.answer(replies.assistant_thinking_text())
 
-    return await ask_with_files(message.from_user.id, text, role=role, on_tool_start=_notify_working)
+    user = message.from_user
+    return await ask_with_files(
+        user.id, text, role=role, on_tool_start=_notify_working,
+        user_name=user.full_name or "", actor_id=user.id, chat_id=message.chat.id, attachments=attachments,
+    )
 
 
 # ─── /start ─────────────────────────────────────────────────────────────────
@@ -618,7 +662,10 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
             await message.answer("Ro'yxatdan o'tish uchun /start buyrug'ini yuboring.")
         return
 
-    text = await get_message_text(message, bot)
+    blocks, caption, proceed = await _read_attachments(message, bot)
+    if not proceed:
+        return
+    text = (caption or _NO_CAPTION_QUESTION) if blocks else await get_message_text(message, bot)
     if not text:
         if message.voice:
             try:
@@ -630,7 +677,7 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
     # 2) CEO — to'liq yordamchi (barcha bo'limlar)
     if is_ceo:
         try:
-            result = await _ask_assistant(message, text, Role.CEO)
+            result = await _ask_assistant(message, text, Role.CEO, blocks)
         except Exception as e:
             log.exception("on_private_dm_message (CEO): ask_with_files xatosi")
             await message.answer(f"⚠️ Javob tayyorlashda xatolik yuz berdi: {friendly_error(e)}")
@@ -658,7 +705,7 @@ async def on_private_dm_message(message: Message, bot: Bot) -> None:
     role = role_map.get(manager.department, Role.NONE)
 
     try:
-        result = await _ask_assistant(message, text, role)
+        result = await _ask_assistant(message, text, role, blocks)
     except Exception as e:
         log.exception("on_private_dm_message (manager): ask_with_files xatosi")
         await message.answer(f"⚠️ Javob tayyorlashda xatolik yuz berdi: {friendly_error(e)}")

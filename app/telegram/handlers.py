@@ -27,7 +27,7 @@ from app.services.audio_service import synthesize_speech
 from app.services.errors import friendly_error
 from app.services.llm import AnalyzeResult, analyze_message
 from app.services.odoo import OdooClient
-from app.telegram import delivery, replies
+from app.telegram import attachments, delivery, replies
 from app.telegram.text_extract import get_message_text
 
 _GENERAL_CHAT_KEY = settings.TELEGRAM_GROUP_ID
@@ -163,6 +163,21 @@ async def _find_odoo_users(name: str) -> list[dict]:
     return [{**e, "source": "hr.employee"} for e in employees_odoo]
 
 
+async def _attachments_for(message: Message, bot: Bot) -> list[dict] | None:
+    """Guruhdagi savolga ilova qilingan rasm/hujjat — yordamchi ularni ham ko'radi (izohi bor
+    xabarlar uchun; izohsiz rasm guruhda savol hisoblanmaydi)."""
+    if not attachments.has_attachment(message):
+        return None
+    blocks, problems = await attachments.extract([message], bot)
+    if problems:
+        try:
+            await bot.send_message(chat_id=message.chat.id, message_thread_id=message.message_thread_id,
+                                   text="⚠️ " + "\n".join(problems))
+        except Exception:
+            pass
+    return blocks or None
+
+
 async def _notify_general(bot: Bot, text: str) -> None:
     try:
         await bot.send_message(chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=None, text=text)
@@ -273,6 +288,20 @@ async def _notify_assignee_or_warn(bot: Bot, *, task_id: int, title: str, descri
             pass
 
 
+async def notify_task_assignee(bot: Bot, *, task_id: int, title: str, description: str, topic_name: str,
+                               odoo_user_id: int | None, assignee_name: str | None) -> str:
+    """Yordamchi (create_task) yaratgan vazifa haqida mas'ul xodimga ovozli xabar + matn yuboradi.
+    Natijani matn bilan qaytaradi — yordamchi uni rahbarga aytadi (guruhga alohida xabar yozilmaydi)."""
+    emp = await employee_store.get_employee_by_odoo_user_id(odoo_user_id) if odoo_user_id else None
+    if not emp and assignee_name:
+        emp = await employee_store.find_active_employee_by_name(assignee_name)
+    if not emp or not emp.telegram_user_id:
+        return "yuborilmadi: xodim botda ro'yxatdan o'tmagan (/start bosmagan)"
+    sent = await _send_task_to_employee(bot, task_id=task_id, title=title, description=description,
+                                        topic_name=topic_name, telegram_user_id=emp.telegram_user_id)
+    return "yuborildi" if sent else "yuborilmadi: xodim botni bloklagan yoki chatni boshlamagan"
+
+
 async def _save_task_log(*, odoo_task_id: int, odoo_project_id: int, telegram_topic_id: int | None,
                          telegram_message_id: int | None, title: str,
                          created_by_telegram_user_id: int | None) -> None:
@@ -321,7 +350,8 @@ async def on_topic_message(message: Message, bot: Bot) -> None:
             return
         log.info("on_topic: no topic for thread_id=%s, falling back to assistant", message.message_thread_id)
         # Ro'yxatdan o'tmagan mavzu — faqat AI javob (Odoo'ga vazifa YOZILMAYDI)
-        await _assistant_reply(bot, text, thread_id=message.message_thread_id)
+        await _assistant_reply(bot, text, thread_id=message.message_thread_id, user=message.from_user,
+                               attachments=await _attachments_for(message, bot))
         return
 
     # Guruh xabarini saqlash (1 kunlik kontekst)
@@ -358,7 +388,8 @@ async def on_topic_message(message: Message, bot: Bot) -> None:
         # (Vazifa bo'lsa "@kimdir shuni qilsin" ham odatdagidek Odoo'ga yoziladi.)
         if await _is_for_another_user(text, bot):
             return
-        await _assistant_reply(bot, text, thread_id=message.message_thread_id)
+        await _assistant_reply(bot, text, thread_id=message.message_thread_id, user=message.from_user,
+                               attachments=await _attachments_for(message, bot))
         return
 
     # Agar ism aytilgan bo'lsa — hodim tanlash tugmalarini ko'rsatamiz
@@ -686,12 +717,15 @@ async def _finish_task(callback: CallbackQuery, bot: Bot, *, done: bool) -> None
     suffix = "\n\n✅ <b>Bajarildi deb belgilandi</b>" if done else "\n\n❌ <b>Bekor qilindi deb belgilandi</b>"
     await _mark_task_message(callback.message, suffix)
 
-    # Guruh topikiga xabarnoma: task qaysi guruh (chat_id) va mavzudan (message_thread_id)
-    # ochilganini bazadagi task_log jadvalidan aniqlaymiz
+    # Xabarnoma vazifa berilgan joyga boradi: guruh mavzusiga yoki — vazifa yordamchi orqali
+    # shaxsiy chatdan berilgan bo'lsa — o'sha chatga (task_log jadvalidan aniqlanadi)
     async with SessionLocal() as session:
         log_entry = await repo.get_task_log_by_odoo_task_id(session, task_id)
-    if not (log_entry and log_entry.telegram_topic_id):
+    if log_entry is None:
         return
+    from_group = (log_entry.telegram_chat_id or settings.TELEGRAM_GROUP_ID) == settings.TELEGRAM_GROUP_ID
+    if from_group and not log_entry.telegram_topic_id:
+        return  # guruhning umumiy mavzusiga "bajarildi" xabari yozilmaydi
 
     # Xodim ismi: ro'yxatdan o'tgan ism, topilmasa Telegram nomi
     emp = await employee_store.get_employee_by_telegram_id(callback.from_user.id)
@@ -759,7 +793,9 @@ async def on_general_message(message: Message, bot: Bot) -> None:
         return
     # Kontekst saqlash (DB) va assistant javobi bir-biriga bog'liq EMAS — PARALLEL.
     # General topikda faqat assistant javob beradi — task yaratilmaydi.
-    await asyncio.gather(_save_context(), _assistant_reply(bot, text, thread_id=None))
+    await asyncio.gather(_save_context(),
+                         _assistant_reply(bot, text, thread_id=None, user=message.from_user,
+                                          attachments=await _attachments_for(message, bot)))
 
 
 # ─── Boshqa guruhlar ──────────────────────────────────────────────────────
@@ -851,18 +887,22 @@ async def _is_for_another_user(text: str | None, bot: Bot) -> bool:
     return m.group(1).casefold() != bot_username
 
 
-async def _assistant_reply(bot: Bot, text: str, thread_id: int | None = None) -> None:
+async def _assistant_reply(bot: Bot, text: str, thread_id: int | None = None, *,
+                           user=None, attachments: list[dict] | None = None) -> None:
     await bot.send_chat_action(chat_id=settings.TELEGRAM_GROUP_ID, action="typing", message_thread_id=thread_id)
 
     async def _notify_working() -> None:
-        # Faqat model haqiqatan Odoo'ga murojaat qilganda chiqadi — oddiy suhbatda
+        # Faqat model haqiqatan ma'lumot qidira boshlaganda chiqadi — oddiy suhbatda
         # (salom, savol-javob) "tayyorlanmoqda" xabari yuborilmaydi.
         await bot.send_message(chat_id=settings.TELEGRAM_GROUP_ID, message_thread_id=thread_id,
                                text=replies.assistant_thinking_text())
 
     try:
-        result = await ask_with_files(_GENERAL_CHAT_KEY, text, group_chat_id=_GENERAL_CHAT_KEY,
-                                      on_tool_start=_notify_working)
+        result = await ask_with_files(
+            _GENERAL_CHAT_KEY, text, group_chat_id=_GENERAL_CHAT_KEY, on_tool_start=_notify_working,
+            user_name=(user.full_name if user else ""), actor_id=(user.id if user else None),
+            chat_id=settings.TELEGRAM_GROUP_ID, thread_id=thread_id, attachments=attachments,
+        )
     except Exception as e:
         # Ilgari bu yerda xato bo'lsa foydalanuvchi hech qanday javob olmasdan
         # abadiy kutib qolardi.
@@ -875,7 +915,8 @@ async def _assistant_reply(bot: Bot, text: str, thread_id: int | None = None) ->
         scope, text, result, chat_id=settings.TELEGRAM_GROUP_ID, thread_id=thread_id,
         user_key=_GENERAL_CHAT_KEY, group_chat_id=_GENERAL_CHAT_KEY,
     )
-    await delivery.send_result(bot, settings.TELEGRAM_GROUP_ID, thread_id, result, reply_markup=markup)
+    await delivery.send_result(bot, settings.TELEGRAM_GROUP_ID, thread_id, result,
+                               reply_markup=markup or delivery.task_keyboard(result))
 
 
 async def _write_task(bot: Bot, result: AnalyzeResult, odoo_project_id: int,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -23,12 +24,13 @@ from app.services.briefing import start_briefing_scheduler
 from app.services.claude_report import REPORTS_DIR
 from app.services.memory_digest import start_memory_scheduler
 from app.services.monitor import start_monitor
+from app.services.reminders import start_reminders
 from app.services.reports_cleanup import start_reports_cleanup_scheduler
 from app.services.status import is_test_odoo
 from app.services.task_reminders import start_task_reminder_scheduler
 from app.services.topic_check import verify_topic_projects
 from app.telegram.delivery import router as delivery_router
-from app.telegram.handlers import router as group_router
+from app.telegram.handlers import notify_task_assignee, router as group_router
 from app.telegram.handlers_commands import publish_commands, router as commands_router
 from app.telegram.handlers_manager import router as manager_router
 
@@ -216,6 +218,9 @@ def _polling_health() -> tuple[bool, dict]:
     return True, info
 
 
+# Yordamchi yaratgan vazifa haqida mas'ul xodimga xabar yuborish (task_tools shu orqali chaqiradi)
+runtime.task_notifier = functools.partial(notify_task_assignee, bot)
+
 # /status buyrug'i polling holatini shu funksiya orqali oladi (aylanma importsiz)
 runtime.polling_health = lambda: _polling_health()  # noqa: E731 — testlar _polling_health'ni almashtira olishi uchun
 
@@ -234,6 +239,7 @@ async def lifespan(app: FastAPI):
         start_alerts(bot),
         start_monitor(bot),
         start_briefing_scheduler(bot),
+        start_reminders(bot),
         asyncio.create_task(verify_topic_projects()),
         asyncio.create_task(publish_commands(bot)),
     ) if t]

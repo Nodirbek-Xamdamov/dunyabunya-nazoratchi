@@ -137,7 +137,7 @@ def _patch_topic_flow(monkeypatch, called):
     async def fake_get_topic_by_telegram_id(session, thread_id):
         return None  # ro'yxatdan o'tmagan mavzu — assistant javobiga tushadi
 
-    async def fake_assistant_reply(bot, text, thread_id=None):
+    async def fake_assistant_reply(bot, text, thread_id=None, **kwargs):
         called["assistant"] = True
 
     monkeypatch.setattr(handlers, "get_message_text", fake_get_message_text)
@@ -191,7 +191,7 @@ async def test_general_topic_never_calls_analyze_message_or_write_task(monkeypat
     async def fake_write_task(*a, **kw):
         called["write_task"] = True
 
-    async def fake_assistant_reply(bot, text, thread_id=None):
+    async def fake_assistant_reply(bot, text, thread_id=None, **kwargs):
         called["assistant_reply"] = True
 
     async def fake_save_group_message(*a, **kw):
@@ -218,7 +218,7 @@ async def test_general_topic_ignores_non_ceo_sender(monkeypatch):
     tooli, na assistant javobi) ishga tushmasligi kerak."""
     called = {"assistant_reply": False}
 
-    async def fake_assistant_reply(bot, text, thread_id=None):
+    async def fake_assistant_reply(bot, text, thread_id=None, **kwargs):
         called["assistant_reply"] = True
 
     monkeypatch.setattr(handlers, "_assistant_reply", fake_assistant_reply)
@@ -440,7 +440,7 @@ async def test_assistant_reply_odoo_unreachable_shows_reason_without_buttons(mon
 async def test_general_message_addressed_to_another_user_gets_no_reply(monkeypatch):
     called = {"assistant_reply": False, "saved": False}
 
-    async def fake_assistant_reply(bot, text, thread_id=None):
+    async def fake_assistant_reply(bot, text, thread_id=None, **kwargs):
         called["assistant_reply"] = True
 
     async def fake_save_group_message(*a, **kw):

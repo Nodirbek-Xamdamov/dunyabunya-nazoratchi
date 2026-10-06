@@ -130,13 +130,25 @@ def offer_formats(scope: str, question: str, result: AssistantResult, *,
     "Excel" tugmasi bosilganda KEYINGI savolning ma'lumoti kelardi."""
     if result.odoo_error:
         return None
-    wants_table = wants_format_buttons(question) or wants_format_buttons(result.text)
+    # Savoldagi "ro'yxat/jadval" so'zi faqat javob uchun ma'lumot o'qilgan bo'lsa hisobga olinadi —
+    # "xodimlarga xat yoz, ro'yxat bilan" kabi matn ishiga eksport tugmalari qo'yilmaydi
+    wants_table = (wants_format_buttons(question) and getattr(result, "used_data", True)) \
+        or wants_format_buttons(result.text)
     if not wants_table and not result.files:
         return None
     key = f"{scope}-{uuid.uuid4().hex[:8]}"
     remember(key, chat_id=chat_id, thread_id=thread_id, question=question,
              user_key=user_key, role=role, group_chat_id=group_chat_id)
     return format_keyboard(key) if wants_table else text_keyboard(key)
+
+
+def task_keyboard(result: AssistantResult) -> InlineKeyboardMarkup | None:
+    """Yordamchi shu javobda vazifa yaratgan bo'lsa — ostiga "Odoo'da ochish / O'chirish" tugmalari
+    (guruh mavzusida yaratilgan vazifadagi bilan bir xil: xato yozilgan vazifa bir bosishda o'chiriladi)."""
+    if not result.task_ids:
+        return None
+    from app.telegram import replies
+    return replies.created_task_keyboard(result.task_ids[-1])
 
 
 def _clean_stem(filename: str) -> str:
@@ -373,6 +385,9 @@ async def on_format_choice(callback: CallbackQuery, bot: Bot) -> None:
             instruction=instruction,
             force_tools=force_tools, tool_choice=forced_choice,
             exclude_tools=exclude_tools,
+            actor_id=getattr(getattr(callback, "from_user", None), "id", None),
+            user_name=getattr(getattr(callback, "from_user", None), "full_name", "") or "",
+            chat_id=chat_id, thread_id=thread_id,
         )
     except Exception as e:
         log.exception("fmt regeneration failed")
