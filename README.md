@@ -1,5 +1,12 @@
 # dunyabunya CEO agent
 
+<!-- qisqacha -->
+> **Qisqacha.** Rahbar (CEO) uchun Telegram yordamchisi: Odoo'ga ulangan AI agent. Oddiy gap, ovozli xabar, rasm yoki hujjat bilan so'raladi — bot ma'lumotni Odoo'dan topadi, tahlil qiladi, hisobot faylini tayyorlaydi, xodimga vazifa beradi va eslatma qo'yadi.
+>
+> **Texnologiyalar:** Python, Telegram bot, Odoo API, PostgreSQL, Claude + OpenAI
+>
+> **Ishga tushirish:** `python -m app.main` (sozlamalar `.env` da, namuna: `.env.example`)
+
 Rahbar uchun Telegram yordamchisi: kompaniyaning Odoo tizimiga ulangan AI agent. Rahbar oddiy gap
 (yoki ovozli xabar, rasm, hujjat) bilan so'raydi — bot kerakli ma'lumotni Odoo'dan o'zi topadi,
 tahlil qiladi, hisobot faylini tayyorlaydi, xodimga vazifa beradi yoki eslatma qo'yadi.
