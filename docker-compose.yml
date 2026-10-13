@@ -1,0 +1,47 @@
+services:
+  fastapi:
+    build: .
+    image: odoo-telegram:latest
+    container_name: odoo-telegram-fastapi
+    # 2026-08-05, PRODUCTION tayyorlash/tezlashtirish: avval 1 ta (default) worker
+    # bilan ishlar edi -- shu sabab CPU-og'ir amallar (PDF/grafik generatsiyasi,
+    # JSON serializatsiya) BITTA jarayon/BITTA CPU yadrosida navbatlashib bajarilar
+    # edi, qolgan yadrolar bo'sh turgan holda. Server 4 yadroli -- 3 worker tanlandi
+    # (1 yadro bot/userbot/Postgres/boshqa loyihalar uchun bo'sh qoldiriladi, xuddi
+    # shu hostda ishlaydi). Bu xavfsiz: har bir worker mustaqil jarayon, ular hech
+    # qanday umumiy holatga tayanmaydi (odoo_client.py'dagi uid keshi/ServerProxy
+    # HAR BIR worker uchun alohida, Postgres ulanish puli ham shunga mos --
+    # 3 worker x standart SQLAlchemy puli (5+10=15) = ko'pi bilan 45 ulanish,
+    # Postgres'ning max_connections=100'idan ancha kam). Davriy DB tozalash vazifasi
+    # (avval shu yerda `lifespan` orqali ishga tushardi) endi bir nechta workerda
+    # takrorlanib ishlab ketmasligi uchun `app/bot/__init__.py`ga ko'chirilgan --
+    # `app/utils.py`dagi `background_maintenance_loop` izohiga qarang.
+    command: uvicorn app.fastapi_app:app --host 0.0.0.0 --port 8000 --workers 3
+    env_file: .env
+    network_mode: host
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  bot:
+    build: .
+    image: odoo-telegram:latest
+    container_name: odoo-telegram-bot
+    command: python -m app.bot
+    env_file: .env
+    network_mode: host
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  userbot:
+    build: .
+    image: odoo-telegram:latest
+    container_name: odoo-telegram-userbot
+    command: python -m app.userbot
+    env_file: .env
+    network_mode: host
+    volumes:
+      - ./data:/app/data
+      - ./userbot_session.session:/app/userbot_session.session
+    restart: unless-stopped
