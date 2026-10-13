@@ -356,161 +356,140 @@ Ma'lumotni o'ziga saqlab olgach, Odoo shu yozuvlarni sinxronlangan deb belgilash
 | Header | `X-API-Key` |
 | Javob | `list[GroupOrderPollResponse]`: `order_id`, `doc_id`, `group_id`, `poll_id`, `confirm_count`, `reject_count`, `changes_count`, `poll_closed` |
 
-## 4.5. Mijoz guruhlarini kuzatish
+## 4.5. Mijoz guruhlari monitoringi
 
-Bot mijozlar bor guruhlarga (200+) qo'shiladi va fonda har bir xabarni tahlil qiladi.
-Natijalar ichki (xodimlar) forum-guruhiga (`FEEDBACK_HUB_GROUP_ID`, `.env`da
-`CENTRAL_FORUM_CHAT_ID` deb ham yozish mumkin) tushadi. Mijoz guruhlarida bot **jim turadi**:
-reaksiya qo'ymaydi, javob yozmaydi. Yagona istisno -- `GROUP_ALERT_MODE=group` rejimidagi
-javobsiz savol ogohlantirishi (pastda).
+Bot mijozlar bor guruhlarda (~200 ta) **faqat o'qiydi**: hech narsa yozmaydi, reaksiya
+qo'ymaydi, xabarlarni hech qayerga uzatmaydi. Hamma xabar SQLite bazaga yoziladi, model ularni
+tasniflaydi, "5 daqiqa qoidasi" tekshiriladi va har kuni `REPORT_TIME` da (Asia/Tashkent;
+ishlab chiqarishda 00:00, sinov davrida 11:00) Excel hisobot hisobot guruhining "General"
+topigiga yuboriladi.
 
-### Modullar
+```
+guruh xabari -> group_monitor (bazaga yozadi, modelni kutmaydi)
+                    |
+        messages (pending) --> monitor_classifier (fon: guruh bo'yicha paketlab tasniflaydi)
+                    |                    |
+                    |          classifications, manager_checks (pending)
+                    |                    |
+              monitor_sla (har daqiqa: answered / missed)
+                    |
+        monitor_report (00:00: sonlar SQL bilan, xulosa model bilan -> hisobot_YYYY-MM-DD.xlsx)
+```
 
 | Fayl | Vazifasi |
 |---|---|
-| `app/bot/handlers/group_monitor.py` | Guruh xabarlarini tinglash, topiklarga tashlash, bazaga yozish, `dm` rejimidagi javob kutish |
-| `app/ai_processor.py` | Tahlil quvuri: rasm / video kadrlari / nutqni tayyorlaydi, xabar turiga qarab modelni tanlaydi |
-| `app/group_ai.py` | Tasniflash: prompt, JSON sxema, 8 ta toifa, ishonch chegarasi, kalit-so'zlarga qaytish |
-| `app/stt.py` | Nutq -> matn: lokal model yoki OpenAI |
-| `app/group_timers.py` | `group` rejimidagi javob kutish va guruhga yoziladigan ogohlantirish |
-| `app/group_registry.py` | Guruhlar (`monitored_groups`) va menejerlar (`group_managers`) ro'yxati |
-| `app/group_stats.py` | `message_logs` va `daily_stats`ga yozish |
-| `app/daily_report.py` | Yarim tundagi HTML hisobot |
-| `app/bot/handlers/hub_admin.py` | Ichki guruhdagi buyruqlar |
+| `app/monitor_db.py` | Monitoring bazasi: jadvallar, barcha so'rovlar, zaxira nusxa (baza bilan ishlaydigan yagona modul) |
+| `app/bot/handlers/group_monitor.py` | Guruh xabarlari va tahrirlarini bazaga yozadi |
+| `app/monitor_classifier.py` | Fon tasniflovchi: prompt, paketlash, javobni tekshirish, qayta urinish |
+| `app/monitor_sla.py` | Guruh adminlari/menejeri, "5 daqiqa qoidasi" |
+| `app/monitor_report.py` | Kunlik Excel hisobot, yuborish, yarim tun vazifasi, zaxira |
+| `app/bot/handlers/monitor_admin.py` | `/test_report` |
+| `app/llm_client.py` | Modelga so'rov (lokal Ollama yoki OpenAI) |
 
-Yangi jadvallar (`monitored_groups`, `group_managers`, `message_logs`, `daily_stats`,
-`group_inquiry_timers`) bot ishga tushganda o'zi yaratiladi -- migratsiya kerak emas.
+### Baza (SQLite, `DB_PATH`)
 
-### Xabar qanday tahlil qilinadi
+WAL rejimi, `busy_timeout`, `foreign_keys` yoqilgan. Jadvallar bot ishga tushganda o'zi yaratiladi.
 
-| Xabar turi | Qanday |
+| Jadval | Nima saqlanadi |
 |---|---|
-| Matn | Tasniflovchi model (`GROUP_AI_PROVIDER` / `GROUP_AI_MODEL`, odatda lokal Gemma) |
-| Rasm (surat yoki rasm fayli) | O'sha model, rasmning o'zi bilan (`GROUP_IMAGE_ANALYSIS_ENABLED=true`). Model rasmda nima ko'ringanini bir jumla bilan yozib ham beradi |
-| Ovozli xabar, audio | Nutq matnga o'giriladi (`GROUP_STT_PROVIDER`: `local` yoki `openai`), matni tasniflanadi |
-| Video, dumaloq video | Ovozi matnga o'giriladi + `GROUP_VIDEO_FRAMES` ta kadr rasm sifatida qo'shiladi |
+| `groups` | Guruh, adminlari, menejeri (`manager_user_id`, `manager_username`) |
+| `messages` | Har bir xabar: kim, matn/izoh, media turi, xodimmi, vaqt (UTC), mahalliy sana, tahrir; `UNIQUE(chat_id, message_id)` |
+| `classifications` | Mijoz xabarining tasnifi: kompaniyaga oidmi, toifa, sentiment, bir jumlalik mazmun, menejer kerakmi, model |
+| `manager_checks` | 5 daqiqa qoidasi tekshiruvlari: `pending` / `answered` / `missed` |
+| `daily_stats` | Kun bo'yicha sonlar: 8 toifa, jami, filtrlangan, javobsiz |
+| `daily_summaries` | Kun bo'yicha matnli xulosalar va hisobot yuborilgan vaqt |
 
-Ovozli xabar / audio / video tahlili uchun alohida model: `GROUP_MEDIA_AI_PROVIDER=openai`,
-`GROUP_MEDIA_AI_MODEL=gpt-4o-mini` (bo'sh bo'lsa -- matn bilan bir xil model).
+`daily_stats` va `daily_summaries` kun sayin to'planadi -- keyingi oylik taqqoslash ("shikoyatlar
+kamaydimi") shulardan qilinadi (oylik hisobotning o'zi hali yozilmagan). PostgreSQL'ga o'tish
+uchun faqat `app/monitor_db.py`dagi `_database_url()` va SQLite PRAGMA'lari o'zgaradi.
+Botning asosiy (Odoo buyurtmalari) bazasi -- alohida, PostgreSQL (`DATABASE_URL`).
 
-Model avval xabar **kompaniyaga oidmi** degan savolga javob beradi (tovar, narx, buyurtma,
-yetkazib berish, xodimlar ...). Oid bo'lmagan oddiy suhbat butunlay tashlab yuboriladi:
-bazaga yozilmaydi, hech qayerga tashlanmaydi -- faqat soni sanaladi. Oid bo'lsa 8 ta
-toifadan biriga tushadi:
+### Xabar yig'ish
 
-1. Dastavka va Logistika
-2. Mahsulot Sifati va Nuqsonlar
-3. Komplektatsiya va Hajm
-4. Xodimlar va Xizmat Ko'rsatish
-5. Narx va To'lovlar
-6. Qaytarish va Kafolat
-7. Ijobiy Fikrlar
-8. Boshqa
+- Saqlanadi: matn, media izohi (caption), tahrirlangan xabar (yangilanadi); rasm/ovoz/video uchun
+  `media_type` va Telegram fayl ID'si. Ovozli xabar, audio va video (ovozi) `GROUP_STT_ENABLED=true`
+  bo'lsa OpenAI transkripsiya API'si orqali matnga aylantiriladi (`OPENAI_STT_MODEL`,
+  `messages.transcript`) va shu matn bo'yicha tasniflanadi. Rasmning o'zi tahlil qilinmaydi.
+- Saqlanmaydi: xizmat xabarlari, botlarning xabarlari, hisobot guruhi va
+  `GROUP_MONITOR_EXCLUDED_GROUP_IDS`dagi guruhlar.
+- Xodim (`is_staff`) = guruh admini yoki egasi. Xodim xabarlari kontekst bo'ladi, statistikaga
+  faqat mijoz xabarlari kiradi.
+- Bot guruhdagi oddiy xabarlarni ko'rishi uchun shu guruhda **admin** bo'lishi kerak
+  (yoki @BotFather -> `/setprivacy` -> Disable).
 
-### Ichki guruhga nima tushadi
+### Tasniflash
 
-| Guruhda nima bo'ldi | Bot nima qiladi |
-|---|---|
-| Mijoz shikoyat qildi | Xabarni shu toifaning topigiga **bir marta** tashlaydi: guruh nomi, kim yozgani, xabarning o'zi (matn yoki media nusxasi), xabarga havola; ovozli xabar bo'lsa matni, rasm bo'lsa unda nima ko'ringani |
-| Mijoz ijobiy fikr bildirdi | "Ijobiy Fikrlar" topigiga |
-| Kimdir "tovar yo'q ekan" dedi | "Tovar yo'q" topigiga |
-| Mijoz oddiy savol/buyurtma yozdi | Hech qayerga tashlanmaydi, faqat `message_logs`ga yoziladi va javob kutish boshlanadi |
-| Kompaniyaga aloqasiz suhbat | Hech narsa (faqat sanaladi) |
+Har bir mijoz xabari uchun: kompaniyaga oidmi; toifa; sentiment (Shikoyat / Ijobiy / Neytral);
+bir jumlalik o'zbekcha mazmun; menejer javobi kerakmi. Toifalar:
 
-Topiklar: bot toifaga mos topikni nomi bo'yicha topadi; topilmasa **o'zi yaratadi**
-(`HUB_AUTO_CREATE_TOPICS=true`, botga ichki guruhda "Mavzularni boshqarish" huquqi kerak).
-Yarata olmasa shikoyat umumiy "Shikoyatlar" topigiga, u ham bo'lmasa guruhning umumiy
-qismiga tushadi. Topik ID'larini qo'lda ham berish mumkin: `HUB_TOPIC_IDS=delivery=12,price=14`
-(kalitlar: `delivery, quality, completeness, staff, price, returns, positive, other, stock,
-unanswered`). Qo'lda ochilgan topikni bot unga bir marta xabar yozilgach "ko'radi".
+Dastavka va Logistika · Mahsulot Sifati va Nuqsonlar · Komplektatsiya va Hajm · Xodimlar va
+Xizmat Ko'rsatish · Narx va To'lovlar · Qaytarish va Kafolat · Ijobiy Fikrlar · Boshqa
 
-### Javobsiz qolgan savol (`GROUP_ALERT_MODE`)
+- Faqat stiker/emoji yoki matnsiz xabar modelga yuborilmaydi (qoida bilan "aloqasiz").
+- Xabarlar guruh bo'yicha paketlanadi (`CLASSIFY_BATCH_SIZE`) va suhbat konteksti bilan beriladi.
+- Model JSON qaytaradi, javob tekshiriladi; xato bo'lsa qayta so'raladi. Har xabar bir marta
+  tasniflanadi; `CLASSIFY_MAX_ATTEMPTS` martadan keyin ham bo'lmasa "failed" bo'ladi.
+- Model: `GROUP_AI_PROVIDER` / `GROUP_AI_MODEL` (hozir lokal `gemma4:12b`, Ollama).
 
-Mijoz tovar, narx yoki buyurtma haqida savol yozsa `STAFF_REPLY_TIMEOUT_MINUTES` (5) daqiqalik
-kutish boshlanadi. Xodim "10 minutda javob beramiz" desa kutish 10 daqiqaga suriladi. Kutishlar
-bazada turadi -- bot qayta ishga tushsa ham yo'qolmaydi.
+### 5 daqiqa qoidasi
 
-| Rejim | Kutishni nima bekor qiladi | Muddat o'tsa |
-|---|---|---|
-| `dm` (standart) | Murojaat qilingan xodimning javobi; hech kimga qaratilmagan savol uchun -- istalgan xodimning javobi | Xodimning (yoki guruh menejerining) **shaxsiy chatiga** eslatma. Bot mijoz guruhiga hech narsa yozmaydi |
-| `group` | Shu guruhga **istalgan** xodim yozgan xabar | **Guruhning o'ziga** alohida (reply'siz) xabar: shu guruhning barcha menejerlari belgilanadi -- `@menejer1 @menejer2` + `GROUP_ALERT_TEXT` |
+- Menejer = guruh adminlari orasida unvoni (custom title) `MANAGER_TITLES`dagi so'zni o'z ichiga
+  olgan odam. Kuniga bir marta va admin o'zgarganda yangilanadi.
+- Mijoz kompaniyaga murojaat qilsa (savol, buyurtma, shikoyat) tekshiruv ochiladi. `SLA_MINUTES`
+  daqiqa ichida menejer shu guruhga yozsa -- `answered`, yozmasa -- `missed` (hisobotga tushadi).
+- Ketma-ket kelgan so'rovlar bitta tekshiruvga birlashadi (muddat birinchi xabardan).
+- Guruhda menejer bo'lmasa: istalgan adminning javobi hisobga olinadi, javobsiz qolgani
+  hisobotda "menejer yo'q" bilan chiqadi.
+- `SLA_WORK_HOURS=09:00-19:00` qo'yilsa ish vaqtidan tashqaridagi so'rovlar tekshirilmaydi
+  (hozir bo'sh = 24/7).
 
-`group` rejimida: guruhga menejer biriktirilmagan bo'lsa (yoki bot guruhga yoza olmasa)
-ogohlantirish guruhga emas, ichki guruhning "Javobsiz savollar" topigiga tushadi; bir marta
-belgilangach, xodim javob yozmaguncha keyingi belgilash `GROUP_ALERT_REPEAT_MINUTES` (60)
-daqiqadan oldin bo'lmaydi.
+### Kunlik Excel hisobot
 
-**Xodim** = ichki guruh a'zosi yoki shu guruhga biriktirilgan menejer.
-**Guruh menejeri** ikki yo'l bilan biriktiriladi:
+Har kuni `REPORT_TIME` da undan oldingi 24 soat uchun `reports/hisobot_YYYY-MM-DD.xlsx` tuziladi
+va `REPORT_CHAT_ID` guruhining General topigiga yuboriladi. `REPORT_TIME=00:00` -- o'tgan kalendar
+kuni; `11:00` (sinov) -- kechagi 11:00 dan bugungi 11:00 gacha, fayl nomidagi sana davr boshlangan
+kun. Bot o'chiq turgan bo'lsa, ishga tushganda yuborilmagan kunlarni yuboradi. **Raqamlarni faqat
+SQL/kod hisoblaydi**; model faqat matnli xulosa yozadi. "Boshqa" toifasi uchun xabarlar birma-bir
+yozilmaydi -- gap umuman nimalar haqida ketgani aytiladi.
 
-- mijoz guruhida xodimni admin qilib, unvoniga (custom title) "Menejer" deb yozing
-  (`GROUP_MANAGER_TITLE_KEYWORDS`; u ichki guruhda ham bo'lishi kerak; faqat supergroup'larda);
-- yoki ichki guruhda: `/menejer_qosh <guruh> @username [ism]`.
+- 1-varaq "Kunlik hisobot": toifalar jadvali (Toifa | Jami | Shikoyat | Ijobiy | Neytral | Ulush),
+  "Jami kompaniyaga oid", "Kompaniyaga aloqasiz (filtrlangan)", har toifa bo'yicha xulosa,
+  umumiy xulosa (oldingi kun bilan shikoyatlar solishtirmasi va javobsiz so'rovlar soni bilan).
+- 2-varaq "Javobsiz so'rovlar": Vaqt | Guruh | Mijoz | So'rov mazmuni | Menejer.
+- Yuborishda xato bo'lsa 3 marta uriniladi, bo'lmasa `ADMIN_CHAT_ID`ga xabar boradi.
+- `/test_report [bugun|kecha|YYYY-MM-DD]` -- hisobotni darhol yuboradi (faqat adminlar:
+  `ADMIN_USER_IDS`, `ADMIN_CHAT_ID`, hisobot guruhining adminlari; shaxsiy chatda yoki hisobot
+  guruhida).
 
-### Ichki guruhdagi buyruqlar
+### Zaxira va qayta ishga tushish
 
-| Buyruq | Vazifasi |
-|---|---|
-| `/hisobot [bugun \| kecha \| YYYY-MM-DD]` | Statistika hisobotini (HTML fayl) shu yerga yuboradi |
-| `/guruhlar [qidiruv]` | Kuzatilayotgan guruhlar (ID'lari bilan) |
-| `/guruh_ochir <guruh>` / `/guruh_yoq <guruh>` | Guruhni kuzatuvdan chiqarish / qaytarish |
-| `/menejerlar [guruh]` | Guruh(lar)ga biriktirilgan menejerlar |
-| `/menejer_qosh <guruh> @username [ism]` | Menejerni qo'lda biriktirish |
-| `/menejer_ochir <guruh> @username` | Qo'lda biriktirilgan menejerni olib tashlash |
+- Har kuni hisobotdan keyin baza nusxasi `backups/monitor_YYYY-MM-DD.db` ga olinadi (SQLite
+  backup API), oxirgi `BACKUP_KEEP` (14) tasi saqlanadi.
+- Bot qulab tushsa avtomatik qayta ishga tushishi uchun (Windows, Task Scheduler) tayyor
+  skript bor: `scripts/bot_watchdog.ps1` (bot ishlamayotgan bo'lsa ishga tushiradi). Uni har
+  daqiqa va kompyuter yonganda ishlaydigan qilib bir marta ro'yxatdan o'tkazing (PowerShell):
 
-`<guruh>` -- guruh ID'si yoki nomining bir qismi. Guruh birinchi xabari kelganda ro'yxatga
-o'zi tushadi.
+```powershell
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument '-NoProfile -ExecutionPolicy Bypass -File "D:\Demos\odoo telegram integration\scripts\bot_watchdog.ps1"'
+$triggers = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)))
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
+Register-ScheduledTask -TaskName "odoo_telegram_bot_watchdog" -Action $action -Trigger $triggers -Principal $principal
+```
 
-### Kunlik hisobot
-
-Har kuni **00:00** da (`REPORT_TIMEZONE=Asia/Tashkent`) o'tgan 24 soat uchun
-`reports/stats_YYYY-MM-DD.html` yoziladi: **bitta oddiy jadval, toifalarga bo'lingan** --
-har bir toifa nomi va soni, ostida shu kungi shikoyatlar ("Ijobiy Fikrlar" ostida ijobiy
-fikrlar): vaqt, guruh, mijoz, xabar. Karta va diagrammalar yo'q (2026-10-13).
-`DAILY_REPORT_CHAT_ID` berilsa fayl shu chatga ham yuboriladi, ostida sonlar bilan qisqa
-xulosa (bo'sh kun yuborilmaydi).
-Bot yarim tunda o'chiq bo'lgan bo'lsa, ishga tushganda kechagi hisobotni tuzib oladi.
-
-Qo'lda: `.venv\Scripts\python.exe -m app.daily_report --date 2026-10-11 [--send]`.
-
-### Ishga tushirish
+### Ishga tushirish va sinash
 
 ```
 .venv\Scripts\python.exe -m pip install -r requirements.txt
-ollama pull gemma4:12b                      # lokal model (GROUP_AI_PROVIDER=ollama)
-.venv\Scripts\python.exe -m app.bot         # bot: kuzatish, eslatmalar, kunlik hisobot
-.venv\Scripts\python.exe -m pytest -q       # testlar (haqiqiy model/Telegram chaqirilmaydi)
+ollama pull gemma4:12b                          # lokal model (GROUP_AI_PROVIDER=ollama)
+.venv\Scripts\python.exe -m app.bot             # bot: yig'ish, tasniflash, 5 daqiqa qoidasi, hisobot
+.venv\Scripts\python.exe -m pytest -q           # testlar (haqiqiy model/Telegram chaqirilmaydi)
+.venv\Scripts\python.exe scripts\test_monitor.py  # haqiqiy model bilan, vaqtinchalik bazada:
+                                                 # 30 ta namuna xabar, 1 daqiqalik muddat, Excel
 ```
 
-`.env`dagi kerakli qiymatlar: `BOT_TOKEN`, `FEEDBACK_HUB_GROUP_ID`, `GROUP_AI_PROVIDER`,
-`GROUP_AI_MODEL`, (OpenAI ishlatilsa) `OPENAI_API_KEY` -- to'liq ro'yxat `.env.example`da.
-
-Ishlashi uchun kerak:
-
-- Bot **har bir mijoz guruhida admin** bo'lishi kerak (yoki @BotFather -> `/setprivacy` ->
-  Disable) -- aks holda Telegram botga oddiy xabarlarni ko'rsatmaydi.
-- Bot ichki guruhda ham admin bo'lishi kerak ("Mavzularni boshqarish" huquqi bilan).
-- `dm` rejimida xodim eslatmani shaxsiy olishi uchun botga bir marta `/start` bosgan
-  bo'lishi kerak; bosmagan bo'lsa eslatma ichki guruhga, uni belgilab yuboriladi.
-- Bot 20 MB dan katta faylni yuklab ololmaydi; `GROUP_STT_MAX_DURATION_SECONDS` dan uzun
-  yozuvlar o'tkazib yuboriladi.
-
-### Modellar va o'lchovlar
-
-- **Tasniflash** (`scripts/eval_group_ai.py --provider ... --model ...`, 158 ta belgilangan
-  misol). 2026-10-12: gemma4:12b -- asosiy 105 misoldan 103 tasi, toifa 53 tadan 52;
-  gpt-4o-mini -- 105 dan 91, toifa 53 tadan 46 (javob kutadigan savolni ko'proq o'tkazib
-  yuboradi, yetkazib berish vaqtini "javob beraman" va'dasi deb oladi). 2026-10-10:
-  gpt-5.4-mini 105/105, gemma4:e4b 102, qwen3.5:9b 89.
-- **Nutq -> matn**, o'zbekcha (20 ta ochiq FLEURS yozuvi, so'z xatosi): lokal
-  `islomov/rubaistt_v2_medium` -- 18%, OpenAI `gpt-4o-transcribe` -- 35%, OpenAI `whisper-1`
-  -- 98% (o'zbekchani tanimaydi). Shu sabab standart: `GROUP_STT_PROVIDER=local`.
-  Lokal model call-center STT loyihasining `~/.cache/faster-whisper-ct2/` dagi nusxasidan
-  olinadi; ishonchli ruscha nutq `GROUP_STT_RU_MODEL` (large-v3-turbo) orqali; videokarta
-  uchun cuBLAS/cuDNN DLL'lari `cuda_runtime/` papkasida.
-- **Rasm**: gemma4:12b bitta rasmni ~2 soniyada tahlil qiladi.
-- Model javob bermasa yoki sozlanmagan bo'lsa -- oddiy kalit-so'zlar; xulosaga ishonch
-  `GROUP_AI_MIN_CONFIDENCE` foizdan past bo'lsa xabar tashlanmaydi.
+Sozlamalar `.env`da (`.env.example`ga qarang): `BOT_TOKEN`, `DB_PATH`, `REPORT_CHAT_ID`,
+`TIMEZONE`, `MANAGER_TITLES`, `SLA_MINUTES`, `GROUP_AI_PROVIDER`, `GROUP_AI_MODEL`,
+`OPENAI_API_KEY` (faqat OpenAI tanlansa). Token va kalitlar logga yozilmaydi.
 
 ## 5. Ixtiyoriy: Nginx reverse proxy + SSL
 

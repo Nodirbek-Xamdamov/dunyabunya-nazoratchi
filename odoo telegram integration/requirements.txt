@@ -19,3 +19,5 @@ pillow==12.3.0
 av==18.1.0
 # Windows'da IANA vaqt mintaqalari (REPORT_TIMEZONE=Asia/Tashkent) shu paketdan olinadi
 tzdata==2026.1
+# Kunlik Excel hisobot (app/monitor_report.py)
+openpyxl==3.1.5

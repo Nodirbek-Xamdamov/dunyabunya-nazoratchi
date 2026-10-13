@@ -12,9 +12,9 @@ Paket tuzilishi:
     handlers/orders.py      -- tasdiqlash/rad etish/o'zgartirish oqimi
     handlers/menu.py        -- /menu va 5 ta bo'lim tugmasi
     handlers/chat_events.py -- guruhga qo'shilish/a'zolik real-vaqt eventlari
-    handlers/group_monitor.py  -- mijoz guruhlarini kuzatish: shikoyat/ijobiy sharh/tovar yo'q ->
-                                  ichki guruh topiklari, xodim javobini kutish (ENG BIRINCHI)
-    handlers/hub_admin.py      -- ichki guruhdagi buyruqlar: /hisobot, /guruhlar, /menejerlar ...
+    handlers/group_monitor.py  -- mijoz guruhlaridagi har bir xabarni monitoring bazasiga yozadi
+                                  (ENG BIRINCHI; bot guruhlarda faqat o'qiydi)
+    handlers/monitor_admin.py  -- /test_report (faqat adminlar)
     handlers/group_mentions.py -- guruhda botni mention qilib yozilgan xabarlar (Odoo bog'lash)
     handlers/fallback.py    -- poll yangilanishi va erkin xabarlar (ENG OXIRIDA ro'yxatdan o'tadi)
 """
@@ -33,6 +33,28 @@ from app.utils import background_maintenance_loop, odoo_health_check_loop
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("aiogram_bot")
+
+
+class _SecretFilter(logging.Filter):
+    """Bot tokeni va API kalitlari logga tushib qolsa (masalan xato matnidagi URL ichida) yulduzcha
+    bilan almashtiradi."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        candidates = (settings.BOT_TOKEN, settings.OPENAI_API_KEY, settings.API_KEY, settings.ODOO_API_KEY)
+        self._secrets = [secret for secret in candidates if secret and len(secret) >= 8]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if any(secret in message for secret in self._secrets):
+            for secret in self._secrets:
+                message = message.replace(secret, "***")
+            record.msg, record.args = message, None
+        return True
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_SecretFilter())
 
 __all__ = ["get_order_inline_keyboard", "main"]
 
@@ -89,21 +111,22 @@ async def main() -> None:
     # yuklanib qolardi (aynan shu muammo tekshirilib topildi). main() esa FAQAT
     # bot konteynerida (python -m app.bot) chaqiriladi, shu sabab bu yerga ko'chirish
     # xulq-atvorni o'zgartirmaydi -- faqat qachon import qilinishini kechiktiradi.
-    from app import daily_report
+    from app import monitor_classifier, monitor_db, monitor_report, monitor_sla
     from app.bot.handlers import (
-        chat_events, edit_info, fallback, group_mentions, group_monitor, hub_admin, menu, orders, start,
+        chat_events, edit_info, fallback, group_mentions, group_monitor, menu, monitor_admin, orders, start,
     )
 
     await init_db()
+    await monitor_db.init_db()
     bot_instance = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
     # Ro'yxatdan o'tish tartibi muhim: fallback.router ENG OXIRIDA bo'lishi kerak,
     # chunki u StateFilter(None) bilan boshqa hech kim ushlamagan istalgan xabarni oladi.
-    # group_monitor ENG BIRINCHI: guruhdagi har bir xabarni ko'rib, SkipHandler bilan
+    # group_monitor ENG BIRINCHI: guruhdagi har bir xabarni bazaga yozib, SkipHandler bilan
     # keyingilarga o'tkazib yuboradi (handlers/group_monitor.py).
     dp.include_router(group_monitor.router)
-    dp.include_router(hub_admin.router)
+    dp.include_router(monitor_admin.router)
     dp.include_router(start.router)
     dp.include_router(orders.router)
     dp.include_router(menu.router)
@@ -128,10 +151,15 @@ async def main() -> None:
     # `odoo_health_check_loop` docstringiga qarang.
     asyncio.create_task(odoo_health_check_loop(bot_instance))
 
-    # Mijoz xodimga murojaat qilgach javobsiz qolgan holatlar bo'yicha eslatmalar (2026-10-07)
-    asyncio.create_task(group_monitor.staff_reply_reminder_loop(bot_instance))
-    # Har yarim tunda o'tgan kunning statistika hisoboti (2026-10-12, `app/daily_report.py`)
-    asyncio.create_task(daily_report.daily_report_loop(bot_instance))
+    # Mijoz guruhlari monitoringi (2026-10-13). Xabarlarni handler yozadi, qolgani fon vazifalar:
+    # tasniflash, "5 daqiqa qoidasi" (har daqiqa), 00:00 dagi Excel hisobot va kunlik zaxira.
+    # Vazifalarga havola saqlanadi -- aks holda Python ularni ish paytida yig'ishtirib yuborishi mumkin.
+    if settings.MONITOR_ENABLED:
+        dp["monitor_tasks"] = [
+            asyncio.create_task(monitor_classifier.classifier_loop(bot_instance)),
+            asyncio.create_task(monitor_sla.sla_loop(bot_instance)),
+            asyncio.create_task(monitor_report.report_loop(bot_instance)),
+        ]
 
     logger.info("Aiogram Bot ishga tushdi.")
     await dp.start_polling(bot_instance)
