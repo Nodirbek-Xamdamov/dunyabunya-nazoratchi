@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    image: db-multi-agent:latest
+    container_name: db_multi_agent
+    network_mode: host
+    env_file: .env
+    volumes:
+      - ./storage:/app/storage
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,17 @@
+.env
+.env.*
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+storage/
+.idea/
+.pytest_cache/
+run.out.log
+run.err.log
+run.pid.txt
+_deprecated_unused/
+tools/cloudflared.exe
+tools/cloudflared.log
+logs/
+!.env.example
