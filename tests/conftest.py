@@ -30,20 +30,28 @@ os.environ["GROUP_AI_PROVIDER"] = "openai"
 os.environ["OPENAI_API_KEY"] = ""
 # Nutq modeli ham testlarda yuklanmaydi (kerakli testlar `transcribe_file`ni soxtalashtiradi)
 os.environ["GROUP_STT_ENABLED"] = "false"
-# Loyiha `.env`ida nima yoqilgan bo'lishidan qat'i nazar testlar standart sozlamalardan boshlaydi;
-# kerakli test o'ziga kerak sozlamani `monkeypatch` bilan yoqadi.
+# Loyiha `.env`ida nima yozilgan bo'lishidan qat'i nazar testlar o'z vaqtinchalik monitoring
+# bazasi va papkalari bilan ishlaydi; kerakli test o'ziga kerak sozlamani `monkeypatch` bilan o'zgartiradi.
+_MONITOR_DB_PATH = TEST_DIR / f"_monitor_{uuid.uuid4().hex}.db"
 os.environ["GROUP_STT_PROVIDER"] = "local"
-os.environ["GROUP_MEDIA_AI_PROVIDER"] = ""
-os.environ["GROUP_IMAGE_ANALYSIS_ENABLED"] = "false"
-os.environ["GROUP_ALERT_MODE"] = "dm"
-os.environ["HUB_TOPIC_IDS"] = ""
-os.environ["REPORT_TIMEZONE"] = "Asia/Tashkent"
-os.environ["DAILY_REPORT_DIR"] = str(TEST_DIR / "_tmp_reports")
+os.environ["GROUP_AI_MODEL"] = "gpt-5.4-mini"
+os.environ["DB_PATH"] = str(_MONITOR_DB_PATH)
+os.environ["TIMEZONE"] = "Asia/Tashkent"
+os.environ["REPORTS_DIR"] = str(TEST_DIR / "_tmp_reports")
+os.environ["BACKUP_DIR"] = str(TEST_DIR / "_tmp_backups")
+os.environ["REPORT_CHAT_ID"] = "-1009990000001"
+os.environ["REPORT_TIME"] = "00:00"
+os.environ["GROUP_MONITOR_EXCLUDED_GROUP_IDS"] = ""
+os.environ["MANAGER_TITLES"] = "meneger,menejer,manager,menedj,менедж,менеж"
+os.environ["SLA_MINUTES"] = "5"
+os.environ["SLA_WORK_HOURS"] = ""
+os.environ["ADMIN_USER_IDS"] = ""
+os.environ["MONITOR_ENABLED"] = "true"
 
 import pytest
 import pytest_asyncio
 
-from app import group_registry
+from app import monitor_db, monitor_sla
 from app.database import Base, engine
 
 
@@ -53,14 +61,20 @@ async def reset_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-    group_registry.clear_caches()  # guruh/menejer keshi bazadan olingan -- baza bilan birga tozalanadi
+    async with monitor_db.engine.begin() as conn:
+        await conn.run_sync(monitor_db.Base.metadata.drop_all)
+        await conn.run_sync(monitor_db.Base.metadata.create_all)
+    monitor_sla.reset_state()  # guruh keshi bazadan olingan -- baza bilan birga tozalanadi
     yield
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _cleanup_test_artifacts():
     yield
-    for path in (_TEST_DB_PATH, _TMP_PDF_DIR, _TMP_LOG_DIR, TEST_DIR / "_tmp_reports"):
+    for path in (
+        _TEST_DB_PATH, _TMP_PDF_DIR, _TMP_LOG_DIR, TEST_DIR / "_tmp_reports", TEST_DIR / "_tmp_backups",
+        _MONITOR_DB_PATH, Path(f"{_MONITOR_DB_PATH}-wal"), Path(f"{_MONITOR_DB_PATH}-shm"),
+    ):
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
         elif path.exists():

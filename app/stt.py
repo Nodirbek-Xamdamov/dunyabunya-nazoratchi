@@ -1,10 +1,13 @@
 """
-Nutqni matnga o'girish (2026-10-10) -- mijoz guruhlaridagi ovozli xabar, audio, video va
-dumaloq video xabarlar uchun. `app/bot/handlers/group_monitor.py` faylni yuklab olib shu
-yerga beradi, chiqqan matn oddiy matnli xabar kabi tasniflanadi (`app/group_ai.py`).
+Nutqni matnga o'girish (2026-10-10) -- ovozli xabar, audio, video va dumaloq video uchun.
 
-Hammasi shu kompyuterning videokartasida ishlaydi (faster-whisper / CTranslate2), audio hech
-qayerga yuborilmaydi. Ikki model:
+DIQQAT (2026-10-13): monitoring bu moduldan FAQAT `transcribe_openai`ni ishlatadi -- guruhdagi
+ovozli xabarlar OpenAI transkripsiya API'si orqali matnga aylantiriladi (foydalanuvchi qarori;
+`app/monitor_classifier.py`, natija `messages.transcript`da). Pastdagi lokal model
+(`transcribe_file`, `transcribe_sync`) hozir hech qayerdan chaqirilmaydi, qaytish uchun qoldirilgan.
+
+Lokal yo'l: hammasi shu kompyuterning videokartasida ishlaydi (faster-whisper / CTranslate2),
+audio hech qayerga yuborilmaydi. Ikki model:
 
   - O'zbekcha (asosiy) -- `islomov/rubaistt_v2_medium` (Whisper Medium, o'zbek tiliga
     moslashtirilgan). Aynan shu model call-center STT loyihasida boshqa modellar bilan

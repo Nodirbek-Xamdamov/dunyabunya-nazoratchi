@@ -67,50 +67,23 @@ class Settings(BaseSettings):
     ODOO_HEALTH_CHECK_INTERVAL_SECONDS: int = 21600
     ODOO_ALERT_CHAT_ID: int = 5817708955
 
-    # Mijoz guruhlarini kuzatish (2026-10-07, `app/bot/handlers/group_monitor.py`): bot
-    # mijozlar bor guruhlarda FAQAT o'qiydi (hech narsa yozmaydi), shikoyat/ijobiy sharh/
-    # "tovar yo'q" xabarlarini shu ichki (xodimlar) forum-guruhining mos topigiga tashlaydi.
-    # Shu guruh a'zolari "dunyabunya xodimi" deb hisoblanadi. Sozlanmagan bo'lsa kuzatish
-    # butunlay o'chiq. `.env`da CENTRAL_FORUM_CHAT_ID deb ham yozish mumkin.
-    FEEDBACK_HUB_GROUP_ID: int | None = Field(
-        default=None, validation_alias=AliasChoices("FEEDBACK_HUB_GROUP_ID", "CENTRAL_FORUM_CHAT_ID")
-    )
-    # Topik ID'lari odatda topik nomidan avtomatik aniqlanadi (`hub_topics` jadvali);
-    # nom mos kelmasa shu yerda qo'lda belgilash mumkin.
-    HUB_TOPIC_COMPLAINTS_ID: int | None = None  # toifa topigi topilmagan shikoyatlar uchun umumiy topik
-    HUB_TOPIC_PRAISE_ID: int | None = None
-    HUB_TOPIC_STOCK_ID: int | None = None
-    # Toifa -> topik ID (2026-10-12), masalan "delivery=12,quality=13,price=14". Kalitlar:
-    # delivery, quality, completeness, staff, price, returns, positive, other, stock, unanswered
-    HUB_TOPIC_IDS: str = ""
-    # Toifaga mos topik topilmasa bot uni o'zi yaratadi (ichki guruhda "Mavzularni boshqarish"
-    # huquqi kerak). O'chiq bo'lsa yoki huquq yo'q bo'lsa -- umumiy shikoyat topigi / General.
-    HUB_AUTO_CREATE_TOPICS: bool = True
-    # Kuzatilmaydigan guruhlar (vergul bilan ajratilgan chat_id'lar, masalan call-center guruhi)
+    # ------------------------------------------------------------------------------------
+    # Mijoz guruhlari monitoringi (2026-10-13). Bot mijoz guruhlarida FAQAT o'qiydi: hamma
+    # xabar SQLite bazaga yoziladi (`app/monitor_db.py`), fon vazifa ularni tasniflaydi
+    # (`app/monitor_classifier.py`), "5 daqiqa qoidasi" tekshiriladi (`app/monitor_sla.py`),
+    # har kuni 00:00 da Excel hisobot yuboriladi (`app/monitor_report.py`).
+    # ------------------------------------------------------------------------------------
+    MONITOR_ENABLED: bool = True
+    # Monitoring bazasi (SQLite fayli)
+    DB_PATH: str = "./data/monitor.db"
+    # Kuzatilmaydigan guruhlar (vergul bilan ajratilgan chat_id'lar, masalan call-center guruhi).
+    # Hisobot guruhining o'zi (REPORT_CHAT_ID) hech qachon kuzatilmaydi.
     GROUP_MONITOR_EXCLUDED_GROUP_IDS: str = ""
-    # Mijoz xodimga murojaat qilgach, xodim shuncha daqiqa ichida javob yozmasa eslatma boradi
-    STAFF_REPLY_TIMEOUT_MINUTES: int = 5
-    STAFF_REPLY_CHECK_INTERVAL_SECONDS: int = 15
-    # Mijoz guruhida admin unvonida (custom title) shu bo'laklardan biri bo'lgan xodim shu
-    # guruhning mas'ul MENEJERI hisoblanadi: mijoz hech kimga murojaat qilmay savol yozsa,
-    # javob shu menejerdan kutiladi.
-    GROUP_MANAGER_TITLE_KEYWORDS: str = "menej,meneg,menedj,manag,менедж,менеж"
-    # Javobsiz qolgan savol bo'yicha ogohlantirish qayerga boradi (2026-10-12):
-    #   "dm"    -- xodimning/menejerning shaxsiy chatiga; bot mijoz guruhiga HECH NARSA yozmaydi
-    #   "group" -- mijoz guruhining o'ziga alohida (reply'siz) xabar: shu guruhning barcha
-    #              ro'yxatdagi menejerlari @username bilan belgilanadi. Bu rejimda guruhdagi
-    #              ISTALGAN xodim xabari kutishni bekor qiladi (`app/group_timers.py`).
-    GROUP_ALERT_MODE: str = "dm"
-    # "group" rejimida guruhga yoziladigan matn (menejerlar belgilangan qatordan keyin)
-    GROUP_ALERT_TEXT: str = "Mijozning savoli javobsiz qoldi. Iltimos, javob bering."
-    # Ogohlantirish yuborilgach, xodim javob yozmaguncha shu guruhda keyingisi shuncha daqiqadan
-    # oldin yuborilmaydi (mijozlar ko'z o'ngida ketma-ket belgilab tashlamaslik uchun)
-    GROUP_ALERT_REPEAT_MINUTES: int = 60
+    # "Kun" chegarasi va 00:00 dagi hisobot shu vaqt mintaqasi bo'yicha
+    TIMEZONE: str = Field(default="Asia/Tashkent", validation_alias=AliasChoices("TIMEZONE", "REPORT_TIMEZONE"))
 
-    # Guruh xabarlarini tasniflash (shikoyat / ijobiy sharh / tovar yo'q / "N daqiqada javob
-    # beraman") uchun OpenAI. Kalit berilmasa oddiy kalit-so'zlar bo'yicha ishlaydi
-    # (`app/group_ai.py`).
-    # GROUP_AI_PROVIDER: "openai" yoki "ollama" (shu kompyuterdagi lokal model, kalit kerak emas).
+    # --- Tasniflash va xulosa modeli (`app/llm_client.py`) ---
+    # GROUP_AI_PROVIDER: "ollama" (shu kompyuterdagi lokal model, kalit kerak emas) yoki "openai".
     GROUP_AI_PROVIDER: str = "openai"
     OPENAI_API_KEY: str | None = None
     GROUP_AI_MODEL: str = "gpt-5.4-mini"
@@ -120,34 +93,56 @@ class Settings(BaseSettings):
     )
     # Lokal model oxirgi so'rovdan keyin qancha vaqt videokarta xotirasida turadi ("-1" = doim)
     GROUP_AI_KEEP_ALIVE: str = "30m"
-    # Modelga bir vaqtda nechta so'rov ketadi. Qolganlari shu jarayonda navbat kutadi -- 200+
-    # guruhdan xabar to'lqini kelganda so'rovlar kutish vaqti (timeout) tufayli yo'qolmaydi.
+    # Modelga bir vaqtda nechta so'rov ketadi (qolganlari navbat kutadi)
     GROUP_AI_MAX_CONCURRENCY: int = 2
+    # Bitta so'rovda bir guruhning nechta xabari tasniflanadi va ularga nechta oldingi xabar kontekst bo'ladi
+    CLASSIFY_BATCH_SIZE: int = 10
+    CLASSIFY_CONTEXT_MESSAGES: int = 8
+    # Model shuncha marta yaroqli javob bermagan xabar "failed" bo'ladi va boshqa urinilmaydi
+    CLASSIFY_MAX_ATTEMPTS: int = 5
 
-    # Rasm tahlili (2026-10-12, `app/ai_processor.py`): mijoz yuborgan surat (va video kadrlari)
-    # matn bilan birga tasniflovchi modelga beriladi. Model rasmni ko'ra olishi kerak
-    # (gemma4:12b, gpt-4o-mini ko'radi).
-    GROUP_IMAGE_ANALYSIS_ENABLED: bool = False
-    GROUP_IMAGE_MAX_SIDE: int = 1024
-    # Videodan nechta kadr olinadi (0 = faqat ovozi tahlil qilinadi)
-    GROUP_VIDEO_FRAMES: int = 3
+    # --- 5 daqiqa qoidasi ---
+    # Guruh admini unvonida (custom title) shu so'zlardan biri bo'lsa u shu guruhning menejeri
+    # (katta-kichik harf farqsiz, so'zning bir qismi ham yetadi)
+    MANAGER_TITLES: str = Field(
+        default="meneger,menejer,manager,menedj,менедж,менеж",
+        validation_alias=AliasChoices("MANAGER_TITLES", "GROUP_MANAGER_TITLE_KEYWORDS"),
+    )
+    # Menejer shuncha daqiqa ichida javob yozmasa so'rov "javobsiz" hisoblanadi
+    SLA_MINUTES: int = Field(default=5, validation_alias=AliasChoices("SLA_MINUTES", "STAFF_REPLY_TIMEOUT_MINUTES"))
+    # Ish vaqti, masalan "09:00-19:00": undan tashqaridagi so'rovlar tekshirilmaydi. Bo'sh = 24/7.
+    SLA_WORK_HOURS: str = ""
 
-    # Ovozli xabar / audio / video TAHLILI uchun alohida model: bo'sh = matn bilan bir xil
-    # (GROUP_AI_PROVIDER / GROUP_AI_MODEL). "openai" -- GROUP_MEDIA_AI_MODEL (masalan
-    # gpt-4o-mini) orqali; kalit bo'lmasa yoki so'rov xato bersa asosiy modelga qaytadi.
-    GROUP_MEDIA_AI_PROVIDER: str = ""
-    GROUP_MEDIA_AI_MODEL: str = "gpt-4o-mini"
+    # --- Kunlik Excel hisobot ---
+    # Hisobot yuboriladigan guruh. Forum-guruh bo'lsa fayl "General" topigiga tushadi;
+    # boshqa topik kerak bo'lsa REPORT_THREAD_ID ga o'sha topik ID'sini yozing.
+    REPORT_CHAT_ID: int | None = Field(
+        default=None, validation_alias=AliasChoices("REPORT_CHAT_ID", "FEEDBACK_HUB_GROUP_ID", "CENTRAL_FORUM_CHAT_ID")
+    )
+    REPORT_THREAD_ID: int | None = None
+    # Hisobot har kuni shu vaqtda (TIMEZONE bo'yicha) yuboriladi va undan oldingi 24 soatni qamraydi.
+    # "00:00" -- o'tgan kalendar kuni. Sinov davrida "11:00": kechagi 11:00 dan bugungi 11:00 gacha.
+    REPORT_TIME: str = "00:00"
+    REPORTS_DIR: str = Field(default="./reports", validation_alias=AliasChoices("REPORTS_DIR", "DAILY_REPORT_DIR"))
+    # Hisobotni yuborib bo'lmasa xabar beriladigan chat (bo'sh = ODOO_ALERT_CHAT_ID)
+    ADMIN_CHAT_ID: int | None = None
+    # /test_report buyrug'ini ishlata oladiganlar (vergul bilan Telegram ID'lar). Bundan tashqari
+    # ADMIN_CHAT_ID egasi va hisobot guruhining adminlari ham ishlata oladi.
+    ADMIN_USER_IDS: str = ""
+    # Monitoring bazasining kunlik zaxira nusxalari (monitor_YYYY-MM-DD.db), oxirgi BACKUP_KEEP tasi saqlanadi
+    BACKUP_DIR: str = "./backups"
+    BACKUP_KEEP: int = 14
 
-    # Ovozli xabar / audio / video (faqat ovozi) / dumaloq video -> matn (`app/stt.py`), so'ng
-    # oddiy matnli xabar kabi tasniflanadi.
+    # --- Ovozli xabar / audio / video (ovozi) -> matn ---
+    # Yoqilgan bo'lsa tasniflovchi matni yo'q ovozli xabarni OpenAI transkripsiya API'si orqali
+    # matnga aylantiradi (`OPENAI_API_KEY` kerak; foydalanuvchi qarori, 2026-10-13) va shu matn
+    # bo'yicha tasniflaydi. O'chiq bo'lsa ovozli xabarlar faqat media turi bilan saqlanadi.
     GROUP_STT_ENABLED: bool = False
-    # "local"  -- shu kompyuterda (faster-whisper), audio hech qayerga yuborilmaydi
-    # "openai" -- OpenAI transkripsiya API'si (OPENAI_STT_MODEL); xato bersa lokal modelga qaytadi
+    # Quyidagi ikkitasi faqat `app/stt.py`dagi lokal model uchun (monitoring uni ishlatmaydi)
     GROUP_STT_PROVIDER: str = "local"
-    # O'lchov (2026-10-12, 20 ta ochiq o'zbekcha yozuv, so'z xatosi): lokal model 18%,
-    # gpt-4o-transcribe 35%, whisper-1 98% (o'zbekchani qozoq/arman harflarida yozadi) --
-    # o'zbekcha nutq uchun OpenAI tanlansa `gpt-4o-transcribe` qo'ying, `whisper-1` yaramaydi.
-    OPENAI_STT_MODEL: str = "whisper-1"
+    # O'zbekcha uchun `gpt-4o-transcribe`: `whisper-1` o'zbekchani tanimaydi (2026-10-12 o'lchovi:
+    # so'z xatosi whisper-1 98%, gpt-4o-transcribe 35%, lokal model 18%).
+    OPENAI_STT_MODEL: str = "gpt-4o-transcribe"
     # Bo'sh = tilni model o'zi aniqlaydi. "uz" ni API qabul qilmaydi (400 xatosi, 2026-10-12).
     OPENAI_STT_LANGUAGE: str = ""
     # Bo'sh = ~/.cache/faster-whisper-ct2/islomov--rubaistt_v2_medium (CTranslate2 papkasi)
@@ -156,26 +151,8 @@ class Settings(BaseSettings):
     # Videokartada ishlash uchun kerakli cuBLAS/cuDNN DLL'lari turgan papka (Windows)
     GROUP_STT_CUDA_DLL_DIR: str = "./cuda_runtime"
     GROUP_STT_LANGUAGE: str = "uz"
-    # Ishonchli ravishda ruscha deb aniqlangan nutq uchun ko'p tilli model (bo'sh = hamma nutq
-    # o'zbekcha model orqali; u ruschani lotin harflarida transliteratsiya qilib yozadi)
     GROUP_STT_RU_MODEL: str = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
-    # Bundan uzun yozuvlar matnga o'girilmaydi (uzun video butun navbatni band qilmasin)
     GROUP_STT_MAX_DURATION_SECONDS: int = 600
-    # Model o'z xulosasiga (shikoyat / ijobiy fikr / tovar yo'q) shu foizdan kam ishonsa,
-    # xabar hech qayerga tashlanmaydi. Balandroq = kamroq, lekin aniqroq xabar tushadi.
-    GROUP_AI_MIN_CONFIDENCE: int = 80
-
-    # Kunlik statistika hisoboti (2026-10-12, `app/daily_report.py`): har kuni yarim tunda
-    # (REPORT_TIMEZONE bo'yicha 00:00) o'tgan kun uchun HTML fayl yoziladi:
-    # DAILY_REPORT_DIR/stats_YYYY-MM-DD.html. DAILY_REPORT_CHAT_ID berilsa shu chatga
-    # (ichki forum-guruh bo'lsa DAILY_REPORT_TOPIC_ID topigiga) fayl qilib ham yuboriladi.
-    DAILY_REPORT_ENABLED: bool = True
-    DAILY_REPORT_DIR: str = "./reports"
-    DAILY_REPORT_CHAT_ID: int | None = None
-    DAILY_REPORT_TOPIC_ID: int | None = None
-    REPORT_TIMEZONE: str = "Asia/Tashkent"
-    # `message_logs` yozuvlari shuncha kundan keyin o'chiriladi (0 = o'chirilmaydi)
-    MESSAGE_LOG_RETENTION_DAYS: int = 180
 
     model_config = SettingsConfigDict(
         env_file=".env",

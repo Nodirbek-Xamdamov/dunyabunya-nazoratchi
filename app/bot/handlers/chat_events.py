@@ -15,6 +15,9 @@ from aiogram import Router
 from aiogram.types import ChatMemberUpdated
 from sqlalchemy import select
 
+from app import monitor_db, monitor_sla
+from app.bot.handlers.group_monitor import excluded_chat_ids
+from app.config import settings
 from app.database import async_session_maker
 from app.models import BotGroup, GroupMembership, TelegramUser
 
@@ -23,6 +26,11 @@ logger = logging.getLogger("aiogram_bot")
 router = Router(name="chat_events")
 
 _GROUP_CHAT_TYPES = ("group", "supergroup")
+_ADMIN_STATUSES = ("creator", "administrator")
+
+
+def _is_monitored(chat_id: int) -> bool:
+    return settings.MONITOR_ENABLED and chat_id not in excluded_chat_ids()
 
 
 def _is_present(member) -> bool:
@@ -61,6 +69,13 @@ async def on_bot_membership_changed(event: ChatMemberUpdated) -> None:
 
         await session.commit()
 
+    # Yangi guruh monitoring bazasiga ham darhol yoziladi (birinchi xabarini kutmasdan)
+    if present and _is_monitored(group_id):
+        try:
+            await monitor_db.upsert_group(group_id, title)
+        except Exception:
+            logger.exception("Guruhni monitoring bazasiga yozishda xatolik (group_id=%s)", group_id)
+
 
 @router.chat_member()
 async def on_group_member_changed(event: ChatMemberUpdated) -> None:
@@ -76,6 +91,15 @@ async def on_group_member_changed(event: ChatMemberUpdated) -> None:
 
     chat_id = user.id
     group_id = event.chat.id
+
+    # Admin qo'shildi/olindi yoki unvoni o'zgardi -- guruhning adminlari va menejeri qayta olinadi
+    if _is_monitored(group_id) and (
+        event.old_chat_member.status in _ADMIN_STATUSES or event.new_chat_member.status in _ADMIN_STATUSES
+    ):
+        try:
+            await monitor_sla.admins_changed(group_id)
+        except Exception:
+            logger.exception("Guruh adminlarini yangilashga belgilashda xatolik (group_id=%s)", group_id)
 
     async with async_session_maker() as session:
         known_user = await session.get(TelegramUser, chat_id)
