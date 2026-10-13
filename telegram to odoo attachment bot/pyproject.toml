@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-odoo-bot"
+version = "0.1.0"
+description = "Telegram group document photos -> Odoo 18 records"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.7",
+    "pyyaml>=6.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    "zxing-cpp>=2.2",
+    "pillow>=10.0",
+    "pypdfium2>=4.30",
+    "aiogram>=3.13,<4",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+docbot = ["db/migrations/script.py.mako"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
