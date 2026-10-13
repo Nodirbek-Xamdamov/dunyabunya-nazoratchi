@@ -1,0 +1,60 @@
+# Xatti-harakat sozlamalari. Sirlar (token, kalitlar) bu yerda EMAS - ular .env'da.
+# Noma'lum kalit xato hisoblanadi (yozuv xatosi jimgina e'tiborsiz qolmasligi uchun).
+
+queue:
+  workers: 4                   # parallel ishlovchi worker'lar soni
+  poll_interval_seconds: 1     # navbat bo'sh bo'lganda qancha kutib qayta tekshiriladi
+  lease_seconds: 300           # job qulflanish muddati; worker o'lsa, shundan keyin job qayta olinadi
+  max_attempts: 20             # bitta bosqichdagi ketma-ket xatolar chegarasi, keyin job `failed` bo'ladi
+  backoff_base_seconds: 30     # retry kutish vaqti: 30s, 60s, 120s, ... (har safar 2 barobar)
+  backoff_max_seconds: 900     # ... lekin 15 daqiqadan oshmaydi (20 urinish ~ 4 soat Odoo uzilishiga chidaydi)
+  backoff_jitter: 0.1          # kutish vaqtiga +-10% tasodifiy og'ish
+
+files:
+  max_mb: 20                   # Telegram bot 20 MB dan katta faylni yuklab ololmaydi
+  keep_days: 30                # biriktirilgan faylning lokal nusxasi shuncha kundan keyin o'chiriladi (Odoo'da qoladi)
+
+codes:
+  pdf_pages: 3                 # PDF'ning nechta sahifasida QR/raqam qidiriladi
+  pdf_scale: 2.0               # PDF'ni rasmga aylantirish masshtabi (1.0 = 72 dpi)
+
+ai:                            # QR/shtrix-kod o'qilmaganda rasmni OpenAI o'qiydi
+  enabled: true
+  model: gpt-5.4-mini
+  reasoning_effort: low        # none | minimal | low | medium | high
+  image_detail: high           # low | high | auto
+  max_image_px: 2048           # API'ga yuboriladigan rasmning uzun tomoni (px)
+  timeout_seconds: 90
+  daily_limit: 1000            # bir kunda (UTC) nechta AI so'rov; oshsa QR'siz rasmlar e'tiborsiz qoladi
+                               # (parallel worker'lar sababli bir necha so'rovga oshib ketishi mumkin)
+  min_similarity: 80           # QR'siz rasm shu foizdan (AI bahosi) bizning hujjatga o'xshasa hujjat hisoblanadi,
+                               # aks holda e'tiborsiz qoladi. O'xshasa-yu aniqlanmasa: "tiniqroq tashlang" javobi
+  trust_number_from: 90        # rasmda faqat hujjat raqami o'qilsa (xaridor, summa yo'q): shu foizdan va logotip
+                               # ko'rinsa, raqamning o'zi yetadi (Odoo'da bor bo'lsa biriktiriladi)
+
+odoo:
+  timeout_seconds: 60          # bitta XML-RPC so'rov uchun
+
+notify:
+  # Bot faylga reaksiya qo'yadi: 👀 qabul qilindi, 👍 biriktirildi, 👌 allaqachon bor, 🤔 aniqlanmadi, 👎 xato.
+  # Aniqlanmagan rasmga bot unclear_text bilan javob yozadi (tiniqroq qayta tashlash). Raqamni rasmga javob (reply)
+  # qilib yozish ham mumkin: bot javobga 👌 (qabul) yoki 🤷 (topilmadi) qo'yadi.
+  messages: false              # true: savol (tugmalar bilan), dublikat/xato matnlari va javoblarga matn ham yoziladi
+  success_message: false       # messages: true bo'lganda, biriktirilganda ham qisqa matn
+  # Hujjat aniqlanmaganda (QR o'qilmadi va AI ishonchsiz) rasmga javob qilib yoziladigan matn, guruhda ham.
+  # Bo'sh ("") bo'lsa, faqat 🤔 reaksiya.
+  unclear_text: "📷 Hujjat aniqlanmadi. Rasmni boshqatdan tiniqroq qilib tashlang (QR kod aniq ko'rinsin)."
+  # Ko'p sahifali hujjatning oxirgi (QR) sahifasiga javob: undan oldingi sahifalardan biri tashlanmagan bo'lsa.
+  # {document} = hujjat raqami, {missing} = masalan "3-bet (41–60-qatorlar)". Bo'sh ("") bo'lsa, tekshirilmaydi.
+  missing_pages_text: "⚠️ {document} hujjatida sahifa yetishmayapti: {missing}. Shu sahifani ham tiniq qilib tashlang."
+
+pages:                         # ko'p sahifali hujjat (albom yoki ketma-ket yuborilgan rasmlar)
+  window_seconds: 120          # bir odamning bir chatda shu vaqt ichidagi rasmlari bitta hujjat sahifalari bo'lishi mumkin
+  album_grace_seconds: 10      # albomning qolgan rasmlari kelishini shuncha kutadi
+  retry_seconds: 5             # boshqa sahifalarni kutayotgan sahifa shuncha vaqtda qayta qaraydi
+
+logging:
+  level: INFO                  # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  to_file: true                # data/logs/docbot.log (rotation bilan)
+  max_bytes: 10485760          # bitta log fayl hajmi (10 MB)
+  backup_count: 10             # nechta eski fayl saqlanadi
