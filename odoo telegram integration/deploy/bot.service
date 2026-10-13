@@ -1,0 +1,18 @@
+[Unit]
+Description=Aiogram Telegram Bot Service
+After=network.target fastapi.service
+
+[Service]
+Type=simple
+User=appuser
+Group=appuser
+WorkingDirectory=/opt/odoo_telegram_integration
+EnvironmentFile=/opt/odoo_telegram_integration/.env
+ExecStart=/opt/odoo_telegram_integration/venv/bin/python -m app.bot
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/odoo_telegram_integration/bot.log
+StandardError=append:/var/log/odoo_telegram_integration/bot.error.log
+
+[Install]
+WantedBy=multi-user.target

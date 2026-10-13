@@ -1,0 +1,18 @@
+[Unit]
+Description=Odoo-Telegram FastAPI Webhook Service
+After=network.target
+
+[Service]
+Type=simple
+User=appuser
+Group=appuser
+WorkingDirectory=/opt/odoo_telegram_integration
+EnvironmentFile=/opt/odoo_telegram_integration/.env
+ExecStart=/opt/odoo_telegram_integration/venv/bin/uvicorn app.fastapi_app:app --host 0.0.0.0 --port 8000 --workers 2
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/odoo_telegram_integration/fastapi.log
+StandardError=append:/var/log/odoo_telegram_integration/fastapi.error.log
+
+[Install]
+WantedBy=multi-user.target
