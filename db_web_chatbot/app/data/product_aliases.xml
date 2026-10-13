@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mijoz so'zlashuvda ishlatadigan nomlar (imlo xato, boshqa til/alifbo, jargon)
+  bilan katalogda (Products.Name / Products.CategoryName) haqiqatda yozilgan
+  so'z orasidagi ko'prik. Qidiruv shu ro'yxat bo'yicha so'zlarni kengaytiradi:
+  mijoz "siment" desa, tizim "sement" bilan bir qatorda "цемент" ni ham qidiradi.
+
+  Yangi qator qo'shish: <alias><terms>variant1, variant2, ...</terms><canonical>bazadagi haqiqiy so'z</canonical></alias>
+  "terms" — mijoz yozishi mumkin bo'lgan barcha variantlar (vergul bilan).
+  "canonical" — Products.Name yoki Products.CategoryName ichida haqiqatda uchraydigan qism so'z.
+-->
+<aliases>
+  <alias>
+    <terms>sement, siment, tsement, sement-qum, cement, sement qum</terms>
+    <canonical>цемент</canonical>
+  </alias>
+  <alias>
+    <terms>kraska, bo'yoq, boyoq, buyoq</terms>
+    <canonical>bo'yoq</canonical>
+  </alias>
+  <alias>
+    <terms>smesitel, kran, aralashtirgich, aralashtirgich kran</terms>
+    <canonical>смесител</canonical>
+  </alias>
+  <alias>
+    <terms>truba, quvur, quvurlar, trubalar</terms>
+    <canonical>труб</canonical>
+  </alias>
+  <alias>
+    <terms>oboi, devor qog'ozi, devor qogozi</terms>
+    <canonical>обои</canonical>
+  </alias>
+  <alias>
+    <terms>drel, dril, drill, burg'u, burgu, elektr drel</terms>
+    <canonical>drel</canonical>
+  </alias>
+  <alias>
+    <terms>gruntovka, astar, grunt</terms>
+    <canonical>gruntovka</canonical>
+  </alias>
+  <alias>
+    <terms>fuga, shov qorishma, chok qorishmasi</terms>
+    <canonical>fuga</canonical>
+  </alias>
+</aliases>
