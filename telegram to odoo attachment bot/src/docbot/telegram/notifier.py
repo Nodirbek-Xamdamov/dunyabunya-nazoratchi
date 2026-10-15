@@ -3,7 +3,8 @@
 * attached      👍 on the file's message; the last page of a document with a page not sent also gets a
                 reply naming it (``notify.missing_pages_text``)
 * duplicate     👌: the same file is already in that record
-* needs_review  a reply to the file: "send a clearer photo" (``notify.unclear_text``), also in groups
+* needs_review  a reply to the file: "send a clearer photo" (``notify.unclear_text``), also in groups;
+                an unsigned document: "send the signed one" (``notify.unsigned_text``)
 * failed        👎; admins other than the sender get a message
 
 Otherwise the bot only reacts (``notify.messages: false``: the user asked for reactions only). With
@@ -57,6 +58,7 @@ class Notifier:
         success_message: bool = False,
         unclear_text: str = "",
         missing_pages_text: str = "",
+        unsigned_text: str = "",
         interval: float = 5.0,
     ):
         self._bot = bot
@@ -68,6 +70,7 @@ class Notifier:
         self._success_message = success_message
         self._unclear_text = unclear_text
         self._missing_pages_text = missing_pages_text
+        self._unsigned_text = unsigned_text
         self._interval = interval
         self._wake = asyncio.Event()
 
@@ -147,6 +150,8 @@ class Notifier:
                 return None  # asked already (a re-run that ended the same way): never twice
             if (job.extracted_data or {}).get("quiet") or await self._jobs.album_asked(job):
                 return None  # a lone middle page, or an album that got its one reply already
+            if (job.extracted_data or {}).get("unsigned") and self._unsigned_text:
+                return await self._tell(job, self._unsigned_text)
             if self._messages:
                 await self._react(job, "🤔")
                 return await self._tell(job, self._question(job), review_keyboard(job))

@@ -64,19 +64,19 @@ async def reader():
 async def test_a_reading_is_parsed_with_its_usage(api, reader):
     api["reply"] = (200, answer({
         "similarity": 88, "dunyabunya": True, "doc_number": " S81878 ", "partner": "Dilorhod 6161", "phone": None,
-        "person": "MIRKAMOLYOV BOTIR", "total": 1780000,
+        "person": "MIRKAMOLYOV BOTIR", "total": 1780000, "signed": True,
     }), {})
     result = await reader.read(b"\xff\xd8\xff jpeg")
     assert result.extraction.doc_number == "S81878"
     assert result.extraction.total == 1780000.0 and result.extraction.phone is None
-    assert result.extraction.similarity == 88 and result.extraction.branded is True
+    assert result.extraction.similarity == 88 and result.extraction.branded is True and result.extraction.signed is True
     assert (result.model, result.input_tokens, result.output_tokens) == ("gpt-5.4-mini-2026-03-17", 962, 521)
 
     headers, body = api["requests"][0]
     assert headers["Authorization"] == "Bearer sk-test-key-0123456789"
     assert body["model"] == "gpt-5.4-mini" and body["reasoning"] == {"effort": "low"}
     assert body["text"]["format"]["strict"] is True
-    assert "similarity" in body["text"]["format"]["schema"]["required"]
+    assert {"similarity", "signed"} <= set(body["text"]["format"]["schema"]["required"])
     content = body["input"][0]["content"]
     assert "Sotuv buyurtmasi" in content[0]["text"] and "INV/" in content[0]["text"]
     assert content[1]["image_url"].startswith("data:image/jpeg;base64,") and content[1]["detail"] == "high"

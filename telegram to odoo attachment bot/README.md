@@ -23,7 +23,8 @@ Natija:
 
 | Holat | Bot nima qiladi |
 |---|---|
-| Hujjat topildi | chatter'ga yuklaydi va rasmga 👍 qo'yadi, boshqa hech narsa yozmaydi |
+| Hujjat topildi va unga ruchka bilan qo'l qo'yilgan / yozilgan | chatter'ga yuklaydi va rasmga 👍 qo'yadi, boshqa hech narsa yozmaydi |
+| Hujjat topildi, lekin qo'l qo'yilmagan (faqat bosma matn) | yuklamaydi, rasmga reply qiladi: "✍️ Hujjatga qo'l qo'yilmagan. Qo'l qo'yilgan nusxasini tashlang." (`notify.unsigned_text`) |
 | Bizning hujjat (QR bizniki, yoki o'xshashlik ≥ `ai.min_similarity` (80%) va dunyabunya logotipi ko'rinadi), lekin qaysi hujjat ekani aniqlanmadi | faqat shu rasmga reply qiladi: "📷 Hujjat aniqlanmadi. Rasmni boshqatdan tiniqroq qilib tashlang (QR kod aniq ko'rinsin)" (`notify.unclear_text`) |
 | Hujjat emas (odamlar, mahsulot, boshqa narsa) | jimgina e'tiborsiz qoladi: reaksiya ham, javob ham yo'q, lokal nusxa darhol o'chiriladi |
 | Xato (masalan, Odoo soatlab ishlamadi) | 👎, adminga xabar |
@@ -53,6 +54,13 @@ sahifaga javob yoziladi — "⚠️ S87295 hujjatida sahifa yetishmayapti: 41–
 Sahifa raqamlari o'qilgan bo'lsa, ular ustun: "3-bet (41–60-qatorlar)". Tashlangan sahifalar baribir biriktiriladi. Joyi
 aniqlanmagan sahifa bo'lsa (u yo'qolgan sahifa bo'lishi mumkin), javob yozilmaydi. Matn: `notify.missing_pages_text`
 (bo'sh = tekshirilmaydi). Hujjat = bitta odamning bitta yozuvga biriktirilgan, oralig'i 120 s dan oshmagan rasmlari.
+
+**Faqat qo'l qo'yilgan hujjat** (2026-10-15). Har bir rasmni AI ko'radi, QR orqali topilganini ham (`signed`): imzo, qo'lda
+yozilgan so'z/son, belgi, chizilgan narsa bo'lsa biriktiriladi. Bosma matn, bo'sh imzo chizig'i yoki yolg'iz muhr hisobga
+olinmaydi. Ko'p sahifali hujjatda bitta sahifasi imzolangan bo'lsa, qolganlari ham biriktiriladi; imzoli sahifa keyinroq
+kelsa, oldin "qo'l qo'yilmagan" deyilgan sahifalar ham biriktiriladi va eski javob o'chiriladi. Shu sahifaning imzoli yangi
+surati eski imzosiz suratni ergashtirmaydi. Tekshirilmaydi: PDF, odam raqamini yozib tanlagan rasm, AI ko'ra olmagan rasm
+(AI o'chiq, kunlik limit). OpenAI ishlamay qolsa, QR'li rasm ham kutib turadi. `notify.unsigned_text: ""` = qoida o'chiq.
 
 **Burilgan rasmlar.** Yotiq yoki teskari surat avval tik holga keltiriladi va Odoo'ga **tik holda** yuklanadi (xom holida emas).
 Burilishni QR kod aniqlaydi. QR bo'lmasa, AI aytadi (`rotation`). AI yo'nalishni ba'zan adashtiradi, shuning uchun bot tik qilgach

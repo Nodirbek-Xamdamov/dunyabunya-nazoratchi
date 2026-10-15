@@ -139,6 +139,7 @@ async def _serve(cfg: AppConfig) -> int:
         bot, jobs, documents, admin_ids=cfg.env.admin_ids, chats=chats,
         messages=settings.notify.messages, success_message=settings.notify.success_message,
         unclear_text=settings.notify.unclear_text, missing_pages_text=settings.notify.missing_pages_text,
+        unsigned_text=settings.notify.unsigned_text,
     )
     processor = Processor(
         settings=settings, documents=documents, finder=finder, odoo=odoo, ai=ai, files=files, audit=audit,
