@@ -532,6 +532,26 @@ class JobRepository:
             end += 1
         return pages[start:end + 1]
 
+    async def list_record_reviews(self, job: Job, *, window_seconds: float) -> list[Job]:
+        """This person's photos in this chat placed on ``job``'s record but waiting in ``needs_review``, sent within
+        ``window_seconds`` of ``job`` (e.g. pages told "not signed" before the signed page came)."""
+        span = timedelta(seconds=window_seconds)
+        async with self._sf() as session:
+            rows = await session.execute(
+                select(Job)
+                .where(
+                    Job.chat_id == job.chat_id,
+                    Job.telegram_user_id == job.telegram_user_id,
+                    Job.odoo_model == job.odoo_model,
+                    Job.odoo_record_id == job.odoo_record_id,
+                    Job.status == Status.NEEDS_REVIEW,
+                    Job.id != job.id,
+                    Job.created_at.between(job.created_at - span, job.created_at + span),
+                )
+                .order_by(Job.id)
+            )
+            return list(rows.scalars())
+
     async def album_asked(self, job: Job) -> bool:
         """Another photo of this album already got the "send a clearer photo" reply (one reply per album)."""
         if not job.media_group_id:

@@ -123,6 +123,9 @@ class NotifySettings(_Strict):
     # Reply to the last page (the QR page) of a multi-page document when a page before it was not sent:
     # {document} = its number, {missing} = e.g. "3-bet (41–60-qatorlar)". Empty: no such check.
     missing_pages_text: str = "⚠️ {document} hujjatida sahifa yetishmayapti: {missing}. Shu sahifani ham tiniq qilib tashlang."
+    # Only documents signed / written on with a pen are attached (the AI looks at every picture, QR or not; PDFs are
+    # not checked). An unsigned one is not attached and gets this reply. Empty: no such check, everything is attached.
+    unsigned_text: str = "✍️ Hujjatga qo'l qo'yilmagan. Qo'l qo'yilgan nusxasini tashlang."
 
     @field_validator("missing_pages_text")
     @classmethod

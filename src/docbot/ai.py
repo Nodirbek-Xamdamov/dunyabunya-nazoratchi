@@ -27,7 +27,7 @@ SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": [
         "similarity", "dunyabunya", "rotation", "doc_number", "partner", "phone", "person", "total", "first_item", "last_item",
-        "page_number", "page_count",
+        "page_number", "page_count", "signed",
     ],
     "properties": {
         "similarity": {
@@ -57,6 +57,12 @@ SCHEMA: dict[str, Any] = {
         "last_item": {"type": ["integer", "null"], "description": "row number (№ column) of the last goods row on this page"},
         "page_number": {"type": ["integer", "null"], "description": "page number printed at the bottom of the page (2 in '2/5')"},
         "page_count": {"type": ["integer", "null"], "description": "total pages, if printed with the page number (5 in '2/5')"},
+        "signed": {
+            "type": "boolean",
+            "description": "true if anything is written or drawn BY HAND with a pen on the paper: a signature, handwritten "
+            "words or numbers, ticks, crosses, scribbles. false if it shows only printed content (printed text and empty "
+            "signature lines do not count, nor does a stamp alone)",
+        },
     },
 }
 
@@ -79,6 +85,7 @@ class Extraction:
     last_item: int | None = None
     page_number: int | None = None  # printed at the bottom of the page
     page_count: int | None = None
+    signed: bool | None = None  # pen marks on the paper (a signature, handwriting); None: not asked (older answers)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -100,6 +107,7 @@ class Extraction:
             last_item=_row(data.get("last_item")),
             page_number=_row(data.get("page_number")),
             page_count=_row(data.get("page_count")),
+            signed=data["signed"] if isinstance(data.get("signed"), bool) else None,
         )
 
 
@@ -129,8 +137,8 @@ def build_prompt(documents: Documents) -> str:
         "They are printed on white paper with the dunyabunya logo, a title with the document number, a table of goods "
         "and usually a QR code in the bottom left corner. A long document has several pages: every page repeats the "
         "document number small in the top right corner and its page number at the bottom; the goods rows are numbered "
-        "on across pages; the last page ends with the QR code. First rate the similarity. Then, if it is a document, read "
-        "ONLY the document itself; ignore chat messages, invoice numbers (INV/...) and other text around it. "
+        "on across pages; the last page ends with the QR code. A handed-over document is signed with a pen. First rate "
+        "the similarity. Then, if it is a document, read ONLY the document itself; ignore chat messages, invoice numbers (INV/...) and other text around it. "
         "Copy the fields exactly as printed. If a field is not readable, return null. Never guess digits."
     )
 

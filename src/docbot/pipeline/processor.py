@@ -32,6 +32,13 @@ with a transition (see ``WorkerPool``); network trouble raises ``TransientError`
 The last page (the QR page) waits until the sender's other photos are read, then looks at the pages of its
 document for a hole (the user's rule): rows 1-20, 21-40, 61-80 and 81-100 with the QR code means the page
 with rows 41-60 was not sent, and the QR page gets a reply saying so (``notify.missing_pages_text``).
+
+Only a document signed or written on with a pen is attached (the user's rule, ``notify.unsigned_text``): the AI
+looks at every picture, also one placed by its QR code. An unsigned one goes to needs_review and gets the reply
+"send the signed one". A signature usually stands on one page only, so an unsigned page is attached when another
+page of the same document (same person, chat and record, within ``pages.window_seconds``) is signed; such a page
+told "not signed" before the signed page came is let in once it comes. PDFs and a record chosen by a person are
+not checked, nor a picture the AI could not look at.
 """
 
 import asyncio
@@ -48,7 +55,7 @@ from docbot.config import AppSettings
 from docbot.db.models import Job
 from docbot.db.repositories.audit import AuditRepository
 from docbot.documents import Documents, RecordRef
-from docbot.errors import PermanentError, TransientError
+from docbot.errors import InvalidTransition, LeaseLost, PermanentError, TransientError
 from docbot.odoo import OdooClient, OdooRecord
 from docbot.pipeline.files import FileStore, extension
 from docbot.pipeline.finder import RecordFinder
@@ -84,6 +91,21 @@ def page_info(ai: dict[str, Any] | None) -> tuple[int | None, int | None, int | 
     """(page number, first goods row, last goods row) as the AI read them."""
     ai = ai or {}
     return ai.get("page_number"), ai.get("first_item"), ai.get("last_item")
+
+
+def same_page(a: tuple, b: tuple) -> bool:
+    """Two photos show the same page (e.g. a new photo of it), as far as their ``page_info`` tells; unknown = the same."""
+    (a_page, a_first, a_last), (b_page, b_first, b_last) = a, b
+    if a_page and b_page:
+        return a_page == b_page
+    if a_first and b_first:
+        return (a_first, a_last) == (b_first, b_last)
+    return True
+
+
+def signed(job: Job) -> bool | None:
+    """The AI saw pen marks on the picture (True), saw none (False), or did not look (None)."""
+    return ((job.extracted_data or {}).get("ai") or {}).get("signed")
 
 
 def comes_right_before(a: tuple, b: tuple) -> bool:
@@ -217,7 +239,7 @@ class Processor:
         refs = [RecordRef.from_dict(item) for item in extracted.get("refs", [])]
         records = await self._finder.find_all(refs)
         if len(records) == 1:
-            await self._read_page_number(ctx, extracted)
+            await self._read_qr_page(ctx, extracted)
             await self._ready(ctx, records[0], ctx.job.method or Method.QR, extracted)
         elif len(records) > 1:
             extracted["candidates"] = [candidate(r) for r in records]
@@ -227,23 +249,33 @@ class Processor:
             labels = ", ".join(ref.label for ref in refs)
             await self._to_ai(ctx, f"{labels} Odoo'da topilmadi", extracted)
 
-    async def _read_page_number(self, ctx: JobContext, extracted: dict[str, Any]) -> None:
-        """A QR page sent together with other photos: its page number lets the pages in between chain to it.
+    async def _read_qr_page(self, ctx: JobContext, extracted: dict[str, Any]) -> None:
+        """The AI also looks at a picture its QR code placed: is it signed (``notify.unsigned_text``), and its page
+        number, which lets the pages of a document sent together with it chain to it.
 
-        Best effort only: without it the page is attached all the same.
+        Without the AI's answer (switched off, daily limit, refused) the page is attached all the same; an OpenAI
+        outage is waited out when the signature has to be checked.
         """
         if self._ai is None or "ai" in extracted:
             return
-        if not await ctx.jobs.list_page_siblings(ctx.job, window_seconds=self._settings.pages.window_seconds):
+        check_signature = bool(self._settings.notify.unsigned_text)
+        window = self._settings.pages.window_seconds
+        if not check_signature and not await ctx.jobs.list_page_siblings(ctx.job, window_seconds=window):
             return
         if await self._ai_calls_today() >= self._settings.ai.daily_limit:
+            log.warning("job %s: AI daily limit reached, the QR page is not looked at", ctx.job.id)
             return
         try:
             data = await self._files.load(ctx)
             if codes.is_pdf(data):
-                return  # a PDF is attached whole: no pages to chain
+                return  # a PDF is attached whole: no pages to chain, no pen marks to check
             result = await self._ai_read(ctx, data, rotate_cw=int(extracted.get("rotate_cw") or 0))
-        except (codes.UnreadableFile, AiRejected, TransientError) as exc:
+        except (codes.UnreadableFile, AiRejected) as exc:
+            log.info("job %s: the QR page not read by the AI: %s", ctx.job.id, exc)
+            return
+        except TransientError as exc:
+            if check_signature:
+                raise
             log.info("job %s: page number of the QR page not read: %s", ctx.job.id, exc)
             return
         extracted["ai"] = result.extraction.as_dict()
@@ -428,6 +460,12 @@ class Processor:
         job = ctx.job
         if job.odoo_model is None or job.odoo_record_id is None:
             raise PermanentError("ready, lekin Odoo yozuvi belgilanmagan")
+        if not await self._signed(ctx):
+            extracted = {**(job.extracted_data or {}), "unsigned": True,
+                         "candidate": {"model": job.odoo_model, "id": job.odoo_record_id, "name": job.odoo_record_name}}
+            await self._ask(ctx, f"{job.odoo_record_name}: hujjatga qo'l qo'yilmagan", extracted)
+            return
+        await self._let_in_unsigned_pages(ctx)
         missing = await self._missing_pages(ctx)
         data = await self._files.load(ctx)
         rotate_cw = int((ctx.job.extracted_data or {}).get("rotate_cw") or 0)
@@ -448,6 +486,44 @@ class Processor:
             extracted["missing_pages"] = missing  # the notifier replies to this last page
         log.info("job %s: attached to %s %s (attachment %s)", job.id, job.odoo_model, job.odoo_record_name, attachment_id)
         await ctx.transition(Status.ATTACHED, extracted_data=extracted)
+
+    async def _signed(self, ctx: JobContext) -> bool:
+        """May this file go into the chatter: it is signed, or another page of its document is (see the module doc).
+
+        While the sender's other photos are still being read it raises a non-counting TransientError.
+        """
+        job, pages = ctx.job, self._settings.pages
+        if not self._settings.notify.unsigned_text or job.method is Method.HUMAN or job.mime_type == "application/pdf":
+            return True
+        if signed(job) is not False:
+            return True
+        siblings = await ctx.jobs.list_page_siblings(job, window_seconds=pages.window_seconds)
+        age = (self._clock() - job.created_at).total_seconds()
+        being_read = [s for s in siblings if s.status in (Status.RECEIVED, Status.QR_OK, Status.AI_PROCESSING)]
+        if (being_read or (siblings and age < pages.album_grace_seconds)) and age < pages.window_seconds:
+            raise TransientError("hujjatning imzoli sahifasi kutilmoqda", retry_after=pages.retry_seconds, counts=False)
+        mine = page_info((job.extracted_data or {}).get("ai"))
+        document = await ctx.jobs.list_record_pages(job, window_seconds=pages.window_seconds)
+        return any(
+            page.id != job.id and signed(page) and not same_page(page_info((page.extracted_data or {}).get("ai")), mine)
+            for page in document
+        )
+
+    async def _let_in_unsigned_pages(self, ctx: JobContext) -> None:
+        """A signed page: the other pages of its document told "not signed" before it came are attached after all."""
+        job = ctx.job
+        if not self._settings.notify.unsigned_text or signed(job) is not True:
+            return
+        mine = page_info((job.extracted_data or {}).get("ai"))
+        for page in await ctx.jobs.list_record_reviews(job, window_seconds=self._settings.pages.window_seconds):
+            data = page.extracted_data or {}
+            if not data.get("unsigned") or same_page(page_info(data.get("ai")), mine):
+                continue
+            try:
+                await ctx.jobs.transition(page.id, Status.READY, worker_id=None, actor=ctx.actor, event="signed_page_came")
+            except (InvalidTransition, LeaseLost):
+                continue
+            log.info("job %s: the signed page (job %s) came, attached after all", page.id, job.id)
 
     async def _missing_pages(self, ctx: JobContext) -> str | None:
         """The last page of a document sent in several photos: the pages before it that were not sent (``missing_parts``).

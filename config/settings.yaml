@@ -2,7 +2,7 @@
 # Noma'lum kalit xato hisoblanadi (yozuv xatosi jimgina e'tiborsiz qolmasligi uchun).
 
 queue:
-  workers: 4                   # parallel ishlovchi worker'lar soni
+  workers: 1                   # parallel ishlovchi worker'lar soni (1 = izma-iz; 4 da OpenAI 429 berdi, 2026-10-15)
   poll_interval_seconds: 1     # navbat bo'sh bo'lganda qancha kutib qayta tekshiriladi
   lease_seconds: 300           # job qulflanish muddati; worker o'lsa, shundan keyin job qayta olinadi
   max_attempts: 20             # bitta bosqichdagi ketma-ket xatolar chegarasi, keyin job `failed` bo'ladi
@@ -47,6 +47,10 @@ notify:
   # Ko'p sahifali hujjatning oxirgi (QR) sahifasiga javob: undan oldingi sahifalardan biri tashlanmagan bo'lsa.
   # {document} = hujjat raqami, {missing} = masalan "3-bet (41–60-qatorlar)". Bo'sh ("") bo'lsa, tekshirilmaydi.
   missing_pages_text: "⚠️ {document} hujjatida sahifa yetishmayapti: {missing}. Shu sahifani ham tiniq qilib tashlang."
+  # Faqat ruchka bilan qo'l qo'yilgan / yozilgan / chizilgan hujjat rasmi biriktiriladi (QR'li rasmni ham AI ko'radi;
+  # PDF tekshirilmaydi). Qo'l qo'yilmagan rasm biriktirilmaydi va unga shu matn bilan javob yoziladi. Ko'p sahifali
+  # hujjatda bitta sahifasi imzolangan bo'lsa, qolgan sahifalari ham biriktiriladi. Bo'sh ("") bo'lsa, tekshirilmaydi.
+  unsigned_text: "✍️ Hujjatga qo'l qo'yilmagan. Qo'l qo'yilgan nusxasini tashlang."
 
 pages:                         # ko'p sahifali hujjat (albom yoki ketma-ket yuborilgan rasmlar)
   window_seconds: 120          # bir odamning bir chatda shu vaqt ichidagi rasmlari bitta hujjat sahifalari bo'lishi mumkin

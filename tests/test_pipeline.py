@@ -32,6 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 USER, ADMIN, CHAT = 8001, 9001, 8001  # a private chat: its id is the user's id
 GROUP = -1001234567890
 UNCLEAR = "📷 Hujjat aniqlanmadi. Rasmni boshqatdan tiniqroq qilib tashlang (QR kod aniq ko'rinsin)."
+UNSIGNED = "✍️ Hujjatga qo'l qo'yilmagan. Qo'l qo'yilgan nusxasini tashlang."
 TOKEN = "9d0ac27f-486e-46a6-a391-36fec7eeb6a0"
 PORTAL = f"https://db.example.com/my/orders/89452?access_token={TOKEN}"
 
@@ -152,7 +153,7 @@ class Harness:
         finder = RecordFinder(self.odoo, self.documents)
         self.notifier = Notifier(
             self.bot, self.jobs, self.documents, admin_ids=[ADMIN], messages=messages, unclear_text=unclear_text,
-            missing_pages_text=self.settings.notify.missing_pages_text,
+            missing_pages_text=self.settings.notify.missing_pages_text, unsigned_text=self.settings.notify.unsigned_text,
         )
         self.processor = Processor(
             settings=self.settings, documents=self.documents, finder=finder, odoo=self.odoo, ai=ai,
@@ -212,7 +213,7 @@ async def test_a_qr_photo_goes_into_the_chatter_with_only_a_like(harness):
     [item] = harness.odoo.chatter
     assert (item["mimetype"], item["body"], item["marker"]) == ("image/jpeg", "Telegram: Ali Valiyev (@ali)", f"telegram-docbot job {job.id}")
     assert item["filename"].startswith("S82409_") and item["filename"].endswith(".jpg")
-    assert harness.ai.calls == 0  # the QR was enough
+    assert harness.ai.calls == 1  # the QR found the record; the AI only looks for a signature
     assert harness.bot.reactions == [(GROUP, job.message_id, "👍")]
     assert harness.bot.sent == []  # no reply for a document that was placed
 
@@ -698,3 +699,96 @@ async def test_no_reply_about_missing_pages_when_it_is_switched_off(session_fact
 )
 def test_missing_parts(pages, missing):
     assert missing_parts(pages) == missing
+
+
+# ----------------------------------------------------------------------------- only signed documents
+
+
+async def test_an_unsigned_qr_photo_is_not_attached_and_asked_for_the_signed_one(session_factory, tmp_path):
+    h = make(session_factory, tmp_path, dict(DOCUMENT, signed=False))
+    job = await h.send(jpeg(page_with_code(PORTAL)), chat=GROUP, thread=77)
+    await h.process(job)
+    waiting = await h.jobs.get(job.id)
+    assert (waiting.status, waiting.odoo_record_name) == (Status.NEEDS_REVIEW, "S82409")
+    assert h.odoo.chatter == [] and h.bot.reactions == []
+    [reply] = h.bot.sent
+    assert (reply.chat_id, reply.thread, reply.reply_to, reply.text) == (GROUP, 77, job.message_id, UNSIGNED)
+    assert await h.notifier.flush() == 0  # asked once
+
+
+async def test_a_signed_photo_is_attached(session_factory, tmp_path):
+    h = make(session_factory, tmp_path, dict(DOCUMENT, signed=True))
+    qr, ai = await h.send(jpeg(page_with_code(PORTAL))), await h.send(page(5))
+    await h.process(qr, ai)
+    assert [(await h.jobs.get(j.id)).status for j in (qr, ai)] == [Status.ATTACHED] * 2
+    assert h.bot.sent == []
+
+
+async def test_an_unsigned_photo_read_by_the_ai_gets_the_same_reply(session_factory, tmp_path):
+    h = make(session_factory, tmp_path, dict(DOCUMENT, signed=False))
+    job = await h.send(jpeg(page_with_code(None)))
+    await h.process(job)
+    assert (await h.jobs.get(job.id)).status is Status.NEEDS_REVIEW
+    assert [m.text for m in h.bot.sent] == [UNSIGNED] and h.odoo.chatter == []
+
+
+async def test_the_unsigned_pages_of_a_document_signed_on_its_last_page_are_attached(session_factory, tmp_path):
+    h = make(session_factory, tmp_path, SELFIE, workers=1)
+    h.ai.by_size = {size(1): dict(DOCUMENT, first_item=1, last_item=34, signed=False),
+                    size(2): dict(MIDDLE, first_item=35, last_item=50, signed=True)}
+    jobs = [await h.send(page(1), chat=GROUP), await h.send(page(2, PORTAL), chat=GROUP)]
+    await h.process(*jobs)
+    assert pages_of(h) == [("sale.order", 89452)] * 2
+    assert h.bot.sent == []
+
+
+async def test_a_page_told_unsigned_is_attached_when_the_signed_page_comes(session_factory, tmp_path):
+    h = make(session_factory, tmp_path, SELFIE, workers=1)
+    h.ai.by_size = {size(1): dict(DOCUMENT, first_item=1, last_item=34, signed=False),
+                    size(2): dict(MIDDLE, first_item=35, last_item=50, signed=True)}
+    first = await h.send(page(1), chat=GROUP)
+    await h.process(first)
+    assert [m.text for m in h.bot.sent] == [UNSIGNED]
+    second = await h.send(page(2, PORTAL), chat=GROUP)  # the signed last page, sent a little later
+    await h.process(second)
+    async with h.running():
+        await wait_for_status(h.jobs, first.id, Status.ATTACHED)
+    await h.notifier.flush()
+    assert pages_of(h) == [("sale.order", 89452)] * 2
+    assert (GROUP, h.bot.sent[0].message_id) in h.bot.deleted  # the "not signed" reply is gone
+
+
+async def test_a_new_signed_photo_of_the_same_page_does_not_take_the_unsigned_one_along(session_factory, tmp_path):
+    h = make(session_factory, tmp_path, SELFIE, workers=1)
+    h.ai.by_size = {size(1): dict(DOCUMENT, signed=False), size(2): dict(DOCUMENT, signed=True)}
+    unsigned = await h.send(page(1, PORTAL), chat=GROUP)
+    await h.process(unsigned)
+    resent = await h.send(page(2, PORTAL), chat=GROUP)
+    await h.process(resent)
+    assert (await h.jobs.get(unsigned.id)).status is Status.NEEDS_REVIEW
+    assert [item["marker"] for item in h.odoo.chatter] == [f"telegram-docbot job {resent.id}"]
+
+
+async def test_a_number_typed_by_a_person_attaches_an_unsigned_photo(session_factory, tmp_path):
+    h = make(session_factory, tmp_path, dict(DOCUMENT, signed=False))
+    job = await h.send(jpeg(page_with_code(PORTAL)))
+    await h.process(job)
+    await h.review.answer_text(ADMIN, "S82409", reply_to=job.message_id, chat_id=CHAT)
+    await h.process(job, until=(Status.ATTACHED,))
+    assert pages_of(h) == [("sale.order", 89452)]
+
+
+async def test_without_the_signature_rule_an_unsigned_photo_is_attached(session_factory, tmp_path):
+    h = make(session_factory, tmp_path, dict(DOCUMENT, signed=False))
+    h.processor._settings = h.settings.model_copy(update={"notify": NotifySettings(unsigned_text="")})
+    job = await h.send(jpeg(page_with_code(PORTAL)))
+    await h.process(job)
+    assert (await h.jobs.get(job.id)).status is Status.ATTACHED
+    assert h.ai.calls == 0  # nothing to look for
+
+
+async def test_a_pdf_is_not_checked_for_a_signature(session_factory, tmp_path):
+    h = make(session_factory, tmp_path, dict(DOCUMENT, signed=False))
+    job = await h.send(text_pdf("XARIDORDAN BUYURTMA No S82409"), mime="application/pdf", file_name="S82409.pdf")
+    await h.process(job)
+    assert (await h.jobs.get(job.id)).status is Status.ATTACHED and h.ai.calls == 0
