@@ -220,7 +220,9 @@ async def test_report() -> None:
     for category, text in report.category_summaries.items():
         print(f"   [{category}]\n   {text}\n")
     print(f"   [Umumiy xulosa]\n   {report.overall_summary}\n")
-    print(f"Fayl: {path}")
+    for group in report.groups:
+        print(f"   [{group.title}] jami {group.stats.total}, javobsiz {len(group.missed)}\n   {group.overall_summary}\n")
+    print(f"Fayl: {path} (varaqlar: Umumiy + {len(report.groups)} ta guruh)")
 
 
 async def main() -> None:

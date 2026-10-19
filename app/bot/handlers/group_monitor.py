@@ -11,8 +11,10 @@ Saqlanmaydi: xizmat xabarlari (qo'shildi/chiqdi va h.k.), botlarning xabarlari, 
 kanaldan avtomatik tushgan postlar, hisobot guruhining o'zi (`REPORT_CHAT_ID`) va
 `GROUP_MONITOR_EXCLUDED_GROUP_IDS`dagi guruhlar.
 
-Xodim (`is_staff`) = guruh admini yoki egasi (anonim admin ham). Xodim xabarlari tasniflanmaydi,
-lekin suhbat konteksti va "5 daqiqa qoidasi" uchun saqlanadi.
+Xodim (`is_staff`) = guruh admini yoki egasi (anonim admin ham), yoki ismi/username'ida
+`STAFF_NAME_KEYWORDS`dagi so'z bor odam ("dunyabunya Santexnika" kabi kompaniya akkauntlari
+ko'pincha admin emas). Xodim xabarlari tasniflanmaydi, lekin suhbat konteksti va "5 daqiqa
+qoidasi" uchun saqlanadi.
 
 Bot guruhdagi oddiy xabarlarni ko'rishi uchun shu guruhda ADMIN bo'lishi (yoki BotFather'da
 privacy mode o'chirilgan bo'lishi) shart.
@@ -104,7 +106,7 @@ async def collect(message: Message, *, edited: bool = False) -> None:
     sender_id, username, name, anonymous_admin = sender
 
     group = await monitor_sla.group_for_chat(message.bot, message.chat.id, message.chat.title)
-    is_staff = anonymous_admin or sender_id in group.admin_ids
+    is_staff = anonymous_admin or sender_id in group.admin_ids or monitor_sla.is_staff_name(name, username)
     media_type, file_id = media_of(message)
     replied = message.reply_to_message
     # Forum-guruhda topik ichidagi har bir xabarga topikni yaratgan servis xabari "reply" bo'lib keladi

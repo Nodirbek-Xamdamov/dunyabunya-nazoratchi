@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 from app import llm_client, monitor_db, monitor_report, monitor_sla
 from app.llm_client import LLMUnavailable
 from app.monitor_db import DailySummary
-from tests.monitor_helpers import CHAT, DAY, add_group, add_message, all_rows, classify
+from tests.monitor_helpers import ADMIN_ID, CHAT, DAY, OTHER_CHAT, add_group, add_message, all_rows, classify
 
 REPORT_CHAT = -1009990000001
 
@@ -30,14 +30,22 @@ def _settings(monkeypatch, tmp_path):
 
 
 def _fake_model(monkeypatch):
-    """Model har so'rovga so'rovdagi toifa nomini qaytaradi -- qaysi toifa uchun chaqirilgani ko'rinadi."""
+    """Model har so'rovga so'rovning birinchi qatorini (toifa yoki guruh nomi) qaytaradi -- qaysi
+    toifa/guruh uchun chaqirilgani ko'rinadi."""
     async def request(system_prompt, user_text, schema, name):
         first_line = user_text.splitlines()[0]
+        if name == "group_summary":
+            categories = schema["properties"]["toifalar"]["required"]
+            return {"toifalar": {c: f"AI [{first_line}] {c}" for c in categories}, "umumiy": f"AI [{first_line}]"}
         return {"summary": f"AI xulosa [{first_line}]"}
 
     mock = AsyncMock(side_effect=request)
     monkeypatch.setattr(llm_client, "request_json", mock)
     return mock
+
+
+def _calls(model, name):
+    return [call for call in model.await_args_list if call.args[3] == name]
 
 
 async def _seed_day():
@@ -64,8 +72,8 @@ async def test_numbers_come_from_code_and_model_only_writes_text(monkeypatch):
     report = await monitor_report.build_report(DAY)
 
     assert (report.stats.total, report.stats.complaints, report.stats.missed, report.stats.filtered) == (5, 1, 1, 1)
-    # Xabari yo'q toifa uchun model chaqirilmaydi: xabari bor 4 ta toifa + umumiy xulosa
-    assert model.await_count == 5
+    # Xabari yo'q toifa uchun model chaqirilmaydi: xabari bor 4 ta toifa + umumiy xulosa, guruhga esa bitta so'rov
+    assert len(_calls(model, "summary")) == 5 and len(_calls(model, "group_summary")) == 1
     assert report.category_summaries["Dastavka va Logistika"] == "AI xulosa [Toifa: Dastavka va Logistika]"
     assert report.category_summaries["Komplektatsiya va Hajm"] == "Bugun bu toifada xabar bo'lmadi"
     assert list(report.category_summaries) == list(monitor_db.CATEGORIES)
@@ -111,7 +119,19 @@ async def test_report_is_built_without_model_and_pending_messages_are_classified
     assert "kompaniyaga oid mijoz xabari bo'lmadi" in report.overall_summary
 
 
-async def test_excel_has_stats_table_summaries_and_missed_sheet(monkeypatch):
+def _texts(sheet, column="A"):
+    return [cell.value for cell in sheet[column] if cell.value]
+
+
+def _row(sheet, row, columns="ABCDEFGHI"):
+    return [sheet[f"{column}{row}"].value for column in columns]
+
+
+def _find(sheet, text) -> int:
+    return next(cell.row for cell in sheet["A"] if cell.value == text)
+
+
+async def test_excel_overall_sheet_has_stats_summaries_and_missed_requests_below(monkeypatch):
     await _seed_day()
     _fake_model(monkeypatch)
     report = await monitor_report.build_report(DAY)
@@ -119,8 +139,9 @@ async def test_excel_has_stats_table_summaries_and_missed_sheet(monkeypatch):
 
     assert path.name == "hisobot_2026-10-13.xlsx"
     workbook = load_workbook(path)
-    assert workbook.sheetnames == ["Kunlik hisobot", "Javobsiz so'rovlar"]
-    sheet = workbook["Kunlik hisobot"]
+    assert workbook.sheetnames == ["Umumiy", "Chilonzor obyekti"]
+    sheet = workbook["Umumiy"]
+    assert sheet["A1"].value == "Umumiy (barcha guruhlar) — 2026-yil 13-oktabr, seshanba"
     rows = [[cell.value for cell in row[:6]] for row in sheet.iter_rows(min_row=3, max_row=14)]
     assert rows[0][0] == "Toifalar jadvali"
     assert rows[1] == ["Toifa", "Jami", "Shikoyat", "Ijobiy", "Neytral", "Ulush"]
@@ -131,26 +152,84 @@ async def test_excel_has_stats_table_summaries_and_missed_sheet(monkeypatch):
     assert sheet["A4"].font.bold and sheet["A13"].font.bold and sheet["F5"].number_format == "0%"
     assert all(row[1] == row[2] + row[3] + row[4] for row in rows[2:11])
 
-    texts = [cell.value for cell in sheet["A"] if cell.value]
+    texts = _texts(sheet)
     for index, category in enumerate(monitor_db.CATEGORIES, start=1):
         heading = f"{index}) {category} — umumiy xulosa"
         assert texts[texts.index(heading) + 1] == report.category_summaries[category]
-    assert texts[-2:] == ["Umumiy xulosa", report.overall_summary]
+    assert texts[texts.index("Umumiy xulosa") + 1] == report.overall_summary
     summary_cell = sheet.cell(row=17, column=1)
     assert summary_cell.alignment.wrap_text and "A17:F17" in [str(r) for r in sheet.merged_cells.ranges]
 
-    missed = [[cell.value for cell in row] for row in workbook["Javobsiz so'rovlar"].iter_rows()]
-    assert missed == [
-        ["Vaqt", "Guruh", "Mijoz", "So'rov mazmuni", "Menejer (@username)"],
-        ["11:00", "Chilonzor obyekti", "Vali Mijoz (@vali)", "Mijoz armatura bor-yo'qligini so'radi", "@menejer_bek"],
+    # Umumiy xulosa ostida -- hamma guruhlarning javobsiz so'rovlari
+    start = _find(sheet, "Javobsiz so'rovlar (1 ta)")
+    assert start > _find(sheet, "Umumiy xulosa")
+    assert _row(sheet, start + 1) == [
+        "Guruh", "Vaqt", "Mijoz", None, "So'rov mazmuni", None, None, "Keyin kimdir javob berdimi", "Menejer",
+    ]
+    assert _row(sheet, start + 2) == [
+        "Chilonzor obyekti", "11:00", "Vali Mijoz (@vali)", None, "Mijoz armatura bor-yo'qligini so'radi", None, None,
+        "Yo'q", "@menejer_bek",
     ]
 
 
-async def test_missed_sheet_says_all_answered_and_shows_groups_without_manager(monkeypatch):
+async def test_each_group_gets_its_own_sheet_with_its_report_and_missed_requests(monkeypatch):
+    await _seed_day()  # "Chilonzor obyekti": 5 ta xabar, 1 ta javobsiz so'rov
+    await add_group(OTHER_CHAT, "Yunusobod: ombor [2]", managers=())
+    await classify(await add_message(1, "Rahmat!", chat_id=OTHER_CHAT), "Ijobiy Fikrlar", "Ijobiy")
+    request = await add_message(2, "Hisob-faktura qachon?", chat_id=OTHER_CHAT, minutes=120)
+    await classify(request, "Narx va To'lovlar", needs_manager=True, summary="Mijoz hisob-faktura so'radi")
+    await monitor_sla.open_checks([request])
+    await add_message(3, "Ertaga yuboramiz", chat_id=OTHER_CHAT, sender_id=ADMIN_ID, name="Ali", username="ali",
+                      is_staff=True, minutes=150)
+    await add_group(-1001000000003, "Sergeli (xabarsiz)")
+    model = _fake_model(monkeypatch)
+
+    report = await monitor_report.build_report(DAY)
+    # Xabari yo'q guruh uchun model chaqirilmaydi (guruhlar parallel tayyorlanadi -- tartib har xil)
+    assert sorted(call.args[1].splitlines()[0] for call in _calls(model, "group_summary")) == [
+        "Guruh: Chilonzor obyekti", "Guruh: Yunusobod: ombor [2]",
+    ]
+    assert [group.title for group in report.groups] == ["Chilonzor obyekti", "Sergeli (xabarsiz)", "Yunusobod: ombor [2]"]
+    workbook = load_workbook(monitor_report.write_excel(report))
+    # Guruhlar alifbo tartibida, varaq nomida Excel taqiqlagan belgilar yo'q
+    assert workbook.sheetnames == ["Umumiy", "Chilonzor obyekti", "Sergeli (xabarsiz)", "Yunusobod- ombor -2-"]
+
+    sheet = workbook["Yunusobod- ombor -2-"]
+    assert sheet["A1"].value == "Yunusobod: ombor [2] — 2026-yil 13-oktabr, seshanba"
+    rows = {row[0]: row[1:6] for row in sheet.iter_rows(min_row=5, max_row=14, max_col=6, values_only=True)}
+    assert rows["Ijobiy Fikrlar"] == (1, 0, 1, 0, 0.5) and rows["Jami kompaniyaga oid"] == (2, 0, 1, 1, 1)
+    texts = _texts(sheet)
+    assert texts[texts.index("5) Narx va To'lovlar — umumiy xulosa") + 1] == "AI [Guruh: Yunusobod: ombor [2]] Narx va To'lovlar"
+    assert texts[texts.index("1) Dastavka va Logistika — umumiy xulosa") + 1] == "Bugun bu toifada xabar bo'lmadi"
+    overall = texts[texts.index("Guruh bo'yicha xulosa") + 1]
+    assert overall.startswith("AI [Guruh: Yunusobod: ombor [2]]") and "Javobsiz qolgan so'rovlar: 1 ta" in overall
+    start = _find(sheet, "Javobsiz so'rovlar (1 ta)")
+    assert _row(sheet, start + 1, "ABCDEFGH") == [
+        "Mijoz", "Vaqt", "So'rov mazmuni", None, None, None, "Keyin kimdir javob berdimi", "Menejer",
+    ]
+    assert _row(sheet, start + 2, "ABCDEFGH") == [
+        "Vali Mijoz (@vali)", "12:00", "Mijoz hisob-faktura so'radi", None, None, None,
+        "Ha — Ali (@ali), 30 daqiqadan keyin", "menejer yo'q",
+    ]
+
+    # Xabarsiz guruh varag'i ham bor, model chaqirilmagan
+    quiet = workbook["Sergeli (xabarsiz)"]
+    texts = _texts(quiet)
+    assert "kompaniyaga oid mijoz xabari bo'lmadi" in texts[texts.index("Guruh bo'yicha xulosa") + 1]
+    assert texts[-1] == "Barcha so'rovlarga 5 daqiqada javob berilgan"
+
+    # Umumiy varaqda ikkala guruhning javobsiz so'rovi
+    start = _find(workbook["Umumiy"], "Javobsiz so'rovlar (2 ta)")
+    assert [workbook["Umumiy"][f"A{start + offset}"].value for offset in (2, 3)] == [
+        "Chilonzor obyekti", "Yunusobod: ombor [2]",
+    ]
+
+
+async def test_missed_list_says_all_answered_and_shows_groups_without_manager(monkeypatch):
     _fake_model(monkeypatch)
     report = await monitor_report.build_report(DAY)
-    sheet = load_workbook(monitor_report.write_excel(report))["Javobsiz so'rovlar"]
-    assert sheet["A1"].value == "Barcha so'rovlarga 5 daqiqada javob berilgan"
+    sheet = load_workbook(monitor_report.write_excel(report))["Umumiy"]
+    assert _texts(sheet)[-2:] == ["Javobsiz so'rovlar (0 ta)", "Barcha so'rovlarga 5 daqiqada javob berilgan"]
 
     await add_group(managers=())
     request = await add_message(1, "Sement bormi?")
@@ -158,8 +237,63 @@ async def test_missed_sheet_says_all_answered_and_shows_groups_without_manager(m
     await monitor_sla.open_checks([request])
     await monitor_db.resolve_checks(datetime.now(monitor_db.local_tz()))
     report = await monitor_report.build_report(DAY)
-    sheet = load_workbook(monitor_report.write_excel(report))["Javobsiz so'rovlar"]
-    assert sheet["E2"].value == "menejer yo'q"
+    workbook = load_workbook(monitor_report.write_excel(report))
+    heading = "Javobsiz so'rovlar (1 ta)"
+    sheet = workbook["Umumiy"]
+    assert sheet[f"I{_find(sheet, heading) + 2}"].value == "menejer yo'q"
+    group_sheet = workbook["Chilonzor obyekti"]
+    assert group_sheet[f"H{_find(group_sheet, heading) + 2}"].value == "menejer yo'q"
+
+
+@pytest.mark.parametrize("titles, expected", [
+    (["Ombor/2024: *yangi*?"], ["Ombor-2024- -yangi--"]),
+    (["A" * 40], ["A" * 31]),
+    (["Guruh", "guruh", "GURUH"], ["Guruh", "guruh (2)", "GURUH (3)"]),
+    (["Umumiy"], ["Umumiy (2)"]),
+    (["'[]'", "History"], ["--", "History guruhi"]),
+])
+def test_sheet_names_are_valid_and_unique(titles, expected):
+    used = {"umumiy"}
+    names = [monitor_report.sheet_name(title, used) for title in titles]
+    assert names == expected and all(len(name) <= 31 for name in names)
+
+
+async def test_removed_group_without_messages_gets_no_sheet(monkeypatch):
+    await add_group(CHAT, "Chilonzor obyekti")
+    await add_group(OTHER_CHAT, "Eski guruh")
+    await monitor_db.set_group_present(OTHER_CHAT, False)
+    assert await monitor_db.report_groups(DAY) == [(CHAT, "Chilonzor obyekti")]
+
+    await add_message(1, "Salom", chat_id=OTHER_CHAT)  # shu kuni xabari bor -- varaq oladi
+    await monitor_db.set_group_present(OTHER_CHAT, False)
+    assert [title for _chat, title in await monitor_db.report_groups(DAY)] == ["Chilonzor obyekti", "Eski guruh"]
+    assert await monitor_db.report_groups(DAY + timedelta(days=1)) == [(CHAT, "Chilonzor obyekti")]
+
+
+async def test_group_comparison_uses_its_own_previous_day(monkeypatch):
+    _fake_model(monkeypatch)
+    await add_group()
+    await classify(await add_message(1, "Kechikdi", minutes=-24 * 60), "Dastavka va Logistika", "Shikoyat")
+    await classify(await add_message(2, "Yana kechikdi", minutes=-24 * 60 + 1), "Dastavka va Logistika", "Shikoyat")
+    await classify(await add_message(3, "Rahmat"), "Ijobiy Fikrlar", "Ijobiy")
+    await add_group(OTHER_CHAT, "Yangi guruh")
+    await classify(await add_message(1, "Salom", chat_id=OTHER_CHAT), "Boshqa")
+
+    groups = {group.title: group for group in (await monitor_report.build_report(DAY)).groups}
+    assert "2 taga kamaydi: oldingi kuni 2 ta, shu kuni 0 ta." in groups["Chilonzor obyekti"].overall_summary
+    # Guruh shu kuni qo'shilgan -- oldingi kun bilan solishtirib bo'lmaydi
+    assert "solishtirish uchun ma'lumot yo'q" in groups["Yangi guruh"].overall_summary
+
+
+async def test_group_summary_falls_back_to_numbers_when_model_fails(monkeypatch):
+    await add_group()
+    await classify(await add_message(1, "Kechikdi"), "Dastavka va Logistika", "Shikoyat")
+    monkeypatch.setattr(llm_client, "request_json", AsyncMock(side_effect=LLMUnavailable("o'chiq")))
+
+    (group,) = (await monitor_report.build_report(DAY)).groups
+    assert group.category_summaries["Dastavka va Logistika"].startswith(
+        "Bu toifada jami 1 ta xabar: shikoyat 1, ijobiy 0, neytral 0.")
+    assert group.overall_summary.startswith("Shu kuni kompaniyaga oid jami 1 ta xabar")
 
 
 def _report():
@@ -266,8 +400,10 @@ async def test_report_at_eleven_covers_the_24_hours_before_it(monkeypatch):
 
     report = await monitor_report.build_report(DAY)
     assert (report.stats.total, report.stats.complaints) == (2, 1)  # 19:00 va ertasi 09:00 dagi xabarlar
-    assert "13-oktabr 11:00 dan 14-oktabr 11:00 gacha" in load_workbook(
-        monitor_report.write_excel(report))["Kunlik hisobot"]["A1"].value
+    workbook = load_workbook(monitor_report.write_excel(report))
+    assert "13-oktabr 11:00 dan 14-oktabr 11:00 gacha" in workbook["Umumiy"]["A1"].value
+    assert workbook["Chilonzor obyekti"]["A1"].value == (
+        "Chilonzor obyekti — 2026-yil 13-oktabr 11:00 dan 14-oktabr 11:00 gacha")
     assert monitor_report.build_caption(report).startswith(
         "📊 Kunlik hisobot — 2026-10-13 11:00 – 2026-10-14 11:00\n")
     assert (await monitor_report.build_report(DAY - timedelta(days=1))).stats.total == 1

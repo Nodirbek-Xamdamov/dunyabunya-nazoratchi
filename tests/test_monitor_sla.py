@@ -8,7 +8,7 @@ import pytest
 from aiogram.exceptions import TelegramForbiddenError
 
 from app import monitor_db, monitor_sla
-from app.monitor_db import ManagerCheck
+from app.monitor_db import ClassificationResult, ManagerCheck
 from tests.monitor_helpers import ADMIN_ID, CHAT, DAY, MANAGER_ID, T0, add_group, add_message, all_rows, classify
 
 
@@ -95,7 +95,8 @@ async def test_manager_reply_within_deadline_is_answered():
     assert await monitor_db.missed_requests(DAY) == []
 
 
-async def test_no_manager_reply_is_missed_with_manager_username():
+async def test_no_manager_reply_is_missed_with_manager_username(monkeypatch):
+    monkeypatch.setattr(monitor_db.settings, "SLA_REQUIRE_MANAGER", True)
     await add_group()
     await _ask(1)
     # Menejer emas, boshqa admin yozdi -- bu guruhda menejer bor, uning javobi kerak
@@ -157,6 +158,79 @@ async def test_check_opened_late_still_sees_reply_that_already_arrived():
     await monitor_sla.open_checks([pk])
 
     assert await monitor_db.resolve_checks(T0 + timedelta(hours=2)) == (1, 0)
+
+
+OTHER_ID = 300
+
+
+async def _other_writes(message_id, minutes, text="Ertaga olib boramiz", *, reply_to=None, request=False, rule=False):
+    """Mijozning o'zi emas, guruhdagi boshqa (xodim deb belgilanmagan) odam yozadi."""
+    pk = await add_message(message_id, text, sender_id=OTHER_ID, name="Sardor", username=None, minutes=minutes,
+                           reply_to=reply_to)
+    if rule:  # "+", stiker va h.k. -- qoida bilan "aloqasiz" deb ajratiladi
+        await monitor_db.save_classifications([ClassificationResult(pk, False, None, None, None, False)], "rule")
+    else:
+        await classify(pk, needs_manager=request)
+    return pk
+
+
+async def test_anyone_answering_the_customer_counts_when_manager_is_not_required():
+    await add_group()
+    await _ask(1)
+    await add_message(2, "Tezroq javob bering", minutes=1)  # mijozning o'zi yozdi -- javob emas
+    await _other_writes(3, minutes=2, text="Menga ham sement kerak", request=True)  # boshqaning savoli -- javob emas
+    await _other_writes(4, minutes=3, text="+", rule=True)  # reply emas "+" -- javob emas
+    assert await monitor_db.resolve_checks(T0 + timedelta(minutes=6)) == (0, 1)
+
+    await _ask(10, minutes=30)
+    await _other_writes(11, minutes=31, text="+", rule=True, reply_to=10)  # mijoz xabariga reply qilingan "+"
+    await _ask(20, minutes=60)
+    await _other_writes(21, minutes=62)  # boshqa odamning so'rov bo'lmagan xabari
+    await monitor_db.resolve_checks(T0 + timedelta(minutes=90))
+    assert [(c.first_message_id, c.status) for c in await _checks()] == [(1, "missed"), (10, "answered"), (20, "answered")]
+
+
+async def test_check_waits_for_others_unclassified_message_before_missing(monkeypatch):
+    await add_group()
+    await _ask(1)
+    pending = await add_message(2, "Hozir aniqlab beraman", sender_id=OTHER_ID, name="Sardor", minutes=2)
+    assert await monitor_db.resolve_checks(T0 + timedelta(minutes=6)) == (0, 0)  # u javobmi -- hali noma'lum
+    await classify(pending)
+    assert await monitor_db.resolve_checks(T0 + timedelta(minutes=7)) == (1, 0)
+
+    await _ask(10, minutes=30)
+    await add_message(11, "?", sender_id=OTHER_ID, name="Sardor", minutes=31)  # tasniflanmay qoldi
+    assert await monitor_db.resolve_checks(T0 + timedelta(minutes=40)) == (0, 0)
+    assert await monitor_db.resolve_checks(T0 + timedelta(minutes=50)) == (0, 1)  # 15 daqiqadan keyin baribir yopiladi
+
+    monkeypatch.setattr(monitor_db.settings, "SLA_REQUIRE_MANAGER", True)
+    await _ask(20, minutes=60)
+    await add_message(21, "?", sender_id=OTHER_ID, name="Sardor", minutes=61)
+    assert await monitor_db.resolve_checks(T0 + timedelta(minutes=66)) == (0, 1)  # menejer kerak -- kutilmaydi
+
+
+async def test_missed_request_shows_who_answered_later_and_when():
+    await add_group()
+    await _ask(1)
+    await monitor_db.resolve_checks(T0 + timedelta(minutes=6))
+    (missed,) = await monitor_db.missed_requests(DAY)
+    assert missed.later_answer is None
+
+    await add_message(2, "65 mingdan", sender_id=MANAGER_ID, is_staff=True, name="Bek", username="menejer_bek", minutes=25)
+    (missed,) = await monitor_db.missed_requests(DAY)
+    assert missed.later_answer == "Bek (@menejer_bek), 25 daqiqadan keyin"
+    assert monitor_db._after_text(timedelta(hours=2, minutes=9, seconds=30)) == "2 soat 10 daqiqadan keyin"
+    assert monitor_db._after_text(timedelta(hours=3)) == "3 soatdan keyin"
+
+
+@pytest.mark.parametrize("name, username, expected", [
+    ("dunyabunya Santexnika", None, True),
+    ("Ali", "Dunyabunya_035", True),
+    ("Vali Mijoz", "vali", False),
+    (None, None, False),
+])
+def test_company_accounts_are_staff_by_name(name, username, expected):
+    assert monitor_sla.is_staff_name(name, username) is expected
 
 
 async def test_work_hours_limit_is_off_by_default_and_respected_when_set(monkeypatch):

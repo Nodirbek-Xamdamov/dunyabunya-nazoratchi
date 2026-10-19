@@ -69,10 +69,14 @@ async def on_bot_membership_changed(event: ChatMemberUpdated) -> None:
 
         await session.commit()
 
-    # Yangi guruh monitoring bazasiga ham darhol yoziladi (birinchi xabarini kutmasdan)
-    if present and _is_monitored(group_id):
+    # Yangi guruh monitoring bazasiga ham darhol yoziladi (birinchi xabarini kutmasdan); bot
+    # chiqarilgan guruh esa keyingi hisobotlarda alohida varaq olmaydi (xabarlari bazada qoladi)
+    if _is_monitored(group_id):
         try:
-            await monitor_db.upsert_group(group_id, title)
+            if present:
+                await monitor_db.upsert_group(group_id, title)
+            else:
+                await monitor_db.set_group_present(group_id, False)
         except Exception:
             logger.exception("Guruhni monitoring bazasiga yozishda xatolik (group_id=%s)", group_id)
 
