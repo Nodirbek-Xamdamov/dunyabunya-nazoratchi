@@ -3,14 +3,15 @@
 
 Menejer: guruh adminlari orasida unvoni (custom title) `MANAGER_TITLES`dagi so'zlardan birini
 o'z ichiga olgan odam (katta-kichik harf farqsiz), `getChatAdministrators` orqali olinadi va
-`groups` jadvalida saqlanadi. Kuniga bir marta va admin o'zgarganda yangilanadi. Guruhning
-qolgan adminlari -- xodimlar (`is_staff`).
+`groups` jadvalida saqlanadi. Kuniga bir marta va admin o'zgarganda yangilanadi. Xodimlar
+(`is_staff`) -- guruh adminlari va ismida `STAFF_NAME_KEYWORDS` so'zi bor akkauntlar.
 
 Qoida: mijoz kompaniyaga murojaat qilsa (tasniflovchi `needs_manager` degan xabar) tekshiruv
-ochiladi, muddati -- xabar vaqtidan `SLA_MINUTES` daqiqa. Shu vaqt ichida menejer o'sha guruhga
-biror narsa yozsa -- "answered", yozmasa -- "missed" (hisobotning "Javobsiz so'rovlar" varag'iga
-tushadi). Ketma-ket kelgan so'rovlar bitta tekshiruvga birlashadi. Guruhda menejer bo'lmasa
-istalgan adminning javobi hisobga olinadi, javobsiz qolgani hisobotda "menejer yo'q" bilan chiqadi.
+ochiladi, muddati -- xabar vaqtidan `SLA_MINUTES` daqiqa. Shu vaqt ichida javob yozilsa --
+"answered", yozilmasa -- "missed" (hisobotdagi "Javobsiz so'rovlar"ga tushadi). Ketma-ket kelgan
+so'rovlar bitta tekshiruvga birlashadi. Kimning javobi hisoblanishi (`monitor_db.answers_query`):
+`SLA_REQUIRE_MANAGER=false` (hozircha) -- mijozga kimdir javob bersa yetarli; true -- menejer
+(guruhda menejer bo'lmasa -- istalgan xodim).
 
 Tekshiruvlar bazada turadi va har daqiqa `sla_loop` tomonidan yopiladi -- bot qayta ishga
 tushsa ham yo'qolmaydi: javob bor-yo'qligi `messages` jadvalidagi vaqtlar bo'yicha aniqlanadi.
@@ -49,6 +50,13 @@ def reset_state() -> None:
 
 def manager_titles() -> list[str]:
     return [part.strip().lower() for part in settings.MANAGER_TITLES.split(",") if part.strip()]
+
+
+def is_staff_name(name: str | None, username: str | None) -> bool:
+    """Ismi yoki username'ida `STAFF_NAME_KEYWORDS`dagi so'z bor akkaunt -- kompaniya xodimi."""
+    keywords = [part.strip().lower() for part in settings.STAFF_NAME_KEYWORDS.split(",") if part.strip()]
+    text = f"{name or ''} {username or ''}".lower()
+    return any(keyword in text for keyword in keywords)
 
 
 def find_managers(admins) -> list[tuple[int, str | None, str | None]]:

@@ -106,6 +106,17 @@ async def test_admin_messages_are_staff_and_are_not_queued_for_classification(mo
     bot.get_chat_administrators.assert_awaited_once()  # adminlar keshlanadi
 
 
+async def test_company_account_that_is_not_admin_is_staff_by_name(monkeypatch):
+    wake = MagicMock()
+    monkeypatch.setattr(monitor_classifier, "wake", wake)
+    bot = _make_bot()
+    await collect(_message(bot, "Yuklandi", _user(6735526111, None, "dunyabunya Santexnika"), message_id=1))
+    await collect(_message(bot, "Hisob-faktura", _user(6650345002, "dunyabunya_035"), message_id=2))
+
+    assert [(m.is_staff, m.status) for m in await _messages()] == [(True, "staff")] * 2
+    wake.assert_not_called()
+
+
 async def test_media_type_caption_and_reply_are_stored():
     bot = _make_bot()
     question = _message(bot, "Narxi qancha?", message_id=1)
@@ -195,4 +206,10 @@ async def test_new_group_is_registered_when_bot_is_added():
     await chat_events.on_bot_membership_changed(event)
     await chat_events.on_bot_membership_changed(_member_event("left", "member", chat_id=REPORT_CHAT))
 
-    assert [(g.chat_id, g.title) for g in await all_rows(Group)] == [(GROUP_ID, "Mijoz guruhi")]
+    assert [(g.chat_id, g.title, g.is_present) for g in await all_rows(Group)] == [(GROUP_ID, "Mijoz guruhi", True)]
+
+    # Bot chiqarildi -- guruh keyingi hisobotlarda alohida varaq olmaydi; qayta qo'shilsa yana oladi
+    await chat_events.on_bot_membership_changed(_member_event("administrator", "kicked"))
+    assert (await monitor_db.get_group(GROUP_ID)).is_present is False
+    await chat_events.on_bot_membership_changed(event)
+    assert (await monitor_db.get_group(GROUP_ID)).is_present is True

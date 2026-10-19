@@ -1,9 +1,9 @@
 # Odoo ↔ Telegram Integratsiya Tizimi
 
 <!-- qisqacha -->
-> **Qisqacha.** Odoo va Telegram o'rtasidagi integratsiya (`@dunyabunya_assistant_bot`): Odoo'dan kelgan buyurtma va PDF hujjatni mijozga Telegram orqali yetkazadi, guruhlardagi xabarlarni toifalarga ajratib kuzatadi va kunlik hisobot beradi.
+> **Qisqacha.** Odoo va Telegram o'rtasidagi integratsiya (`@dunyabunya_assistant_bot`): Odoo'dan kelgan buyurtma va PDF hujjatni mijozga Telegram orqali yetkazadi, guruhlardagi xabarlarni toifalarga ajratib kuzatadi va kunlik hisobot beradi. `dashboard\` — CEO uchun monitoring dashboard'i (AI chat yordamchisi va «AI agentlar» sahifasi bilan; batafsil `dashboard\README.md`).
 >
-> **Texnologiyalar:** Python, FastAPI, Aiogram 3, Telethon (userbot), PostgreSQL
+> **Texnologiyalar:** Python, FastAPI, Aiogram 3, Telethon (userbot), PostgreSQL, SQLite; dashboard — Streamlit
 >
 > **Ishga tushirish:** FastAPI + bot + userbot alohida jarayonlar (pastda batafsil; sozlamalar `.env` da)
 
@@ -435,11 +435,19 @@ Xizmat Ko'rsatish · Narx va To'lovlar · Qaytarish va Kafolat · Ijobiy Fikrlar
 
 - Menejer = guruh adminlari orasida unvoni (custom title) `MANAGER_TITLES`dagi so'zni o'z ichiga
   olgan odam. Kuniga bir marta va admin o'zgarganda yangilanadi.
+- Xodim = guruh admini yoki ismi/username'ida `STAFF_NAME_KEYWORDS` (`dunyabunya`) so'zi bor
+  akkaunt ("dunyabunya Santexnika" kabi kompaniya akkauntlari ko'pincha admin emas). Xodim
+  xabarlari tasniflanmaydi va so'rov hisoblanmaydi.
 - Mijoz kompaniyaga murojaat qilsa (savol, buyurtma, shikoyat) tekshiruv ochiladi. `SLA_MINUTES`
-  daqiqa ichida menejer shu guruhga yozsa -- `answered`, yozmasa -- `missed` (hisobotga tushadi).
+  daqiqa ichida javob yozilsa -- `answered`, yozilmasa -- `missed` (hisobotga tushadi).
+- Kimning javobi hisoblanadi: `SLA_REQUIRE_MANAGER=false` (hozir) -- mijozga **kimdir** javob
+  bersa yetarli: xodim yozsa, mijoz xabariga reply qilinsa yoki boshqa odam so'rov bo'lmagan xabar
+  yozsa ("+", stiker -- faqat reply bo'lsa). Muddat ichida boshqalar yozgan xabar hali
+  tasniflanmagan bo'lsa tekshiruv 15 daqiqagacha kutadi. `true` -- faqat menejer javobi (guruhda
+  menejer bo'lmasa -- istalgan xodimniki).
 - Ketma-ket kelgan so'rovlar bitta tekshiruvga birlashadi (muddat birinchi xabardan).
-- Guruhda menejer bo'lmasa: istalgan adminning javobi hisobga olinadi, javobsiz qolgani
-  hisobotda "menejer yo'q" bilan chiqadi.
+- Javobsiz qolgan har bir so'rov uchun hisobotda muddatdan keyin bo'lsa ham kimdir javob berdimi
+  (kim va necha daqiqadan keyin) ko'rsatiladi; guruhda menejer bo'lmasa -- "menejer yo'q".
 - `SLA_WORK_HOURS=09:00-19:00` qo'yilsa ish vaqtidan tashqaridagi so'rovlar tekshirilmaydi
   (hozir bo'sh = 24/7).
 
@@ -452,10 +460,15 @@ kun. Bot o'chiq turgan bo'lsa, ishga tushganda yuborilmagan kunlarni yuboradi. *
 SQL/kod hisoblaydi**; model faqat matnli xulosa yozadi. "Boshqa" toifasi uchun xabarlar birma-bir
 yozilmaydi -- gap umuman nimalar haqida ketgani aytiladi.
 
-- 1-varaq "Kunlik hisobot": toifalar jadvali (Toifa | Jami | Shikoyat | Ijobiy | Neytral | Ulush),
-  "Jami kompaniyaga oid", "Kompaniyaga aloqasiz (filtrlangan)", har toifa bo'yicha xulosa,
-  umumiy xulosa (oldingi kun bilan shikoyatlar solishtirmasi va javobsiz so'rovlar soni bilan).
-- 2-varaq "Javobsiz so'rovlar": Vaqt | Guruh | Mijoz | So'rov mazmuni | Menejer.
+- 1-varaq "Umumiy" (hamma guruhlar birga): toifalar jadvali (Toifa | Jami | Shikoyat | Ijobiy |
+  Neytral | Ulush), "Jami kompaniyaga oid", "Kompaniyaga aloqasiz (filtrlangan)", har toifa
+  bo'yicha xulosa, umumiy xulosa (oldingi kun bilan shikoyatlar solishtirmasi va javobsiz so'rovlar
+  soni bilan), ostida "Javobsiz so'rovlar": Guruh | Vaqt | Mijoz | So'rov mazmuni | Keyin kimdir
+  javob berdimi | Menejer.
+- Keyin har bir guruhga bitta varaq (varaq nomi -- guruh nomi, alifbo tartibida; 200 guruh --
+  200 varaq): o'sha guruhning xuddi shunday kunlik hisoboti va ostida uning javobsiz so'rovlari.
+  Bot hozir a'zo bo'lgan har bir guruh varaq oladi (xabari bo'lmasa ham); bot chiqarilgan guruh
+  faqat shu kuni xabari bo'lsa. Har bir faol guruhning xulosasi modelga bitta so'rov bilan olinadi.
 - Yuborishda xato bo'lsa 3 marta uriniladi, bo'lmasa `ADMIN_CHAT_ID`ga xabar boradi.
 - `/test_report [bugun|kecha|YYYY-MM-DD]` -- hisobotni darhol yuboradi (faqat adminlar:
   `ADMIN_USER_IDS`, `ADMIN_CHAT_ID`, hisobot guruhining adminlari; shaxsiy chatda yoki hisobot

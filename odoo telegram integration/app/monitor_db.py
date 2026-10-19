@@ -21,6 +21,7 @@ Vaqtlar bazada UTC'da saqlanadi (`UTCDateTime`); `local_date` -- `TIMEZONE` bo'y
 """
 
 import logging
+import math
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
@@ -28,13 +29,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import (
-    BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, case, event,
-    func, inspect, select, update,
+    BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, case,
+    event, func, inspect, or_, select, update,
 )
 from sqlalchemy import text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, aliased, mapped_column
 from sqlalchemy.types import TypeDecorator
 
 from app.config import settings
@@ -136,6 +137,8 @@ class Group(Base):
     # Adminlar oxirgi marta qachon Telegram'dan olingan (NULL -- hali olinmagan / yangilash kerak)
     admins_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    # Bot hozir shu guruhdami (chiqarilsa False) -- hisobotda faqat bor guruhlarga varaq ochiladi
+    is_present: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
 
     @property
     def admin_ids(self) -> frozenset[int]:
@@ -318,11 +321,16 @@ async def init_db() -> None:
 def _upgrade_schema(connection) -> None:
     """Mavjud bazaga keyin qo'shilgan ustun va indekslarni qo'shadi (`create_all` faqat yo'q
     jadvalni yaratadi, bor jadvalni o'zgartirmaydi)."""
-    columns = {column["name"] for column in inspect(connection).get_columns("messages")}
-    for name, ddl in (("media_duration", "INTEGER"), ("transcript", "TEXT")):
-        if name not in columns:
-            connection.execute(sql_text(f"ALTER TABLE messages ADD COLUMN {name} {ddl}"))
-            logger.info("Monitoring bazasi: messages.%s ustuni qo'shildi", name)
+    added = (
+        ("messages", "media_duration", "INTEGER"),
+        ("messages", "transcript", "TEXT"),
+        ("groups", "is_present", "BOOLEAN NOT NULL DEFAULT 1"),
+    )
+    inspector = inspect(connection)
+    for table, name, ddl in added:
+        if name not in {column["name"] for column in inspector.get_columns(table)}:
+            connection.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+            logger.info("Monitoring bazasi: %s.%s ustuni qo'shildi", table, name)
     connection.execute(sql_text("CREATE INDEX IF NOT EXISTS ix_messages_sent ON messages (sent_at_utc)"))
 
 
@@ -344,11 +352,42 @@ async def upsert_group(chat_id: int, title: str | None) -> Group:
                 await session.rollback()
                 return await session.get(Group, chat_id)
             logger.info("Yangi guruh: '%s' (chat_id=%s)", title, chat_id)
-        elif group.title != title and title:
-            group.title = title
+        elif (group.title != title and title) or not group.is_present:
+            group.title = title or group.title
+            group.is_present = True  # xabar keldi yoki bot qayta qo'shildi -- demak bot guruhda
             group.updated_at = utc_now()
             await session.commit()
         return group
+
+
+async def set_group_present(chat_id: int, present: bool) -> None:
+    """Bot guruhdan chiqarildi (False) yoki qayta qo'shildi (True)."""
+    async with session_maker() as session:
+        await session.execute(update(Group).where(Group.chat_id == chat_id).values(is_present=present))
+        await session.commit()
+
+
+async def report_groups(day: date) -> list[tuple[int, str]]:
+    """Hisobotda alohida varaq oladigan guruhlar, nomi bo'yicha alifbo tartibida: bot hozir a'zo
+    bo'lgan guruhlar va shu davrda xabari bo'lgan guruhlar. (chat_id, nomi) qaytaradi."""
+    start, end = period_bounds(day)
+    active = select(Message.chat_id).where(Message.sent_at_utc >= start, Message.sent_at_utc < end)
+    async with session_maker() as session:
+        rows = (
+            await session.execute(
+                select(Group.chat_id, Group.title).where(or_(Group.is_present.is_(True), Group.chat_id.in_(active)))
+            )
+        ).all()
+    return sorted(((chat_id, title or str(chat_id)) for chat_id, title in rows), key=lambda row: row[1].lower())
+
+
+async def has_messages_before(chat_id: int, moment: datetime) -> bool:
+    """Bot bu guruhda `moment`dan oldin birorta xabar ko'rganmi (oldingi kun bilan solishtirish uchun)."""
+    async with session_maker() as session:
+        row = await session.execute(
+            select(Message.id).where(Message.chat_id == chat_id, Message.sent_at_utc < moment).limit(1)
+        )
+        return row.first() is not None
 
 
 async def get_group(chat_id: int) -> Group | None:
@@ -386,7 +425,10 @@ async def stale_group_ids(older_than: datetime, limit: int) -> list[int]:
     async with session_maker() as session:
         rows = await session.execute(
             select(Group.chat_id)
-            .where((Group.admins_checked_at.is_(None)) | (Group.admins_checked_at < older_than))
+            .where(
+                Group.is_present.is_(True),
+                (Group.admins_checked_at.is_(None)) | (Group.admins_checked_at < older_than),
+            )
             .order_by(Group.admins_checked_at)
             .limit(limit)
         )
@@ -571,10 +613,46 @@ def _manager_message(group: Group | None):
     return Message.sender_id.in_(manager_ids) if manager_ids else Message.is_staff.is_(True)
 
 
+def answers_query(
+    chat_id: int, first_message_id: int, asker_id: int | None, group: Group | None, *, anyone: bool | None = None
+):
+    """So'rovdan keyingi, unga JAVOB hisoblanadigan xabarlar (eng oldingisi birinchi).
+
+    `anyone=True` (standart, `SLA_REQUIRE_MANAGER=false`) -- mijozga kimdir javob bergan bo'lsa
+    yetarli: so'ragan mijozning o'zidan boshqa odamning xabari va u (a) xodim xabari, yoki (b) so'ragan
+    mijoz xabariga reply, yoki (c) tasniflangan va o'zi so'rov bo'lmagan matnli xabar (boshqa mijozning
+    yangi savoli, stiker yoki "+" javob emas -- reply qilinmagan bo'lsa).
+    `anyone=False` -- faqat menejer xabari (guruhda menejer bo'lmasa -- istalgan xodim xabari)."""
+    if anyone is None:
+        anyone = not settings.SLA_REQUIRE_MANAGER
+    statement = select(Message).where(Message.chat_id == chat_id, Message.message_id > first_message_id)
+    if not anyone:
+        return statement.where(_manager_message(group)).order_by(Message.message_id)
+    replied = aliased(Message)
+    return (
+        statement.outerjoin(Classification, Classification.message_ref == Message.id)
+        .outerjoin(replied, and_(replied.chat_id == Message.chat_id, replied.message_id == Message.reply_to_message_id))
+        .where(
+            Message.sender_id != asker_id,
+            or_(
+                Message.is_staff.is_(True),
+                replied.sender_id == asker_id,
+                and_(Classification.model != "rule", Classification.needs_manager.is_(False)),
+            ),
+        )
+        .order_by(Message.message_id)
+    )
+
+
+async def _asker_id(session: AsyncSession, check: "ManagerCheck") -> int | None:
+    first = await session.get(Message, check.message_ref)
+    return first.sender_id if first is not None else None
+
+
 async def open_check(message_pk: int, sla_minutes: int) -> bool:
-    """Menejer javobi kerak bo'lgan mijoz xabari uchun tekshiruv ochadi. Shu guruhda muddati
-    tugamagan tekshiruv bo'lsa (va undan keyin menejer hali yozmagan bo'lsa) yangi ochilmaydi --
-    ketma-ket kelgan so'rovlar bitta tekshiruvga birlashadi, muddat birinchi xabardan hisoblanadi.
+    """Javob kerak bo'lgan mijoz xabari uchun tekshiruv ochadi. Shu guruhda muddati tugamagan
+    tekshiruv bo'lsa (va undan keyin hali javob yozilmagan bo'lsa) yangi ochilmaydi -- ketma-ket
+    kelgan so'rovlar bitta tekshiruvga birlashadi, muddat birinchi xabardan hisoblanadi.
     Yangi tekshiruv ochilsa True."""
     async with session_maker() as session:
         message = await session.get(Message, message_pk)
@@ -594,15 +672,11 @@ async def open_check(message_pk: int, sla_minutes: int) -> bool:
             )
         ).scalar_one_or_none()
         if current is not None:
+            asker = await _asker_id(session, current)
             answered_in_between = (
                 await session.execute(
-                    select(Message.id)
-                    .where(
-                        Message.chat_id == message.chat_id,
-                        Message.message_id > current.first_message_id,
-                        Message.message_id < message.message_id,
-                        _manager_message(group),
-                    )
+                    answers_query(message.chat_id, current.first_message_id, asker, group)
+                    .where(Message.message_id < message.message_id)
                     .limit(1)
                 )
             ).first()
@@ -620,9 +694,29 @@ async def open_check(message_pk: int, sla_minutes: int) -> bool:
         return True
 
 
+# Muddat ichida boshqalar yozgan xabar hali tasniflanmagan bo'lsa (u javobmi yoki yangi savolmi --
+# noma'lum), tekshiruv shuncha vaqtgacha yopilmay kutadi
+_UNCLASSIFIED_WAIT = timedelta(minutes=15)
+
+
+async def _others_unclassified(session: AsyncSession, check: "ManagerCheck", asker_id: int | None) -> bool:
+    row = await session.execute(
+        select(Message.id)
+        .where(
+            Message.chat_id == check.chat_id,
+            Message.message_id > check.first_message_id,
+            Message.sent_at_utc <= check.deadline,
+            Message.sender_id != asker_id,
+            Message.status == PENDING,
+        )
+        .limit(1)
+    )
+    return row.first() is not None
+
+
 async def resolve_checks(now: datetime | None = None, grace_seconds: int = 15) -> tuple[int, int]:
-    """Kutayotgan tekshiruvlarni yopadi: muddat ichida menejer shu guruhga yozgan bo'lsa --
-    "answered", muddat o'tib ketgan bo'lsa -- "missed". (answered, missed) sonlarini qaytaradi.
+    """Kutayotgan tekshiruvlarni yopadi: muddat ichida javob yozilgan bo'lsa -- "answered",
+    muddat o'tib ketgan bo'lsa -- "missed". (answered, missed) sonlarini qaytaradi.
     `grace_seconds` -- muddat tugashi bilan kelgan javob bazaga yozilib ulgurishi uchun."""
     now = now or utc_now()
     answered = missed = 0
@@ -632,16 +726,11 @@ async def resolve_checks(now: datetime | None = None, grace_seconds: int = 15) -
         ).scalars().all()
         for check in checks:
             group = await session.get(Group, check.chat_id)
+            asker = await _asker_id(session, check)
             reply = (
                 await session.execute(
-                    select(Message)
-                    .where(
-                        Message.chat_id == check.chat_id,
-                        Message.message_id > check.first_message_id,
-                        Message.sent_at_utc <= check.deadline,
-                        _manager_message(group),
-                    )
-                    .order_by(Message.message_id)
+                    answers_query(check.chat_id, check.first_message_id, asker, group)
+                    .where(Message.sent_at_utc <= check.deadline)
                     .limit(1)
                 )
             ).scalar_one_or_none()
@@ -649,6 +738,12 @@ async def resolve_checks(now: datetime | None = None, grace_seconds: int = 15) -
                 check.status, check.answered_at = CHECK_ANSWERED, reply.sent_at_utc
                 answered += 1
             elif now >= check.deadline + timedelta(seconds=grace_seconds):
+                if (
+                    not settings.SLA_REQUIRE_MANAGER
+                    and now < check.deadline + _UNCLASSIFIED_WAIT
+                    and await _others_unclassified(session, check, asker)
+                ):
+                    continue
                 check.status = CHECK_MISSED
                 check.manager_username = group.manager_username if group else None
                 missed += 1
@@ -659,10 +754,22 @@ async def resolve_checks(now: datetime | None = None, grace_seconds: int = 15) -
 @dataclass(frozen=True)
 class MissedRequest:
     at: datetime  # mahalliy vaqt
+    chat_id: int
     group: str
     customer: str
     summary: str
     manager: str | None  # None -- guruhda menejer yo'q
+    # Muddatdan keyin bo'lsa ham kimdir javob berdimi: "Ism (@username), 25 daqiqadan keyin"; None -- yo'q
+    later_answer: str | None = None
+
+
+def _after_text(delta: timedelta) -> str:
+    """"25 daqiqadan keyin", "2 soat 10 daqiqadan keyin"."""
+    minutes = max(1, math.ceil(delta.total_seconds() / 60))
+    if minutes < 60:
+        return f"{minutes} daqiqadan keyin"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} soat {minutes} daqiqadan keyin" if minutes else f"{hours} soatdan keyin"
 
 
 def _sender_label(message: Message) -> str:
@@ -672,29 +779,42 @@ def _sender_label(message: Message) -> str:
     return name or str(message.sender_id or "")
 
 
-async def missed_requests(day: date) -> list[MissedRequest]:
-    """`day` kuni javobsiz qolgan so'rovlar (hisobotning 2-varag'i uchun)."""
+async def missed_requests(day: date, chat_id: int | None = None) -> list[MissedRequest]:
+    """`day` kuni (va `chat_id` berilsa -- shu guruhda) javobsiz qolgan so'rovlar. Har biri uchun
+    muddatdan keyin bo'lsa ham kimdir (menejer bo'lishi shart emas) javob berganmi -- shu ham aniqlanadi."""
+    statement = (
+        select(ManagerCheck, Message, Classification.summary, Group)
+        .join(Message, Message.id == ManagerCheck.message_ref)
+        .outerjoin(Classification, Classification.message_ref == Message.id)
+        .outerjoin(Group, Group.chat_id == ManagerCheck.chat_id)
+        .where(_in_period(ManagerCheck.started_at, day), ManagerCheck.status == CHECK_MISSED)
+        .order_by(ManagerCheck.started_at)
+    )
+    if chat_id is not None:
+        statement = statement.where(ManagerCheck.chat_id == chat_id)
+    requests: list[MissedRequest] = []
     async with session_maker() as session:
-        rows = (
-            await session.execute(
-                select(ManagerCheck, Message, Classification.summary, Group.title)
-                .join(Message, Message.id == ManagerCheck.message_ref)
-                .outerjoin(Classification, Classification.message_ref == Message.id)
-                .outerjoin(Group, Group.chat_id == ManagerCheck.chat_id)
-                .where(_in_period(ManagerCheck.started_at, day), ManagerCheck.status == CHECK_MISSED)
-                .order_by(ManagerCheck.started_at)
+        for check, message, summary, group in (await session.execute(statement)).all():
+            later = (
+                await session.execute(
+                    answers_query(check.chat_id, check.first_message_id, message.sender_id, group, anyone=True).limit(1)
+                )
+            ).scalar_one_or_none()
+            later_text = None
+            if later is not None:
+                later_text = f"{_sender_label(later)}, {_after_text(later.sent_at_utc - check.started_at)}"
+            requests.append(
+                MissedRequest(
+                    at=check.started_at.astimezone(local_tz()),
+                    chat_id=check.chat_id,
+                    group=(group.title if group else None) or str(check.chat_id),
+                    customer=_sender_label(message),
+                    summary=summary or message.full_text[:300],
+                    manager=check.manager_username,
+                    later_answer=later_text,
+                )
             )
-        ).all()
-    return [
-        MissedRequest(
-            at=check.started_at.astimezone(local_tz()),
-            group=title or str(check.chat_id),
-            customer=_sender_label(message),
-            summary=summary or message.full_text[:300],
-            manager=check.manager_username,
-        )
-        for check, message, summary, title in rows
-    ]
+    return requests
 
 
 # ---------------------------------------------------------------------------
@@ -737,10 +857,15 @@ class DayStats:
         return sum(row.neutral for row in self.categories)
 
 
-async def compute_day_stats(day: date) -> DayStats:
-    """`day` uchun barcha sonlarni SQL bilan hisoblaydi (faqat mijoz xabarlari)."""
+async def compute_day_stats(day: date, chat_id: int | None = None) -> DayStats:
+    """`day` uchun barcha sonlarni SQL bilan hisoblaydi (faqat mijoz xabarlari). `chat_id`
+    berilsa -- faqat shu guruh bo'yicha."""
     count_if = lambda condition: func.coalesce(func.sum(case((condition, 1), else_=0)), 0)  # noqa: E731
-    customer = (_in_period(Message.sent_at_utc, day), Message.is_staff.is_(False))
+    customer = [_in_period(Message.sent_at_utc, day), Message.is_staff.is_(False)]
+    checks = [_in_period(ManagerCheck.started_at, day), ManagerCheck.status == CHECK_MISSED]
+    if chat_id is not None:
+        customer.append(Message.chat_id == chat_id)
+        checks.append(ManagerCheck.chat_id == chat_id)
     async with session_maker() as session:
         rows = (
             await session.execute(
@@ -769,13 +894,7 @@ async def compute_day_stats(day: date) -> DayStats:
                 select(func.count()).select_from(Message).where(*customer, Message.status.in_((PENDING, FAILED)))
             )
         ).scalar_one()
-        missed = (
-            await session.execute(
-                select(func.count())
-                .select_from(ManagerCheck)
-                .where(_in_period(ManagerCheck.started_at, day), ManagerCheck.status == CHECK_MISSED)
-            )
-        ).scalar_one()
+        missed = (await session.execute(select(func.count()).select_from(ManagerCheck).where(*checks))).scalar_one()
 
     by_category = {category: CategoryStat(category) for category in CATEGORIES}
     for category, total, complaints, positive, neutral in rows:
@@ -838,26 +957,30 @@ class CategoryMessage:
     text: str
 
 
-async def category_messages(day: date, category: str, limit: int) -> list[CategoryMessage]:
-    """Toifaning shu kungi xabarlari (xulosa yozish uchun): avval shikoyatlar, keyin ijobiy, keyin neytral."""
+async def category_messages(
+    day: date, category: str, limit: int, chat_id: int | None = None
+) -> list[CategoryMessage]:
+    """Toifaning shu kungi xabarlari (xulosa yozish uchun): avval shikoyatlar, keyin ijobiy, keyin
+    neytral. `chat_id` berilsa -- faqat shu guruhniki."""
     order = case((Classification.sentiment == COMPLAINT, 0), (Classification.sentiment == POSITIVE, 1), else_=2)
+    statement = (
+        select(
+            Group.title, Classification.sentiment, Classification.summary,
+            func.coalesce(Message.text, Message.transcript), Message.chat_id,
+        )
+        .join(Message, Message.id == Classification.message_ref)
+        .outerjoin(Group, Group.chat_id == Message.chat_id)
+        .where(
+            _in_period(Message.sent_at_utc, day), Message.is_staff.is_(False),
+            Classification.is_company_related.is_(True), Classification.category == category,
+        )
+        .order_by(order, Message.sent_at_utc)
+        .limit(limit)
+    )
+    if chat_id is not None:
+        statement = statement.where(Message.chat_id == chat_id)
     async with session_maker() as session:
-        rows = (
-            await session.execute(
-                select(
-                    Group.title, Classification.sentiment, Classification.summary,
-                    func.coalesce(Message.text, Message.transcript), Message.chat_id,
-                )
-                .join(Message, Message.id == Classification.message_ref)
-                .outerjoin(Group, Group.chat_id == Message.chat_id)
-                .where(
-                    _in_period(Message.sent_at_utc, day), Message.is_staff.is_(False),
-                    Classification.is_company_related.is_(True), Classification.category == category,
-                )
-                .order_by(order, Message.sent_at_utc)
-                .limit(limit)
-            )
-        ).all()
+        rows = (await session.execute(statement)).all()
     return [
         CategoryMessage(title or str(chat_id), sentiment or NEUTRAL, summary or "", text or "")
         for title, sentiment, summary, text, chat_id in rows

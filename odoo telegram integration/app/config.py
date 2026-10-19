@@ -108,10 +108,17 @@ class Settings(BaseSettings):
         default="meneger,menejer,manager,menedj,менедж,менеж",
         validation_alias=AliasChoices("MANAGER_TITLES", "GROUP_MANAGER_TITLE_KEYWORDS"),
     )
-    # Menejer shuncha daqiqa ichida javob yozmasa so'rov "javobsiz" hisoblanadi
+    # Shuncha daqiqa ichida javob yozilmasa so'rov "javobsiz" hisoblanadi
     SLA_MINUTES: int = Field(default=5, validation_alias=AliasChoices("SLA_MINUTES", "STAFF_REPLY_TIMEOUT_MINUTES"))
+    # false (hozircha, 2026-10-15) -- mijozga KIMDIR javob bersa yetarli: xodim yozsa, mijoz xabariga
+    # reply qilinsa yoki boshqa odam so'rov bo'lmagan xabar yozsa. true -- faqat menejer javobi
+    # hisoblanadi (guruhda menejer bo'lmasa -- istalgan xodimniki).
+    SLA_REQUIRE_MANAGER: bool = False
     # Ish vaqti, masalan "09:00-19:00": undan tashqaridagi so'rovlar tekshirilmaydi. Bo'sh = 24/7.
     SLA_WORK_HOURS: str = ""
+    # Xodim = guruh admini YOKI ismi/username'ida shu so'zlardan biri bor odam (kompaniya akkauntlari
+    # "dunyabunya Santexnika" kabi nomlanadi va ko'pincha guruhda admin emas). Vergul bilan.
+    STAFF_NAME_KEYWORDS: str = "dunyabunya"
 
     # --- Kunlik Excel hisobot ---
     # Hisobot yuboriladigan guruh. Forum-guruh bo'lsa fayl "General" topigiga tushadi;

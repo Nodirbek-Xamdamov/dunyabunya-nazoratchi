@@ -45,6 +45,8 @@ os.environ["GROUP_MONITOR_EXCLUDED_GROUP_IDS"] = ""
 os.environ["MANAGER_TITLES"] = "meneger,menejer,manager,menedj,менедж,менеж"
 os.environ["SLA_MINUTES"] = "5"
 os.environ["SLA_WORK_HOURS"] = ""
+os.environ["SLA_REQUIRE_MANAGER"] = "false"
+os.environ["STAFF_NAME_KEYWORDS"] = "dunyabunya"
 os.environ["ADMIN_USER_IDS"] = ""
 os.environ["MONITOR_ENABLED"] = "true"
 

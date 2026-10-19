@@ -1,5 +1,5 @@
 """
-Kunlik Excel hisobot (2026-10-13).
+Kunlik Excel hisobot (2026-10-13; 2026-10-15 dan har guruh alohida varaqda).
 
 Har kuni `REPORT_TIME` da (`TIMEZONE` bo'yicha; ishlab chiqarishda 00:00) undan oldingi 24 soat
 uchun `hisobot_YYYY-MM-DD.xlsx` tuziladi, `REPORTS_DIR`ga saqlanadi va hisobot guruhining
@@ -8,25 +8,33 @@ kuni; boshqa vaqt bo'lsa (masalan sinovdagi 11:00) -- kechagi 11:00 dan bugungi 
 sana sifatida davr boshlangan kun yoziladi. Bot hisobot vaqtida o'chiq bo'lgan bo'lsa, ishga
 tushishi bilan yuborilmagan kunlarning hisobotini yuboradi.
 
+Fayl tuzilishi (foydalanuvchi talabi, 2026-10-15):
+  1-varaq "Umumiy" -- hamma guruhlar birga: toifalar jadvali, har toifa bo'yicha xulosa, umumiy
+     xulosa, ostida barcha javobsiz so'rovlar (qaysi guruhdan ekani bilan).
+  Keyin har bir guruhga bitta varaq (varaq nomi -- guruh nomi, alifbo tartibida): o'sha guruhning
+     xuddi shunday kunlik hisoboti va ostida o'sha guruhning javobsiz so'rovlari.
+  Har bir javobsiz so'rov yonida: muddatdan keyin bo'lsa ham kimdir (menejer bo'lishi shart emas)
+     mijozga javob berdimi -- kim va necha daqiqadan keyin.
+
 Tartib (`build_report`):
   1. o'sha kunning tasniflanmagan xabarlari tasniflanadi, kutayotgan tekshiruvlar yopiladi;
-  2. BARCHA RAQAMLARNI SQL/kod hisoblaydi (`monitor_db.compute_day_stats`) va `daily_stats`ga yozadi;
+  2. BARCHA RAQAMLARNI SQL/kod hisoblaydi (`monitor_db.compute_day_stats`) va umumiy sonlarni
+     `daily_stats`ga yozadi;
   3. model faqat matnli xulosa yozadi: unga tayyor raqamlar va xabarlar mazmuni beriladi, u
-     hech narsa sanamaydi. Xabari yo'q toifa uchun model chaqirilmaydi. Kechagi kun bilan
-     solishtirish va javobsiz so'rovlar soni haqidagi jumlalarni kod yozadi;
-  4. xulosalar `daily_summaries`da saqlanadi (keyingi oylik taqqoslash uchun).
-
-1-varaq "Kunlik hisobot": toifalar jadvali, har toifa bo'yicha xulosa, umumiy xulosa.
-2-varaq "Javobsiz so'rovlar": muddatida menejer javob bermagan so'rovlar.
+     hech narsa sanamaydi. Xabari yo'q toifa/guruh uchun model chaqirilmaydi; har bir guruhning
+     xulosalari bitta so'rovda olinadi. Kechagi kun bilan solishtirish va javobsiz so'rovlar soni
+     haqidagi jumlalarni kod yozadi;
+  4. umumiy xulosalar `daily_summaries`da saqlanadi (keyingi oylik taqqoslash uchun).
 
 Yuborishda xato bo'lsa qayta uriniladi; baribir bo'lmasa admin chatga xabar beriladi va hisobot
-"yuborilmagan" bo'lib qoladi (keyingi yarim tunda yoki bot qayta ishga tushganda yana uriniladi).
+"yuborilmagan" bo'lib qoladi (keyingi hisobot vaqtida yoki bot qayta ishga tushganda yana uriniladi).
 Hisobotdan keyin bazaning kunlik zaxira nusxasi olinadi.
 """
 
 import asyncio
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -45,11 +53,15 @@ from app.monitor_db import CATEGORIES, SUMMARY_OVERALL, CategoryStat, DayStats, 
 logger = logging.getLogger(__name__)
 
 EMPTY_CATEGORY_TEXT = "Bugun bu toifada xabar bo'lmadi"
+OVERALL_SHEET = "Umumiy"
 _MONTHS = (
     "yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr",
 )
 _WEEKDAYS = ("dushanba", "seshanba", "chorshanba", "payshanba", "juma", "shanba", "yakshanba")
 _SUMMARY_MESSAGES_LIMIT = 40
+_GROUP_MESSAGES_PER_CATEGORY = 15
+# Bir vaqtda nechta guruhning hisoboti tayyorlanadi (model so'rovlari baribir `llm_client` navbatida)
+_GROUP_CONCURRENCY = 4
 _SEND_RETRY_DELAYS = (0, 15, 60)
 _CLASSIFY_PASSES = 30
 
@@ -73,13 +85,29 @@ _SUMMARY_SCHEMA = {
 
 
 @dataclass
+class GroupReport:
+    """Bitta guruhning shu kungi hisoboti (Excel'da alohida varaq)."""
+
+    chat_id: int
+    title: str
+    stats: DayStats
+    category_summaries: dict[str, str] = field(default_factory=dict)
+    overall_summary: str = ""
+    missed: list[MissedRequest] = field(default_factory=list)
+    previous_complaints: int | None = None
+
+
+@dataclass
 class Report:
+    """Hamma guruhlar bo'yicha hisobot ("Umumiy" varaq) va har bir guruhniki."""
+
     day: date
     stats: DayStats
     category_summaries: dict[str, str] = field(default_factory=dict)
     overall_summary: str = ""
     missed: list[MissedRequest] = field(default_factory=list)
     previous_complaints: int | None = None  # undan oldingi kunning shikoyatlari (ma'lumot bo'lmasa None)
+    groups: list[GroupReport] = field(default_factory=list)
 
 
 def format_day(day: date) -> str:
@@ -104,18 +132,28 @@ def format_period(day: date) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _ask_summary(user_text: str) -> str | None:
+async def _ask(user_text: str, schema: dict, name: str) -> dict | None:
     try:
-        data = await llm_client.request_json(SUMMARY_SYSTEM_PROMPT, user_text, _SUMMARY_SCHEMA, "summary")
+        return await llm_client.request_json(SUMMARY_SYSTEM_PROMPT, user_text, schema, name)
     except LLMUnavailable as exc:
         logger.warning("Xulosa uchun modelga yetib bo'lmadi: %s", exc)
         return None
-    text = " ".join(str((data or {}).get("summary") or "").split())
-    return text or None
+
+
+def _clean(value) -> str | None:
+    return " ".join(str(value or "").split()) or None
+
+
+async def _ask_summary(user_text: str) -> str | None:
+    return _clean((await _ask(user_text, _SUMMARY_SCHEMA, "summary") or {}).get("summary"))
 
 
 def _numbers(stat: CategoryStat | DayStats) -> str:
     return f"jami {stat.total} ta xabar: shikoyat {stat.complaints}, ijobiy {stat.positive}, neytral {stat.neutral}"
+
+
+def _fallback(stat: CategoryStat | DayStats) -> str:
+    return f"Bu toifada {_numbers(stat)}. (Matnli xulosa tuzilmadi: model javob bermadi.)"
 
 
 _CATEGORY_TASK = (
@@ -132,8 +170,8 @@ _OTHER_TASK = (
 
 
 async def summarize_category(day: date, stat: CategoryStat) -> str:
-    """Bitta toifa bo'yicha xulosa: 2-4 jumla, aniq misollar bilan ("Boshqa" uchun -- faqat
-    umumiy mazmun). Xabari yo'q toifa uchun model chaqirilmaydi."""
+    """Hamma guruhlar bo'yicha bitta toifaning xulosasi: 2-4 jumla, aniq misollar bilan ("Boshqa"
+    uchun -- faqat umumiy mazmun). Xabari yo'q toifa uchun model chaqirilmaydi."""
     if not stat.total:
         return EMPTY_CATEGORY_TEXT
     messages = await monitor_db.category_messages(day, stat.category, _SUMMARY_MESSAGES_LIMIT)
@@ -145,7 +183,7 @@ async def summarize_category(day: date, stat: CategoryStat) -> str:
         f"Xabarlar (guruh | tur | mazmun) {shown}:\n" + "\n".join(lines) + "\n\n"
         + (_OTHER_TASK if stat.category == "Boshqa" else _CATEGORY_TASK)
     )
-    return text or f"Bu toifada {_numbers(stat)}. (Matnli xulosa tuzilmadi: model javob bermadi.)"
+    return text or _fallback(stat)
 
 
 def comparison_sentences(stats: DayStats, previous_complaints: int | None) -> str:
@@ -162,7 +200,7 @@ def comparison_sentences(stats: DayStats, previous_complaints: int | None) -> st
             f"oldingi kuni {previous_complaints} ta, shu kuni {today} ta."
         )
     if stats.missed:
-        missed = f"Javobsiz qolgan so'rovlar: {stats.missed} ta (\"Javobsiz so'rovlar\" varag'ida)."
+        missed = f"Javobsiz qolgan so'rovlar: {stats.missed} ta (pastdagi \"Javobsiz so'rovlar\" ro'yxatida)."
     else:
         missed = f"Barcha so'rovlarga {settings.SLA_MINUTES} daqiqa ichida javob berilgan."
     return f"{compare} {missed}"
@@ -197,6 +235,60 @@ async def summarize_overall(report: Report) -> str:
     return f"{text} {tail}"
 
 
+def _group_schema(categories: list[str]) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "toifalar": {
+                "type": "object",
+                "properties": {category: {"type": "string"} for category in categories},
+                "required": categories,
+                "additionalProperties": False,
+            },
+            "umumiy": {"type": "string"},
+        },
+        "required": ["toifalar", "umumiy"],
+        "additionalProperties": False,
+    }
+
+
+async def summarize_group(day: date, group: GroupReport) -> None:
+    """Bitta guruhning toifalar bo'yicha va umumiy xulosasini BITTA model so'rovida oladi
+    (200 ta guruhda so'rovlar soni oshib ketmasligi uchun). Xabari yo'q toifa/guruh uchun model
+    chaqirilmaydi; model javob bermasa -- raqamli matn."""
+    stats = group.stats
+    tail = comparison_sentences(stats, group.previous_complaints)
+    active = [stat for stat in stats.categories if stat.total]
+    group.category_summaries = {stat.category: EMPTY_CATEGORY_TEXT for stat in stats.categories}
+    if not active:
+        group.overall_summary = f"Shu kuni kompaniyaga oid mijoz xabari bo'lmadi. {tail}"
+        return
+
+    blocks = []
+    for stat in active:
+        messages = await monitor_db.category_messages(day, stat.category, _GROUP_MESSAGES_PER_CATEGORY, group.chat_id)
+        lines = "\n".join(f"- {m.sentiment} | {m.summary or m.text[:200]}" for m in messages)
+        blocks.append(f"[{stat.category}] ({_numbers(stat)})\n{lines}")
+    data = await _ask(
+        f"Guruh: {group.title}\n"
+        f"Sana: {format_period(day)}\n"
+        f"Tayyor raqamlar: kompaniyaga oid xabarlar {_numbers(stats)}.\n\n"
+        "Toifalar bo'yicha xabarlar (tur | mazmun):\n" + "\n\n".join(blocks) + "\n\n"
+        "Vazifa: \"toifalar\" ichida har bir toifa uchun (kalit -- toifa nomi) 1-3 jumlali xulosa yoz: "
+        "aniq misollar bilan, nima bo'lgani. \"Boshqa\" toifasi uchun xabarlarni sanab o'tma -- gap umuman "
+        "nimalar haqida ketganini umumlashtir. \"umumiy\" -- shu guruh bo'yicha 2-3 jumlali xulosa: asosiy "
+        "muammolar va ijobiy jihatlar. Shikoyatlar sonining solishtirmasi va javobsiz so'rovlar haqida YOZMA "
+        "-- ular alohida qo'shiladi.",
+        _group_schema([stat.category for stat in active]),
+        "group_summary",
+    ) or {}
+    texts = data.get("toifalar") if isinstance(data.get("toifalar"), dict) else {}
+    for stat in active:
+        group.category_summaries[stat.category] = _clean(texts.get(stat.category)) or _fallback(stat)
+    overall = _clean(data.get("umumiy")) or f"Shu kuni kompaniyaga oid {_numbers(stats)}."
+    group.overall_summary = f"{overall} {tail}"
+
+
 async def _classify_remaining(day: date) -> None:
     """Hisobotdan oldin o'sha kunning tasniflanmagan xabarlarini tasniflaydi."""
     try:
@@ -206,6 +298,37 @@ async def _classify_remaining(day: date) -> None:
             await monitor_classifier.classify_pending(day)
     except LLMUnavailable as exc:
         logger.warning("Hisobotdan oldin tasniflab bo'lmadi (model javob bermayapti): %s", exc)
+
+
+async def _previous_complaints(day: date, chat_id: int) -> int | None:
+    """Guruhning oldingi kundagi shikoyatlari. Bot bu guruhda shu davrgacha birorta xabar
+    ko'rmagan bo'lsa (guruh yangi qo'shilgan) -- None: solishtirish uchun ma'lumot yo'q."""
+    if not await monitor_db.has_messages_before(chat_id, monitor_db.period_bounds(day)[0]):
+        return None
+    return (await monitor_db.compute_day_stats(day - timedelta(days=1), chat_id)).complaints
+
+
+async def build_group_report(day: date, chat_id: int, title: str) -> GroupReport:
+    group = GroupReport(
+        chat_id=chat_id,
+        title=title,
+        stats=await monitor_db.compute_day_stats(day, chat_id),
+        missed=await monitor_db.missed_requests(day, chat_id),
+        previous_complaints=await _previous_complaints(day, chat_id),
+    )
+    try:
+        await summarize_group(day, group)
+    except Exception:
+        # Bitta guruhdagi kutilmagan xato butun hisobotni to'xtatmasin
+        logger.exception("'%s' guruhining xulosasini tuzishda xatolik", title)
+        group.category_summaries = {
+            stat.category: _fallback(stat) if stat.total else EMPTY_CATEGORY_TEXT for stat in group.stats.categories
+        }
+        group.overall_summary = (
+            f"Shu kuni kompaniyaga oid {_numbers(group.stats)}. "
+            f"{comparison_sentences(group.stats, group.previous_complaints)}"
+        )
+    return group
 
 
 async def build_report(day: date) -> Report:
@@ -226,6 +349,14 @@ async def build_report(day: date) -> Report:
     for category, text in report.category_summaries.items():
         await monitor_db.save_summary(day, category, text)
     await monitor_db.save_summary(day, SUMMARY_OVERALL, report.overall_summary)
+
+    slots = asyncio.Semaphore(_GROUP_CONCURRENCY)
+
+    async def one(chat_id: int, title: str) -> GroupReport:
+        async with slots:
+            return await build_group_report(day, chat_id, title)
+
+    report.groups = list(await asyncio.gather(*(one(chat_id, title) for chat_id, title in await monitor_db.report_groups(day))))
     return report
 
 
@@ -241,43 +372,65 @@ _BOLD = Font(bold=True)
 _WRAP = Alignment(wrap_text=True, vertical="top")
 _CENTER = Alignment(horizontal="center", vertical="center")
 _STATS_HEADERS = ("Toifa", "Jami", "Shikoyat", "Ijobiy", "Neytral", "Ulush")
-_STATS_WIDTHS = (38, 11, 11, 11, 11, 11)
-_MISSED_HEADERS = ("Vaqt", "Guruh", "Mijoz", "So'rov mazmuni", "Menejer (@username)")
-_MISSED_WIDTHS = (9, 34, 28, 60, 24)
 NO_MANAGER_TEXT = "menejer yo'q"
+NO_LATER_ANSWER_TEXT = "Yo'q"
+# Varaq ustunlari: A-F -- toifalar jadvali; javobsiz so'rovlar jadvali G-I ni ham ishlatadi
+_COLUMN_WIDTHS = {"A": 34, "B": 11, "C": 11, "D": 11, "E": 11, "F": 11, "G": 30, "H": 30, "I": 18}
+# Javobsiz so'rovlar jadvali: (sarlavha, birinchi ustun, oxirgi ustun) -- bir nechta ustun birlashtiriladi
+_MISSED_COLUMNS_OVERALL = (
+    ("Guruh", "A", "A"), ("Vaqt", "B", "B"), ("Mijoz", "C", "D"), ("So'rov mazmuni", "E", "G"),
+    ("Keyin kimdir javob berdimi", "H", "H"), ("Menejer", "I", "I"),
+)
+_MISSED_COLUMNS_GROUP = (
+    ("Mijoz", "A", "A"), ("Vaqt", "B", "B"), ("So'rov mazmuni", "C", "F"),
+    ("Keyin kimdir javob berdimi", "G", "G"), ("Menejer", "H", "H"),
+)
+_SHEET_NAME_LIMIT = 31
+_INVALID_SHEET_CHARS = re.compile(r"[\\/*?:\[\]]")
 
 
-def _set_widths(sheet, widths) -> None:
-    for index, width in enumerate(widths, start=1):
-        sheet.column_dimensions[chr(64 + index)].width = width
+def sheet_name(title: str, used: set[str]) -> str:
+    """Excel varaq nomi: taqiqlangan belgilarsiz, 31 belgidan oshmaydi, takrorlanmaydi."""
+    base = _INVALID_SHEET_CHARS.sub("-", title or "").strip().strip("'").strip() or "Guruh"
+    if base.lower() == "history":  # Excel'da band nom
+        base = "History guruhi"
+    name = base[:_SHEET_NAME_LIMIT].strip()
+    number = 2
+    while name.lower() in used:
+        suffix = f" ({number})"
+        name = base[:_SHEET_NAME_LIMIT - len(suffix)].strip() + suffix
+        number += 1
+    used.add(name.lower())
+    return name
 
 
-def _text_block(sheet, row: int, text: str, last_column: str = "F", chars_per_line: int = 92) -> None:
+def _width(first: str, last: str) -> float:
+    return sum(_COLUMN_WIDTHS[chr(code)] for code in range(ord(first), ord(last) + 1))
+
+
+def _lines(text: str, width: float) -> int:
+    return sum(max(1, math.ceil(len(part) / max(width, 1))) for part in str(text).split("\n"))
+
+
+def _text_block(sheet, row: int, text: str, last_column: str = "F") -> None:
     """Bir necha ustunni birlashtirib, o'ralib (wrap) o'qiladigan matn qatori yozadi. Excel
     birlashtirilgan kataklar balandligini o'zi moslamaydi -- shuning uchun matn uzunligiga qarab qo'yiladi."""
     sheet.merge_cells(f"A{row}:{last_column}{row}")
     cell = sheet.cell(row=row, column=1, value=text)
     cell.alignment = _WRAP
-    lines = sum(max(1, math.ceil(len(part) / chars_per_line)) for part in text.split("\n"))
-    sheet.row_dimensions[row].height = max(18, lines * 15.5 + 4)
+    sheet.row_dimensions[row].height = max(18, _lines(text, _width("A", last_column) * 1.05) * 15.5 + 4)
 
 
-def _write_stats_sheet(sheet, report: Report) -> None:
-    stats = report.stats
-    sheet.title = "Kunlik hisobot"
-    _set_widths(sheet, _STATS_WIDTHS)
-
-    sheet.merge_cells("A1:F1")
-    sheet["A1"] = f"Kunlik hisobot — {format_period(report.day)}"
-    sheet["A1"].font = Font(bold=True, size=14)
-    sheet["A3"] = "Toifalar jadvali"
-    sheet["A3"].font = _BOLD
-
+def _write_stats_table(sheet, row: int, stats: DayStats) -> int:
+    """Toifalar jadvali. Keyingi bo'sh qatorni qaytaradi."""
+    sheet.cell(row=row, column=1, value="Toifalar jadvali").font = _BOLD
+    row += 1
     for column, header in enumerate(_STATS_HEADERS, start=1):
-        cell = sheet.cell(row=4, column=column, value=header)
+        cell = sheet.cell(row=row, column=column, value=header)
         cell.font, cell.fill, cell.border, cell.alignment = _BOLD, _HEADER_FILL, _BORDER, _CENTER
+    row += 1
 
-    def write_row(row: int, values, *, bold: bool = False, gray: bool = False) -> None:
+    def write_row(values, *, bold: bool = False, gray: bool = False) -> None:
         for column, value in enumerate(values, start=1):
             cell = sheet.cell(row=row, column=column, value=value)
             cell.border = _BORDER
@@ -289,50 +442,80 @@ def _write_stats_sheet(sheet, report: Report) -> None:
             if column == 6 and value is not None:
                 cell.number_format = "0%"
 
-    row = 5
     for stat in stats.categories:
         share = stat.share / 100 if stat.share is not None else None
-        write_row(row, (stat.category, stat.total, stat.complaints, stat.positive, stat.neutral, share))
+        write_row((stat.category, stat.total, stat.complaints, stat.positive, stat.neutral, share))
         row += 1
     write_row(
-        row, (monitor_db.STAT_TOTAL, stats.total, stats.complaints, stats.positive, stats.neutral, 1 if stats.total else None),
+        (monitor_db.STAT_TOTAL, stats.total, stats.complaints, stats.positive, stats.neutral, 1 if stats.total else None),
         bold=True,
     )
     row += 1
-    write_row(row, (monitor_db.STAT_FILTERED, stats.filtered, None, None, None, None), gray=True)
+    write_row((monitor_db.STAT_FILTERED, stats.filtered, None, None, None, None), gray=True)
     row += 1
     if stats.unclassified:
-        write_row(row, ("Tasniflab bo'lmagan xabarlar", stats.unclassified, None, None, None, None), gray=True)
+        write_row(("Tasniflab bo'lmagan xabarlar", stats.unclassified, None, None, None, None), gray=True)
         row += 1
+    return row
 
+
+def _write_missed_table(sheet, row: int, missed: list[MissedRequest], columns) -> int:
+    """Javobsiz so'rovlar ro'yxati. Keyingi bo'sh qatorni qaytaradi."""
+    sheet.cell(row=row, column=1, value=f"Javobsiz so'rovlar ({len(missed)} ta)").font = Font(bold=True, size=12)
     row += 1
+    if not missed:
+        _text_block(sheet, row, f"Barcha so'rovlarga {settings.SLA_MINUTES} daqiqada javob berilgan")
+        return row + 1
+
+    def write_row(values, header: bool = False) -> None:
+        height = 1
+        for (_title, first, last), value in zip(columns, values):
+            if first != last:
+                sheet.merge_cells(f"{first}{row}:{last}{row}")
+            cell = sheet[f"{first}{row}"]
+            cell.value = value
+            cell.alignment = _CENTER if header else _WRAP
+            if header:
+                cell.font, cell.fill = _BOLD, _HEADER_FILL
+            for code in range(ord(first), ord(last) + 1):
+                sheet[f"{chr(code)}{row}"].border = _BORDER
+            height = max(height, _lines(value, _width(first, last) * 1.05))
+        sheet.row_dimensions[row].height = max(18, height * 15.5 + 4)
+
+    write_row([title for title, _first, _last in columns], header=True)
+    row += 1
+    with_group = columns is _MISSED_COLUMNS_OVERALL
+    for request in missed:
+        later = f"Ha — {request.later_answer}" if request.later_answer else NO_LATER_ANSWER_TEXT
+        values = [request.at.strftime("%H:%M"), request.customer, request.summary, later, request.manager or NO_MANAGER_TEXT]
+        if with_group:
+            values = [request.group, values[0], values[1], values[2], values[3], values[4]]
+        else:
+            values = [values[1], values[0], values[2], values[3], values[4]]
+        write_row(values)
+        row += 1
+    return row
+
+
+def _write_report_sheet(sheet, heading: str, section: Report | GroupReport, *, overall: bool) -> None:
+    """Bitta varaq: sarlavha, toifalar jadvali, toifalar bo'yicha xulosa, umumiy xulosa, ostida
+    javobsiz so'rovlar."""
+    for column, width in _COLUMN_WIDTHS.items():
+        sheet.column_dimensions[column].width = width
+    sheet.merge_cells("A1:I1")
+    sheet["A1"] = heading
+    sheet["A1"].font = Font(bold=True, size=14)
+
+    row = _write_stats_table(sheet, 3, section.stats) + 1
     for index, category in enumerate(CATEGORIES, start=1):
         sheet.cell(row=row, column=1, value=f"{index}) {category} — umumiy xulosa").font = _BOLD
-        _text_block(sheet, row + 1, report.category_summaries.get(category, EMPTY_CATEGORY_TEXT))
+        _text_block(sheet, row + 1, section.category_summaries.get(category, EMPTY_CATEGORY_TEXT))
         row += 3
-    sheet.cell(row=row, column=1, value="Umumiy xulosa").font = Font(bold=True, size=12)
-    _text_block(sheet, row + 1, report.overall_summary)
-
-
-def _write_missed_sheet(sheet, report: Report) -> None:
-    sheet.title = "Javobsiz so'rovlar"
-    _set_widths(sheet, _MISSED_WIDTHS)
-    if not report.missed:
-        _text_block(sheet, 1, f"Barcha so'rovlarga {settings.SLA_MINUTES} daqiqada javob berilgan", last_column="E")
-        sheet["A1"].font = _BOLD
-        return
-    for column, header in enumerate(_MISSED_HEADERS, start=1):
-        cell = sheet.cell(row=1, column=column, value=header)
-        cell.font, cell.fill, cell.border, cell.alignment = _BOLD, _HEADER_FILL, _BORDER, _CENTER
-    for row, request in enumerate(report.missed, start=2):
-        values = (
-            request.at.strftime("%H:%M"), request.group, request.customer, request.summary,
-            request.manager or NO_MANAGER_TEXT,
-        )
-        for column, value in enumerate(values, start=1):
-            cell = sheet.cell(row=row, column=column, value=value)
-            cell.border, cell.alignment = _BORDER, _WRAP
-    sheet.freeze_panes = "A2"
+    sheet.cell(row=row, column=1, value="Umumiy xulosa" if overall else "Guruh bo'yicha xulosa").font = Font(
+        bold=True, size=12
+    )
+    _text_block(sheet, row + 1, section.overall_summary)
+    _write_missed_table(sheet, row + 3, section.missed, _MISSED_COLUMNS_OVERALL if overall else _MISSED_COLUMNS_GROUP)
 
 
 def report_path(day: date) -> Path:
@@ -340,10 +523,18 @@ def report_path(day: date) -> Path:
 
 
 def write_excel(report: Report) -> Path:
-    """Hisobotni `REPORTS_DIR/hisobot_YYYY-MM-DD.xlsx` qilib yozadi."""
+    """Hisobotni `REPORTS_DIR/hisobot_YYYY-MM-DD.xlsx` qilib yozadi: "Umumiy" varaq va har bir
+    guruhga bitta varaq."""
+    period = format_period(report.day)
     workbook = Workbook()
-    _write_stats_sheet(workbook.active, report)
-    _write_missed_sheet(workbook.create_sheet(), report)
+    sheet = workbook.active
+    sheet.title = OVERALL_SHEET
+    _write_report_sheet(sheet, f"Umumiy (barcha guruhlar) — {period}", report, overall=True)
+    used = {OVERALL_SHEET.lower()}
+    for group in report.groups:
+        _write_report_sheet(
+            workbook.create_sheet(sheet_name(group.title, used)), f"{group.title} — {period}", group, overall=False
+        )
     path = report_path(report.day)
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(path)
@@ -420,8 +611,8 @@ async def run_report(bot: Bot, day: date, *, mark_sent: bool = True) -> bool:
     report = await build_report(day)
     path = await asyncio.to_thread(write_excel, report)
     logger.info(
-        "Hisobot tuzildi: %s (jami %s, shikoyat %s, javobsiz %s)",
-        path, report.stats.total, report.stats.complaints, report.stats.missed,
+        "Hisobot tuzildi: %s (jami %s, shikoyat %s, javobsiz %s, guruhlar %s)",
+        path, report.stats.total, report.stats.complaints, report.stats.missed, len(report.groups),
     )
     sent = await send_report(bot, path, report)
     if sent and mark_sent:
@@ -447,7 +638,7 @@ def seconds_until_report(now: datetime) -> float:
 
 async def send_unsent_reports(bot: Bot, today: date, *, include_yesterday: bool) -> None:
     """Yuborilmagan kunlarning hisobotini eskisidan boshlab yuboradi. `include_yesterday` --
-    kecha bitta ham xabar bo'lmagan bo'lsa ham kechagi hisobot yuboriladi (yarim tundagi ish)."""
+    kecha bitta ham xabar bo'lmagan bo'lsa ham kechagi hisobot yuboriladi (hisobot vaqtidagi ish)."""
     days = await monitor_db.unsent_days(today)
     yesterday = today - timedelta(days=1)
     if include_yesterday and yesterday not in days and yesterday not in await monitor_db.sent_days(today):
