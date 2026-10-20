@@ -10,8 +10,9 @@ review/
 **/logs/
 **/backups/
 
-# environment and model weights
+# environment, downloaded wheels and model weights
 **/.venv/
+**/wheels/
 __pycache__/
 *.pyc
 *.pt

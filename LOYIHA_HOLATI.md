@@ -4,20 +4,34 @@ Vazifa: bitta kamera orqali har bir hodimning stol oldida o'tirgan vaqti (keldi,
 Natija mavjud CEO panelidagi yangi "Yangi kamera" bo'limida ko'rinadi.
 Suhbat uzilsa, ish shu fayldan davom ettiriladi.
 
-Oxirgi yangilanish: 2026-10-20 17:00 (Toshkent)
+Oxirgi yangilanish: 2026-10-20 17:20 (Toshkent)
 
 ## Bosqichlar
 
 | # | Bosqich | Holat |
 |---|---------|-------|
-| 0 | Tayyorgarlik | Tekshiruvlar va zaxira tayyor. ★ javoblar va `.env` kutilmoqda, keyin test video yoziladi |
-| 1 | Muhit va oqim | boshlanmagan |
+| 0 | Tayyorgarlik | tugadi. ★ javoblar olindi (pastda). Test video 17:03 dan 60 daqiqa yozilmoqda (101 va 102) |
+| 1 | Muhit va oqim | bajarilmoqda |
 | 2 | Odamni aniqlash va kuzatish | boshlanmagan |
 | 3 | Baza, stol zonalari, "Yangi kamera" skeleti | boshlanmagan |
 | 4 | Vaqt hisoblash mantig'i | boshlanmagan |
 | 5 | "Yangi kamera" bo'limi to'liq | boshlanmagan |
 | 6 | Doimiy ishlash | boshlanmagan |
 | 7 | Bir kunlik haqiqiy test | boshlanmagan |
+
+## Foydalanuvchi javoblari (2026-10-20 ~17:01)
+
+- Versiyalar: "ishlaydigan versiyani ishlataver" → torch 2.14.1+cu132.
+- "Yangi kamera" CEO paneliga qo'shiladi. Bu prototip, shuning uchun panelga parol qo'yilmaydi: LAN orqali ochiqligi foydalanuvchi qarori.
+- Kamera ma'lumotlari alohida saqlanadi (tasdiqlandi). "4 TB xotiraga saqlasang ham bo'ladi" deyildi. Serverda 4 TB disk yo'q.
+  Eng katta bo'sh disk E: (2 TB HDD, bo'sh). Asosiy baza D: (NVMe SSD) da qoladi, kundalik zaxiralar E: ga yoziladi (6-bosqich, boshqa fizik disk).
+- Ish vaqti har hodimga alohida: ayollar 09:00–18:00, erkaklar 09:00–19:00, ba'zilariniki farq qiladi. Ishda 10 soat bo'lishi kerak.
+  Dam olish kunlari aytilmadi, standart olinadi: Dushanba–Shanba ish, Yakshanba dam.
+- Stollar: eng uzoqdagi = **Nodir**, o'rtadagi = **Husniddin**, kameraga eng yaqini = **Muhammadumar**. Uchalasi erkak, ya'ni 09:00–19:00.
+- "10 minut": "turdi" chegarasi `away_grace` = 10 daqiqa deb tushunildi. Hisobotda har soat va butun kun bo'yicha jami o'tirgan vaqt bo'ladi.
+- Namoz vaqti ish vaqtiga qo'shiladi. Reja (4-bosqich): Toshkent namoz vaqtlari lokal hisoblanadi (internetsiz, Hanafiy asr).
+  Shu oynalarda stoldan yo'q bo'lgan vaqt "namoz" deb belgilanadi va jami ish vaqtiga qo'shiladi. Bitta namoz uchun cheklov sozlanadi.
+  Hisoblangan vaqtlar "Sozlash" sahifasida ko'rinadi, rasmiy taqvim bilan solishtirish va surish (offset) mumkin.
 
 ## Server tekshiruvi (2026-10-20 16:44)
 
@@ -59,10 +73,13 @@ Oxirgi yangilanish: 2026-10-20 17:00 (Toshkent)
 
 - `D:\Demos\odoo telegram integration\backups\dashboard_before_kamera_2026-10-20.zip`: 100 fayl, 13.5 MB, `.venv`siz. Panelning bugungi to'liq holati.
 
-## Diqqat (foydalanuvchi qaror qiladi)
+## Diqqat
 
-- Panel LAN'da ochiq: `netsh portproxy` 192.168.87.2:8502 → 127.0.0.1:8502 (oldindan bor edi, men qilmaganman). Panelda parol (`DASHBOARD_PASSWORD`) qo'yilmagan.
-  Kamera bo'limi qo'shilsa, tarmoqdagi istalgan kompyuter hodimlarning jonli kadrini ko'ra oladi. ★ savol sifatida berildi.
+- Panel LAN'da ochiq: `netsh portproxy` 192.168.87.2:8502 → 127.0.0.1:8502 (oldindan bor edi, men qilmaganman). Panelda parol (`DASHBOARD_PASSWORD`) yo'q.
+  Kamera bo'limi tarmoqdagi istalgan kompyuterdan ko'rinadi. Foydalanuvchi buni qabul qildi ("prototype"), parol qo'yilmaydi.
+- Kamera: 192.168.0.250:554. 101 = HEVC 1920×1080, 22 kadr/s. 102 = HEVC 640×360, 20 kadr/s. Ulanish 1.2–2.5 s.
+- Internet: download.pytorch.org tez (~6.25 MB/s), PyPI (files.pythonhosted.org) sekin (~59 KB/s). Katta PyPI paketlari uzoq yuklanadi.
+- Kamerada noto'g'ri parol bilan sinov QILINMAYDI: Hikvision bir necha xato kirishdan keyin hisobni bloklashi mumkin. Qayta ulanish sinovi noto'g'ri port bilan qilinadi.
 
 ## Buyruqlar
 
@@ -78,11 +95,12 @@ Oxirgi yangilanish: 2026-10-20 17:00 (Toshkent)
 |-----|--------|
 | target_fps | 5 (GPU qiynalsa 2–3) |
 | sit_window | 10 s, kamida 70% zonada → "O'TIRDI" |
-| away_grace | 180 s → "TURDI" (★ tasdiqlanadi) |
+| away_grace | 600 s (10 daqiqa, foydalanuvchi) → "TURDI" |
 | ishonch chegarasi (stol mantig'i) | 0.35 |
 | tracker | bytetrack.yaml, `model.track()` conf 0.1 |
 | model | birinchi urinish yolo26m, 2-bosqichda tanlanadi |
-| ish kuni | ★ kutilmoqda (taklif 09:00–18:00) |
+| ish kuni | har hodimga alohida. Erkaklar 09:00–19:00, ayollar 09:00–18:00, talab 10 soat. Du–Sha ish, Ya dam |
+| namoz | yo'q bo'lgan vaqt namoz oynasiga to'g'ri kelsa, ish vaqtiga qo'shiladi (4-bosqich) |
 | vaqt | bazada UTC, ko'rsatish Asia/Tashkent |
 
 ## O'zgargan fayllar ro'yxati
