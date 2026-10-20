@@ -254,41 +254,47 @@ def run_reconnect_test(args, camera) -> dict:
         events.append(line)
         print(line, flush=True)
 
-    def wait_first_frame(after_seq: int, limit: float) -> float | None:
-        start = time.monotonic()
-        while time.monotonic() - start < limit:
+    def frame_after(moment: float, limit: float) -> float | None:
+        """Seconds from `moment` until a frame received after it (so from a new connection) is there."""
+        while time.monotonic() - moment < limit:
             frame = reader.latest()
-            if frame is not None and frame.seq > after_seq:
-                return time.monotonic() - start
+            if frame is not None and frame.mono > moment:
+                return frame.mono - moment
             time.sleep(0.05)
         return None
 
+    def report(name: str, value: float | None, limit: float) -> None:
+        log(f"{name}: kadr yana {value:.1f} s da keldi" if value is not None else f"{name}: {limit:.0f} s ichida kadr kelmadi")
+
     reader = LatestFrameReader(lambda: state["url"], log=log, name=f"{args.channel}-sinov",
                                open_timeout_s=5).start()
-    log("1-sinov: noto'g'ri port (5554), 40 s")
-    time.sleep(40)
+    log("1-sinov: noto'g'ri port (5554), 30 s")
+    time.sleep(30)
     state["url"] = good
+    fixed = time.monotonic()
     log("1-sinov: to'g'ri manzil qo'yildi")
-    recovered1 = wait_first_frame(0, 90)
-    log(f"1-sinov: birinchi kadr {recovered1:.1f} s da keldi" if recovered1 else "1-sinov: 90 s ichida kadr kelmadi")
-    time.sleep(15)
+    recovered1 = frame_after(fixed, 90)
+    report("1-sinov", recovered1, 90)
+    time.sleep(10)
 
-    seq = reader.latest().seq if reader.latest() else 0
     state["url"] = wrong
     reader.drop_connection()
     log("2-sinov: ulanish uzildi va 15 s davomida manzil noto'g'ri")
     time.sleep(15)
     state["url"] = good
+    fixed = time.monotonic()
     log("2-sinov: to'g'ri manzil qaytarildi")
-    recovered2 = wait_first_frame(seq, 90)
-    log(f"2-sinov: kadr yana {recovered2:.1f} s da keldi" if recovered2 else "2-sinov: 90 s ichida kadr kelmadi")
+    recovered2 = frame_after(fixed, 90)
+    report("2-sinov (manzil tuzalgandan keyin)", recovered2, 90)
     time.sleep(10)
 
-    seq = reader.latest().seq if reader.latest() else 0
+    dropped = time.monotonic()
     reader.drop_connection()
     log("3-sinov: ulanish uzildi (manzil to'g'ri)")
-    recovered3 = wait_first_frame(seq, 60)
-    log(f"3-sinov: kadr yana {recovered3:.1f} s da keldi" if recovered3 else "3-sinov: 60 s ichida kadr kelmadi")
+    recovered3 = frame_after(dropped + 0.3, 60)  # +0.3 s: a frame still being read on the old connection
+    report("3-sinov (uzilgandan keyin)", None if recovered3 is None else recovered3 + 0.3, 60)
+    if recovered3 is not None:
+        recovered3 += 0.3
     reader.stop()
     s = reader.stats
     return {"test": "reconnect", "channel": args.channel, "recovered_after_fix_s": recovered1,

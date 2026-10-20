@@ -28,7 +28,8 @@ import cv2  # noqa: E402
 
 def clip_start(clip: Path) -> float:
     meta = json.loads(clip.with_suffix(".json").read_text(encoding="utf-8"))
-    return dt.datetime.fromisoformat(meta.get("first_bytes_utc") or meta["started_utc"]).timestamp()
+    # start_utc: on-screen clock of the first frame + camera clock offset (first_bytes_utc is late on low bitrates)
+    return dt.datetime.fromisoformat(meta.get("start_utc") or meta["started_utc"]).timestamp()
 
 
 def main() -> int:

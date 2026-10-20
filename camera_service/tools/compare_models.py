@@ -50,12 +50,14 @@ CONFIGS = [
     {"name": "n_640_roi", "model": "yolo26n.pt", "imgsz": 640, "stream": "101roi"},
     {"name": "s_640_roi", "model": "yolo26s.pt", "imgsz": 640, "stream": "101roi"},
     {"name": "m_640_roi", "model": "yolo26m.pt", "imgsz": 640, "stream": "101roi"},
+    {"name": "s_960_roi", "model": "yolo26s.pt", "imgsz": 960, "stream": "101roi"},
+    {"name": "m_960_roi", "model": "yolo26m.pt", "imgsz": 960, "stream": "101roi"},
 ]
 
 
 def clip_start(clip: Path) -> dt.datetime:
     data = json.loads(clip.with_suffix(".json").read_text(encoding="utf-8"))
-    return dt.datetime.fromisoformat(data.get("first_bytes_utc") or data["started_utc"])
+    return dt.datetime.fromisoformat(data.get("start_utc") or data["started_utc"])  # start_utc: on-screen clock
 
 
 def grab_at(cap: cv2.VideoCapture, target_ms: float, state: dict):

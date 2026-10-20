@@ -129,7 +129,7 @@ def run() -> int:
     was_connected = False
     try:
         while running["on"]:
-            frame = reader.wait_newer(last_seq, period * 0.5)
+            frame = reader.wait_newer(last_seq, period * 0.9)
             now = time.time()
             processed = False
             if frame is not None and frame.seq > last_seq:

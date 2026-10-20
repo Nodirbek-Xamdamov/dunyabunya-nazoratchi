@@ -44,7 +44,7 @@ def clip_start_utc(clip: Path) -> dt.datetime | None:
     if not meta.exists():
         return None
     data = json.loads(meta.read_text(encoding="utf-8"))
-    stamp = data.get("first_bytes_utc") or data.get("started_utc")
+    stamp = data.get("start_utc") or data.get("started_utc")  # start_utc: from the on-screen clock
     return dt.datetime.fromisoformat(stamp) if stamp else None
 
 
