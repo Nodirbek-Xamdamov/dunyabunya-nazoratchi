@@ -42,17 +42,22 @@ def centroid(poly: list[list[float]]) -> tuple[float, float]:
     return sum(p[0] for p in poly) / len(poly), sum(p[1] for p in poly) / len(poly)
 
 
+MIN_MARGIN_X, MIN_MARGIN_TOP, MIN_MARGIN_BOTTOM = 0.08, 0.15, 0.05  # fractions of the frame
+
+
 def roi_for(zones: list[list[list[float]]], margin: float | None, width: int, height: int):
-    """Pixel box around all zones plus `margin` (fraction of that box) - the part the model looks at."""
+    """Pixel box around all zones plus `margin` (fraction of that box, at least the MIN_MARGIN_* parts of the
+    frame) - the part the model looks at. The top margin is the largest: a standing person's head must stay
+    inside, otherwise the cut box looks like a seated person (see DeskMatcher, truncated boxes)."""
     points = [p for zone in zones if len(zone) >= 3 for p in zone]
     if margin is None or not points:
         return None
     xs, ys = [p[0] for p in points], [p[1] for p in points]
     w, h = max(xs) - min(xs), max(ys) - min(ys)
-    x1 = max(0.0, min(xs) - margin * w)
-    y1 = max(0.0, min(ys) - margin * h)
-    x2 = min(1.0, max(xs) + margin * w)
-    y2 = min(1.0, max(ys) + margin * h)
+    x1 = max(0.0, min(xs) - max(margin * w, MIN_MARGIN_X))
+    y1 = max(0.0, min(ys) - max(margin * h, MIN_MARGIN_TOP))
+    x2 = min(1.0, max(xs) + max(margin * w, MIN_MARGIN_X))
+    y2 = min(1.0, max(ys) + max(margin * h, MIN_MARGIN_BOTTOM))
     return int(x1 * width), int(y1 * height), int(round(x2 * width)), int(round(y2 * height))
 
 
@@ -66,10 +71,14 @@ class DeskMatcher:
         self.move_window_s = move_window_s
         self._history: dict[int, deque] = defaultdict(deque)
 
-    def match(self, t: float, detections: list[Detection], width: int, height: int) -> dict[int, Detection | None]:
-        """For every desk id: the person at it (best confidence) or None."""
+    def match(self, t: float, detections: list[Detection], width: int, height: int,
+              roi: tuple[int, int, int, int] | None = None) -> dict[int, Detection | None]:
+        """For every desk id: the person at it (best confidence) or None. A box cut by the top edge of the
+        part the model looked at (roi) belongs to someone taller than the crop - standing, not seated."""
         result: dict[int, Detection | None] = {d["id"]: None for d in self.desks}
         for det in detections:
+            if roi is not None and roi[1] > 0 and det.box[1] <= roi[1] + 2:
+                continue
             ax, ay = anchor(det.box, self.anchor_mode)
             nx, ny = ax / width, ay / height
             if det.track_id >= 0 and self._is_walking(t, det, ax, ay):

@@ -8,13 +8,15 @@ Desk zones are stored as fractions of the frame (0..1), so they fit both camera 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
 
 from camsvc.config import SERVICE_DIR
 
-DB_PATH = SERVICE_DIR / "data" / "camera.db"
+# CAMERA_DB_PATH points the service and tools at another file (tests, trial runs)
+DB_PATH = Path(os.environ.get("CAMERA_DB_PATH") or SERVICE_DIR / "data" / "camera.db")
 SCHEMA_VERSION = 1
 
 SCHEMA = """
@@ -126,9 +128,26 @@ def settings(conn: sqlite3.Connection) -> dict:
 
 
 def settings_stamp(conn: sqlite3.Connection) -> float:
-    row = conn.execute("SELECT MAX(updated_at) FROM cam_settings").fetchone()
-    desks = conn.execute("SELECT MAX(updated_at) FROM cam_desks").fetchone()
-    return max(row[0] or 0, desks[0] or 0)
+    """Changes when the dashboard edits settings, desks or employees (the service then reloads)."""
+    stamps = [conn.execute(f"SELECT MAX(updated_at), COUNT(*) FROM {table}").fetchone()
+              for table in ("cam_settings", "cam_desks", "cam_employees")]
+    return sum((row[0] or 0) + row[1] for row in stamps)
+
+
+def seed(conn: sqlite3.Connection, desks: list[tuple[str, str]], work_start: str = "09:00", work_end: str = "19:00",
+         required_minutes: int = 600) -> int:
+    """First fill of an empty database: (desk name, employee name) pairs, zones left empty."""
+    if conn.execute("SELECT COUNT(*) FROM cam_desks").fetchone()[0]:
+        return 0
+    now = time.time()
+    with conn:
+        for sort, (desk, employee) in enumerate(desks, start=1):
+            cur = conn.execute("INSERT INTO cam_employees(name, work_start, work_end, required_minutes, created_at,"
+                               " updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                               (employee, work_start, work_end, required_minutes, now, now))
+            conn.execute("INSERT INTO cam_desks(name, employee_id, sort, updated_at) VALUES (?, ?, ?, ?)",
+                         (desk, cur.lastrowid, sort, now))
+    return len(desks)
 
 
 def set_status(conn: sqlite3.Connection, values: dict) -> None:

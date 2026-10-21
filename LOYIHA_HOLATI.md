@@ -4,7 +4,7 @@ Vazifa: bitta kamera orqali har bir hodimning stol oldida o'tirgan vaqti (keldi,
 Natija mavjud CEO panelidagi yangi "Yangi kamera" bo'limida ko'rinadi.
 Suhbat uzilsa, ish shu fayldan davom ettiriladi.
 
-Oxirgi yangilanish: 2026-10-20 17:20 (Toshkent)
+Oxirgi yangilanish: 2026-10-21 11:40 (Toshkent)
 
 ## Bosqichlar
 
@@ -12,10 +12,10 @@ Oxirgi yangilanish: 2026-10-20 17:20 (Toshkent)
 |---|---------|-------|
 | 0 | Tayyorgarlik | tugadi. ★ javoblar olindi (pastda). Test video 17:03–18:03 yozildi (101: 625 MB, 102: 19.8 MB) |
 | 1 | Muhit va oqim | tugadi (2026-10-20 18:10), natijalar pastda |
-| 2 | Odamni aniqlash va kuzatish | tugadi, ★ foydalanuvchi belgilangan videoni ko'rishi kutilmoqda |
-| 3 | Baza, stol zonalari, "Yangi kamera" skeleti | boshlanmagan |
-| 4 | Vaqt hisoblash mantig'i | boshlanmagan |
-| 5 | "Yangi kamera" bo'limi to'liq | boshlanmagan |
+| 2 | Odamni aniqlash va kuzatish | tugadi. ★ belgilangan videoga javob hali yo'q (foydalanuvchi "dashboardga chiqar" dedi) |
+| 3 | Baza, stol zonalari, "Yangi kamera" skeleti | qurildi va sinaldi, ishlab turgan panelga HALI O'RNATILMAGAN (2026-10-21: "bugun ishlatma"). ★ zonalarni foydalanuvchi chizadi |
+| 4 | Vaqt hisoblash mantig'i | modul va testlar tayyor. Test video taxminiy zonalar bilan quvurdan o'tdi. Tekshiruv varag'i haqiqiy zonalardan keyin |
+| 5 | "Yangi kamera" bo'limi to'liq | 4 sahifa qurildi (Bugun, Kunlar, Jonli, Sozlash), ishchi nusxada sinaldi, o'rnatilmagan |
 | 6 | Doimiy ishlash | boshlanmagan |
 | 7 | Bir kunlik haqiqiy test | boshlanmagan |
 
@@ -32,6 +32,47 @@ Oxirgi yangilanish: 2026-10-20 17:20 (Toshkent)
 - Namoz vaqti ish vaqtiga qo'shiladi. Reja (4-bosqich): Toshkent namoz vaqtlari lokal hisoblanadi (internetsiz, Hanafiy asr).
   Shu oynalarda stoldan yo'q bo'lgan vaqt "namoz" deb belgilanadi va jami ish vaqtiga qo'shiladi. Bitta namoz uchun cheklov sozlanadi.
   Hisoblangan vaqtlar "Sozlash" sahifasida ko'rinadi, rasmiy taqvim bilan solishtirish va surish (offset) mumkin.
+
+## 2026-10-21: "telegram odoo integration proektidagi dashboardga chiqar lekin bugun ishlatma"
+
+Tushunilgan ma'no: bo'lim aynan shu panelga (`odoo telegram integration\dashboard`) qo'shiladi, lekin bugun hech narsa ishga tushirilmaydi.
+- Ishlab turgan panel to'xtatilmadi va uning fayllari o'zgartirilmadi.
+- Kamera xizmati jonli ishga tushirilmadi.
+- O'rnatish ertaga (yoki ruxsat berilgan kuni) `dashboard_addon\deploy_live.ps1` bilan qilinadi.
+
+Nima qurildi:
+- `dashboard_addon\` (bu repoda): `camera\` (store, report, prayer, zone_editor, excel, ui, texts), `views\kamera*.py` (4 sahifa), `tests\test_camera.py` (15 test).
+  `install.py` fayllarni panelga ko'chiradi va `app.py` ga 4 qator qo'shadi (aniq joylarni topib; topilmasa hech narsa o'zgarmaydi; `--check`, `--uninstall` bor).
+  `deploy_live.ps1` ketma-ketligi: tekshiradi → zip zaxira oladi → panelni to'xtatadi → o'rnatadi → yoqadi → health tekshiradi.
+  DIQQAT: `run_dashboard.ps1 -Stop` agentlarning Telegram botlarini ham to'xtatadi, ~15 s.
+- Sahifalar panelning layout/AI-chat tizimidan tashqarida: chat ularni yashira yoki o'zgartira olmaydi. Matnlar `camera\texts.py` da (panelning `i18n.py` siga tegilmadi).
+- Panelning Python muhitiga hech narsa o'rnatilmadi. Zona chizish faqat mavjud Streamlit 1.66 + Plotly bilan ishlaydi:
+  burchaklarni bosish, yoki asboblar panelidagi Lasso bilan aylana chizish.
+  (Streamlit `dragmode=lasso` bo'lsa bosishni tanlovga aylantirmaydi, shuning uchun standart rejim pan, o'qlar qotirilgan.)
+- Kamera bazasi `camera_service\data\camera.db` yaratildi: 3 stol (Uzoq – Nodir, O'rta – Husniddin, Yaqin – Muhammadumar, 09:00–19:00, 10 soat, Du–Sha), zonalar bo'sh.
+  `data\live\latest_raw.jpg` da test videodan (17:05:14) kadr bor. Xizmat ishga tushgach u jonli kadr bilan almashadi.
+- Hisobot qoidalari (`camera\report.py`):
+  - O'tirgan = intervallar birlashmasi.
+  - Tanaffus = intervallar orasi minus "ma'lumot yo'q" vaqti (kamera uzilishi tanaffus emas).
+  - Namoz = [namoz vaqti, +30 daq] oynasiga tushgan tanaffus qismi, bitta namozga ko'pi bilan 20 daq, ish vaqtiga qo'shiladi.
+  - Ma'lumot yo'q = ish vaqtidagi kadrlarning yarmidan kami tahlil qilingan daqiqalar.
+  - "Kunlar" sahifasida tizim umuman ishlamagan kunlar hisobga olinmaydi.
+- Namoz vaqtlari Toshkent uchun astronomik formula bilan hisoblanadi: asr Hanafiy, bomdod va xufton 15°.
+  Rasmiy taqvimdan bir necha daqiqa farq qilishi mumkin, "Sozlash"da surish (offset) bor.
+- Kamera xizmatiga qo'shilganlar:
+  - `CAMERA_DB_PATH` / `CAMERA_LIVE_DIR` env bilan boshqa bazaga yozish mumkin;
+  - `latest.json` (kadr vaqti);
+  - ROI tepaga kamida kadrning 15% i kengaytiriladi;
+  - ROI yuqori chetida kesilgan ramka (tik turgan odam) stol uchun hisobga olinmaydi.
+
+Sinovlar:
+- Panel ishchi nusxasi (`dev\dashboard`, gitignore): to'liq to'plam 219 o'tdi, 4 o'tkazildi (eski 208 + 15 yangi).
+- Kamera xizmati: 17 test.
+- Brauzer sinovi (headless Chrome, CDP, `dev\ui_check.py`): 4 sahifa xatosiz. 3 marta bosish 3 nuqta berdi, Lasso 10 burchakli zona berdi.
+  Skrinshotlar: `review\ui_*.png`.
+- Test video (60 daq) taxminiy zonalar va `anchor=upper` bilan `dev\camera_test.db` ga o'tkazildi: 17 989 kadr, 318 s (11.3x).
+  Nodir 17:03–18:03, Husniddin 17:03–18:03, Muhammadumar 17:03–17:06:44 va 17:26:19–17:56:35. Ko'z bilan ko'rilgan kadrlarga mos.
+- Ishchi nusxa 127.0.0.1:8510 da faqat sinov paytida ishladi va to'xtatildi. Parol skaneri: 171 fayl, 0 topildi.
 
 ## Server tekshiruvi (2026-10-20 16:44)
 
@@ -140,6 +181,17 @@ Faqat stollar maydonidagi odamlar hisoblanadi, variantlarda conf ≥ 0.35. ms = 
 
 ## Buyruqlar
 
+- "Yangi kamera"ni ishlab turgan panelga o'rnatish (FAQAT ruxsat bilan; panel va agent botlari ~15 s to'xtaydi):
+  `powershell -ExecutionPolicy Bypass -File D:\Demos\Kamera\dashboard_addon\deploy_live.ps1 -Check` (tekshirish), keyin `-Check` siz.
+  O'rnatgandan keyin dashboard reposida `kamera` branch ochib, faqat kamera fayllari va `app.py` commit qilinadi
+  (`main` dagi commit qilinmagan agent-builder ishiga tegilmaydi).
+- Qaytarish: `python D:\Demos\Kamera\dashboard_addon\install.py "D:\Demos\odoo telegram integration\dashboard" --uninstall` (panel to'xtatilgan holda) yoki zip zaxira.
+- Panel ishchi nusxasi (sinov uchun): `D:\Demos\Kamera\dev\run_dev_dashboard.ps1` (127.0.0.1:8510), `-Stop` bilan to'xtatiladi.
+  Nusxani yangilash: `python D:\Demos\Kamera\dashboard_addon\install.py D:\Demos\Kamera\dev\dashboard`.
+  Testlar: `cd D:\Demos\Kamera\dev\dashboard; & "D:\Demos\odoo telegram integration\dashboard\.venv\Scripts\python.exe" -m pytest -q`.
+- Kamera xizmati (hali ishga tushirilmagan): `cd D:\Demos\Kamera\camera_service; .venv\Scripts\python.exe -m camsvc.service` (to'xtatish: Ctrl+C yoki `data\STOP` fayli).
+- Test videoni quvurdan o'tkazish: `$env:CAMERA_DB_PATH=...; .venv\Scripts\python.exe tools\replay_clip.py ..\test_clips\kamera101_....mkv`.
+
 - Kamera oqimini tekshirish (`.env` to'ldirilgach):
   `python D:\Demos\Kamera\camera_service\tools\record_clip.py --probe`
 - Test video yozish (101 va 102, 60 daqiqa, fon rejimida):
@@ -162,5 +214,15 @@ Faqat stollar maydonidagi odamlar hisoblanadi, variantlarda conf ≥ 0.35. ms = 
 
 ## O'zgargan fayllar ro'yxati
 
-- Yangi: `D:\Demos\Kamera\` (`.env.example`, `.env` bo'sh shablon, `.gitignore`, `LOYIHA_HOLATI.md`, `camera_service\camsvc\config.py`, `camera_service\tools\record_clip.py`).
-- Mavjud dasturda hali hech narsa o'zgarmagan (faqat zaxira olindi).
+- Yangi: hammasi `D:\Demos\Kamera\` ichida: `camera_service\`, `dashboard_addon\`, `test_clips\`, `review\`, `dev\` (oxirgi uchtasi git'ga tushmaydi).
+- Mavjud panelda (`odoo telegram integration\dashboard`) hali hech narsa o'zgarmagan, faqat zaxira olindi:
+  `backups\dashboard_before_kamera_2026-10-20.zip`. `install.py --check` faqat o'qidi.
+- Yon ta'sir (2026-10-20 17:46, mening xatoim): `C:\Users\Администратор\AppData\Roaming\Ultralytics\settings.json` yaratilgan, `sync=false` qilingan.
+  O'chirish uchun foydalanuvchi ruxsati kerak.
+
+## Keyingi qadamlar
+
+1. Ruxsat bilan `deploy_live.ps1`: "Yangi kamera" panelda paydo bo'ladi.
+2. Foydalanuvchi "Sozlash"da 3 stol zonasini chizadi (★ 3-bosqich). Kamera ko'chirilsa, avval yangi kadr kerak, ya'ni xizmat bir marta ishga tushadi.
+3. Kamera xizmatini ishga tushirish (ruxsat bilan), keyin 6-bosqich: Task Scheduler, qayta ishga tushish, loglar, kundalik zaxira E: ga.
+4. 4-bosqich ★: haqiqiy zonalar bilan test videoni qayta o'tkazish va tekshiruv varag'i (intervallar + kichik rasmlar) tayyorlash.

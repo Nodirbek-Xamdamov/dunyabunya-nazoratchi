@@ -8,6 +8,7 @@ desk logic itself lives in zones.py and presence.py.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import time
 from pathlib import Path
@@ -20,7 +21,7 @@ from camsvc.presence import Closed, DeskPresence, Opened, PresenceParams, Seen
 from camsvc.zones import DeskMatcher, Detection, centroid, roi_for
 
 TRACKER = str(runtime.SERVICE_DIR / "config" / "bytetrack_desk.yaml")
-LIVE_DIR = runtime.SERVICE_DIR / "data" / "live"
+LIVE_DIR = Path(os.environ.get("CAMERA_LIVE_DIR") or runtime.SERVICE_DIR / "data" / "live")
 
 GREEN, YELLOW, GREY, WHITE = (60, 200, 60), (0, 200, 255), (160, 160, 160), (255, 255, 255)
 
@@ -79,7 +80,7 @@ class Pipeline:
             ids = boxes.id.int().tolist() if boxes.id is not None else [-1] * len(boxes)
             for (x1, y1, x2, y2), conf, tid in zip(boxes.xyxy.tolist(), boxes.conf.tolist(), ids):
                 detections.append(Detection((x1 + x0, y1 + y0, x2 + x0, y2 + y0), conf, tid))
-        matched = self.matcher.match(t, detections, width, height)
+        matched = self.matcher.match(t, detections, width, height, roi)
         for desk_id, det in matched.items():
             for event in self.presence[desk_id].update(t, det is not None):
                 self._store(desk_id, event)
@@ -163,6 +164,23 @@ def draw(image: np.ndarray, pipeline: Pipeline, t: float, tz=None) -> np.ndarray
     cv2.rectangle(out, (0, height - 40), (width, height), (0, 0, 0), -1)
     cv2.putText(out, stamp, (12, height - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.9, WHITE, 2)
     return out
+
+
+def write_live(image: np.ndarray, annotated: np.ndarray, t: float, source: str = "live") -> None:
+    """The dashboard's view of the camera: newest annotated frame, newest clean frame (for drawing zones)
+    and when it was taken. Each file is replaced in place; no history is kept."""
+    write_jpeg(LIVE_DIR / "latest.jpg", annotated)
+    write_jpeg(LIVE_DIR / "latest_raw.jpg", image, quality=85)
+    height, width = image.shape[:2]
+    meta = {"ts": t, "width": width, "height": height, "source": source}
+    tmp = LIVE_DIR / "latest.json.tmp"
+    tmp.write_text(json.dumps(meta), encoding="utf-8")
+    for _ in range(5):
+        try:
+            os.replace(tmp, LIVE_DIR / "latest.json")
+            return
+        except PermissionError:
+            time.sleep(0.05)
 
 
 def write_jpeg(path: Path, image: np.ndarray, quality: int = 80) -> bool:

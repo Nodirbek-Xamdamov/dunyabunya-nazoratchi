@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from camsvc import runtime  # noqa: F401  (must come before ultralytics)
 from camsvc import db
 from camsvc.config import LOGS_DIR, camera_from_env, mask
-from camsvc.pipeline import LIVE_DIR, Pipeline, draw, write_jpeg
+from camsvc.pipeline import Pipeline, draw, write_live
 from camsvc.stream import LatestFrameReader
 
 STOP_FILE = runtime.SERVICE_DIR / "data" / "STOP"
@@ -139,8 +139,7 @@ def run() -> int:
                 recent.append(now)
                 if now - last_draw >= 1.0:
                     last_draw = now
-                    write_jpeg(LIVE_DIR / "latest.jpg", draw(frame.image, pipeline, frame.wall, tz))
-                    write_jpeg(LIVE_DIR / "latest_raw.jpg", frame.image, quality=85)
+                    write_live(frame.image, draw(frame.image, pipeline, frame.wall, tz), frame.wall)
             else:
                 pipeline.idle(now)
             frames_now = reader.stats.frames

@@ -17,9 +17,20 @@ def test_anchor_is_not_the_feet():
 
 
 def test_roi_around_zones():
-    assert roi_for([SQUARE], 0.25, W, H) == (400, 400, 1000, 1000)
+    # zone 0.5..0.9: sides +max(0.1, 0.08), top +max(0.1, 0.15), bottom +max(0.1, 0.05)
+    assert roi_for([SQUARE], 0.25, W, H) == (400, 350, 1000, 1000)
     assert roi_for([], 0.25, W, H) is None
     assert roi_for([SQUARE], None, W, H) is None
+
+
+def test_box_cut_by_the_top_of_the_crop_is_not_seated():
+    m = DeskMatcher([{"id": 1, "zone": SQUARE}], desk_conf=0.35)
+    roi = (400, 350, 1000, 1000)
+    standing_cut = Detection((600, 351, 800, 1000), 0.9)  # head outside the crop: anchor would fall in the zone
+    seated = Detection((600, 600, 800, 800), 0.9)
+    assert m.match(0.0, [standing_cut], W, H, roi) == {1: None}
+    assert m.match(0.2, [seated], W, H, roi) == {1: seated}
+    assert m.match(0.4, [standing_cut], W, H, None) == {1: standing_cut}  # whole frame: nothing is cut
 
 
 def test_confidence_and_zone():

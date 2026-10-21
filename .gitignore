@@ -18,3 +18,6 @@ __pycache__/
 *.pt
 *.onnx
 *.engine
+
+# local copy of the dashboard for development and tests
+dev/
