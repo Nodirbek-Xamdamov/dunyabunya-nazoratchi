@@ -30,6 +30,12 @@ def _cat_case(alias: str = "c") -> tuple[str, list]:
     return sql, [*names, m_.OTHER_CATEGORY]
 
 
+def has_table(s: Session, name: str) -> bool:
+    """Tables added by newer bot versions (media_files) may be missing in older or demo databases."""
+    return bool(s.scalar(f"has_table.{name}", "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                         [name], default=0))
+
+
 def _customer_where(start: str, end: str, chat_id: int | None = None, alias: str = "m") -> tuple[str, list]:
     sql = f"{alias}.sent_at_utc >= ? AND {alias}.sent_at_utc < ? AND {alias}.is_staff = 0"
     params: list = [start, end]
@@ -226,13 +232,16 @@ def group_info(s: Session, chat_id: int) -> dict | None:
 def group_feed(s: Session, chat_id: int, start: str, end: str, limit: int, *, search: str | None = None,
                sentiment: str | None = None, category: str | None = None, customers_only: bool = False) -> pd.DataFrame:
     cat_sql, cat_params = _cat_case()
+    media = has_table(s, "media_files")  # pictures/GIFs the bot saved (only from company-related talk)
     sql = f"""
         SELECT m.id, m.message_id, m.sent_at_utc, m.sender_id, m.sender_name, m.sender_username, m.is_staff,
                m.text, m.media_type, m.transcript, m.reply_to_message_id, m.status,
                c.is_company_related, {cat_sql} AS category, c.sentiment, c.summary, c.needs_manager,
-               rp.sender_name AS reply_name, substr(COALESCE(rp.text, rp.transcript, ''), 1, 90) AS reply_text
+               rp.sender_name AS reply_name, substr(COALESCE(rp.text, rp.transcript, ''), 1, 90) AS reply_text,
+               {"mf.status AS media_status, mf.path AS media_path" if media else "NULL AS media_status, NULL AS media_path"}
         FROM messages m LEFT JOIN classifications c ON c.message_ref = m.id
         LEFT JOIN messages rp ON rp.chat_id = m.chat_id AND rp.message_id = m.reply_to_message_id
+        {"LEFT JOIN media_files mf ON mf.message_ref = m.id" if media else ""}
         WHERE m.chat_id = ? AND m.sent_at_utc >= ? AND m.sent_at_utc < ?"""
     params: list = [*cat_params, chat_id, start, end]
     if search:
@@ -256,14 +265,14 @@ def group_feed(s: Session, chat_id: int, start: str, end: str, limit: int, *, se
 
 
 def group_customers(s: Session, chat_id: int, start: str, end: str) -> pd.DataFrame:
+    """Customers who wrote to the company (company-related messages only)."""
     where, params = _customer_where(start, end, chat_id)
     return s.df("group_customers", f"""
-        SELECT m.sender_id, MAX(m.sender_name) AS name, MAX(m.sender_username) AS username, COUNT(*) AS messages,
-               COALESCE(SUM(c.is_company_related = 1), 0) AS related,
-               COALESCE(SUM(c.is_company_related = 1 AND c.sentiment = ?), 0) AS complaints,
-               MAX(m.sent_at_utc) AS last_at
-        FROM messages m LEFT JOIN classifications c ON c.message_ref = m.id
-        WHERE {where} GROUP BY m.sender_id ORDER BY messages DESC LIMIT 200""", [m_.COMPLAINT, *params])
+        SELECT m.sender_id, MAX(m.sender_name) AS name, MAX(m.sender_username) AS username,
+               COUNT(*) AS related, COALESCE(SUM(c.sentiment = ?), 0) AS complaints, MAX(m.sent_at_utc) AS last_at
+        FROM messages m JOIN classifications c ON c.message_ref = m.id
+        WHERE {where} AND c.is_company_related = 1
+        GROUP BY m.sender_id ORDER BY related DESC LIMIT 200""", [m_.COMPLAINT, *params])
 
 
 # --------------------------------------------------------------------------- requests and answers

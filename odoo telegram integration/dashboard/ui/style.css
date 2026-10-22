@@ -19,6 +19,16 @@
 [data-testid="stPageLink"] p { font-size: 0.84rem; }
 [data-testid="stPageLink"] a { padding-top: 0.1rem; padding-bottom: 0.1rem; }
 [class*="st-key-catcard"] [data-testid="stMetric"] { box-shadow: none; padding: 0.2rem 0 0 0; }
+/* Bo'limlar: every category card is one big button (the real button covers the card) */
+[class*="st-key-catcard-"] { position: relative; transition: box-shadow 0.15s ease, transform 0.15s ease; }
+[class*="st-key-catcard-"]:hover { box-shadow: 0 6px 18px rgba(15, 23, 42, 0.10); transform: translateY(-1px); }
+[class*="st-key-catcard-"]:has(button:focus-visible) { outline: 2px solid #4F46E5; outline-offset: 2px; }
+[class*="st-key-catopen-"] { position: absolute; inset: 0; z-index: 2; margin: 0; }
+[class*="st-key-catopen-"] [data-testid="stButton"], [class*="st-key-catopen-"] button {
+  width: 100%; height: 100%; opacity: 0; cursor: pointer;
+}
+.db-cat-more { font-size: 0.82rem; font-weight: 600; color: #4F46E5; text-align: right; }
+.db-cat-name { font-size: 1.35rem; font-weight: 650; margin: 0.1rem 0 0.3rem; }
 [data-testid="stMetricLabel"] p { font-size: 0.86rem; opacity: 0.8; }
 [data-testid="stMetricValue"] { font-size: 1.85rem; font-weight: 650; letter-spacing: -0.01em; }
 
@@ -90,6 +100,19 @@
 .db-msg .db-msg-text { white-space: pre-wrap; word-break: break-word; }
 .db-msg .db-msg-reply { font-size: 0.78rem; opacity: 0.7; border-left: 2px solid rgba(128, 128, 128, 0.5); padding-left: 0.4rem; margin-bottom: 0.2rem; }
 .db-msg .db-msg-summary { font-size: 0.8rem; opacity: 0.8; margin-top: 0.2rem; font-style: italic; }
+/* pictures and GIFs from company-related conversations; a click opens the picture over the whole
+   window (an open details element), the next click closes it. Never put a "less than" sign in this
+   file: st.html's sanitizer then drops the whole style block. */
+.db-msg .db-msg-media { margin: 0.2rem 0 0.25rem; }
+.db-msg .db-msg-media img, .db-msg .db-msg-media video {
+  display: block; max-width: 280px; max-height: 280px; border-radius: 10px; object-fit: contain;
+}
+.db-msg details.db-msg-media > summary { display: block; list-style: none; cursor: zoom-in; }
+.db-msg details.db-msg-media > summary::-webkit-details-marker { display: none; }
+.db-msg details.db-msg-media[open] > summary img {
+  position: fixed; inset: 0; z-index: 1000000; max-width: none; max-height: none; width: 100vw; height: 100vh;
+  border-radius: 0; padding: 4vh 4vw; box-sizing: border-box; background: rgba(15, 23, 42, 0.88); cursor: zoom-out;
+}
 
 /* sidebar freshness line */
 .db-fresh { font-size: 0.84rem; }
@@ -182,14 +205,27 @@ body:has([data-testid="stDialog"]) [data-testid="stPopoverBody"]:has(.st-key-cha
 .st-key-agnode-orchestrator { border-color: rgba(79, 70, 229, 0.55) !important; background: rgba(79, 70, 229, 0.05); }
 .db-ag-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 0.1rem; }
 .db-ag-more { margin-left: auto; font-size: 0.82rem; font-weight: 600; color: #4F46E5; white-space: nowrap; }
-.db-tree-link { position: relative; height: 3rem; margin: -1rem 0; }
-.db-tree-link > div, .db-tree-drop { position: absolute; border-color: rgba(128, 128, 128, 0.5); border-style: solid; border-width: 0; }
-.db-tree-stem { left: 50%; top: 0; height: 50%; border-left-width: 2px !important; }
-.db-tree-bar { left: 16.6%; right: 16.6%; top: 50%; border-top-width: 2px !important; }
-.db-tree-drop { top: 50%; height: 50%; border-left-width: 2px !important; }
-.db-tree-drop:nth-of-type(1) { left: 16.6%; }
-.db-tree-drop:nth-of-type(2) { left: 50%; }
-.db-tree-drop:nth-of-type(3) { left: 83.4%; }
+/* connecting lines: a stem under Boshqaruvchi, and in every column of the row below a piece of the
+   horizontal bar (stretched over half of the gap on each side, so the pieces meet) plus a drop down to
+   the card. Rows after the first (more than 4 agents) get a dashed bar. */
+.db-tree-stem { position: relative; height: 2rem; margin: -1rem 0; }
+.db-tree-stem::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; border-left: 2px solid rgba(128, 128, 128, 0.5); }
+.db-tree-drop { position: relative; height: 1.4rem; margin-bottom: -1rem; }
+.db-tree-drop::before { content: ""; position: absolute; top: 0; left: -0.55rem; right: -0.55rem; border-top: 2px solid rgba(128, 128, 128, 0.5); }
+.db-tree-drop.first::before { left: 50%; }
+.db-tree-drop.last::before { right: 50%; }
+.db-tree-drop.only::before { display: none; }
+.db-tree-drop.more::before { border-top-style: dashed; }
+.db-tree-drop::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; border-left: 2px solid rgba(128, 128, 128, 0.5); }
+/* third level: the sub-agents hang under their parent's card on a vertical line */
+[class*="st-key-agkids-"] {
+  margin: -0.4rem 0 0 1.1rem; padding: 0.6rem 0 0 0.9rem; border-left: 2px solid rgba(128, 128, 128, 0.5);
+  width: calc(100% - 1.1rem) !important; box-sizing: border-box;
+}
+[class*="st-key-agkids-"] [class*="st-key-agnode-"]::before {
+  content: ""; position: absolute; left: -0.95rem; top: 1.7rem; width: 0.85rem; border-top: 2px solid rgba(128, 128, 128, 0.5);
+}
+[class*="st-key-agkids-"] [class*="st-key-agnode-"] [data-testid="stHeading"] h3 { font-size: 1.02rem; }
 
 @media (max-width: 900px) {
   .db-msg { max-width: 95%; }
@@ -197,5 +233,5 @@ body:has([data-testid="stDialog"]) [data-testid="stPopoverBody"]:has(.st-key-cha
   [data-testid="stMetricValue"] { font-size: 1.5rem; }
 }
 @media (max-width: 640px) {
-  .db-tree-link { display: none; }  /* the columns are stacked: no connecting lines */
+  .db-tree-stem, .db-tree-drop { display: none; }  /* the columns are stacked: no connecting lines */
 }

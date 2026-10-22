@@ -111,3 +111,48 @@ async def test_local_model_is_used_when_openai_is_not_selected_or_has_no_key(mon
 
     assert await stt.transcribe_file(_file(tmp_path, "voice.ogg")) == "lokal model matni"
     create.assert_not_called()
+
+
+async def test_gpt_transcribe_gets_context_keywords_and_wav_instead_of_ogg(monkeypatch, tmp_path):
+    """2026-10-22: gpt-transcribe -- `prompt` = yozuv konteksti, atamalar `keywords`da; ogg'ni qabul qilmaydi."""
+    create = _fake_openai(monkeypatch, " Sement 20 qop kerak. ")
+    monkeypatch.setattr(stt.settings, "OPENAI_STT_MODEL", "gpt-transcribe")
+    monkeypatch.setattr(stt.settings, "OPENAI_STT_LANGUAGES", "")
+    monkeypatch.setattr(stt, "extract_wav", lambda path: b"W" * 40_000)
+
+    assert await stt.transcribe_file(_file(tmp_path, "tg_voice_1.ogg")) == "Sement 20 qop kerak."
+
+    kwargs = create.await_args.kwargs
+    assert kwargs["model"] == "gpt-transcribe" and kwargs["file"] == ("audio.wav", b"W" * 40_000)
+    assert kwargs["prompt"] == stt.STT_CONTEXT and "Uzbek" in kwargs["prompt"]
+    assert "sement" in kwargs["extra_body"]["keywords"] and "languages" not in kwargs["extra_body"]
+    assert "language" not in kwargs
+    assert all("<" not in word and ">" not in word and "\n" not in word for word in kwargs["extra_body"]["keywords"])
+
+
+async def test_gpt_transcribe_languages_are_sent_when_configured(monkeypatch, tmp_path):
+    create = _fake_openai(monkeypatch, "matn")
+    monkeypatch.setattr(stt.settings, "OPENAI_STT_MODEL", "gpt-transcribe")
+    monkeypatch.setattr(stt.settings, "OPENAI_STT_LANGUAGES", " ru, en ")
+    await stt.transcribe_file(_file(tmp_path, "a.mp3"))
+    assert create.await_args.kwargs["extra_body"]["languages"] == ["ru", "en"]
+
+
+@pytest.mark.parametrize("model", ["gpt-transcribe", "gpt-4o-transcribe"])
+async def test_echoed_term_list_is_treated_as_no_speech(monkeypatch, tmp_path, model):
+    """2026-10: gpt-4o-transcribe bir yozuvga so'rovdagi atamalar ro'yxatini qaytargan."""
+    echo = "Assalamu alaykum, dunyabunya, buyurtma, yetkazib berish, ombor, tovar, hisob-kitob, sement."
+    _fake_openai(monkeypatch, echo)
+    monkeypatch.setattr(stt.settings, "OPENAI_STT_MODEL", model)
+    assert await stt.transcribe_file(_file(tmp_path, "a.mp3")) == ""
+
+
+@pytest.mark.parametrize("text, echo", [
+    ("Gipsokarton, penopleks, rotband, alebastr, shpatlevka", True),  # atamalar aynan so'rovdagi tartibda
+    ("Sement, g'isht, armatura kerak, qachon olib kelasiz?", False),
+    ("Qum, sement, kley, beton, g'isht, shifer", False),  # mijozning o'z ro'yxati -- tartib boshqa
+    ("Bizga 10 qop sement, 2000 ta g'isht", False),
+    ("", False),
+])
+def test_prompt_echo_detection(text, echo):
+    assert stt.is_prompt_echo(text) is echo

@@ -20,12 +20,12 @@ async def add_group(chat_id=CHAT, title="Chilonzor obyekti", *, admins=(ADMIN_ID
 
 async def add_message(
     message_id, text="Sement qanchadan?", *, chat_id=CHAT, sender_id=CUSTOMER_ID, name="Vali Mijoz", username="vali",
-    is_staff=False, minutes=0.0, media_type="text", reply_to=None,
+    is_staff=False, minutes=0.0, media_type="text", reply_to=None, file_id=None,
 ) -> int:
     """Xabar yozadi va uning bazadagi ID'sini qaytaradi."""
     await monitor_db.save_message(
         chat_id=chat_id, message_id=message_id, sender_id=sender_id, sender_username=username, sender_name=name,
-        is_staff=is_staff, text=text, media_type=media_type, file_id=None, reply_to_message_id=reply_to,
+        is_staff=is_staff, text=text, media_type=media_type, file_id=file_id, reply_to_message_id=reply_to,
         sent_at=T0 + timedelta(minutes=minutes),
     )
     return (await get_message(chat_id, message_id)).id

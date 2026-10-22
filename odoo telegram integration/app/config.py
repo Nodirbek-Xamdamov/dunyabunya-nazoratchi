@@ -140,6 +140,17 @@ class Settings(BaseSettings):
     BACKUP_DIR: str = "./backups"
     BACKUP_KEEP: int = 14
 
+    # --- Rasm va GIF'lar -> web sahifa (2026-10-22, `app/monitor_media.py`) ---
+    # Kompaniyaga oid suhbatdagi rasm/GIF fayli yuklab olinib `MEDIA_DIR`ga yoziladi, dashboard uni
+    # guruh suhbati lentasida ko'rsatadi. Suhbat = rasmdan oldin/keyin `MEDIA_CONTEXT_MINUTES` daqiqa
+    # ichidagi xabarlar (va javob bog'lanishi); ulardan birortasi kompaniyaga oid bo'lsa -- rasm saqlanadi.
+    MEDIA_ENABLED: bool = True
+    MEDIA_DIR: str = "./data/media"
+    # Bir kunda (xabar kuni, `TIMEZONE`) ko'pi bilan shuncha fayl saqlanadi; qolganlari saqlanmaydi
+    MEDIA_DAILY_LIMIT: int = 200
+    MEDIA_MAX_FILE_MB: int = 10
+    MEDIA_CONTEXT_MINUTES: int = 10
+
     # --- Ovozli xabar / audio / video (ovozi) -> matn ---
     # Yoqilgan bo'lsa tasniflovchi matni yo'q ovozli xabarni OpenAI transkripsiya API'si orqali
     # matnga aylantiradi (`OPENAI_API_KEY` kerak; foydalanuvchi qarori, 2026-10-13) va shu matn
@@ -147,10 +158,17 @@ class Settings(BaseSettings):
     GROUP_STT_ENABLED: bool = False
     # Quyidagi ikkitasi faqat `app/stt.py`dagi lokal model uchun (monitoring uni ishlatmaydi)
     GROUP_STT_PROVIDER: str = "local"
-    # O'zbekcha uchun `gpt-4o-transcribe`: `whisper-1` o'zbekchani tanimaydi (2026-10-12 o'lchovi:
-    # so'z xatosi whisper-1 98%, gpt-4o-transcribe 35%, lokal model 18%).
-    OPENAI_STT_MODEL: str = "gpt-4o-transcribe"
-    # Bo'sh = tilni model o'zi aniqlaydi. "uz" ni API qabul qilmaydi (400 xatosi, 2026-10-12).
+    # 2026-10-22 dan `gpt-transcribe` (OpenAI'ning 2026-07 dagi eng aniq transkripsiya modeli; foydalanuvchi:
+    # o'zbekcha ovozlar yomon olinyapti, qimmatroq bo'lsa ham yaxshirog'ini ishlat). Unga yozuv konteksti,
+    # soha atamalari va kutilgan tillar beriladi (`app/stt.py`). Oldin `gpt-4o-transcribe` edi (2026-10-12
+    # o'lchovi: so'z xatosi whisper-1 98%, gpt-4o-transcribe 35%, lokal model 18%).
+    OPENAI_STT_MODEL: str = "gpt-transcribe"
+    # gpt-transcribe uchun kutilgan tillar (vergul bilan, ISO kodlar); bo'sh = model o'zi aniqlaydi.
+    # O'zbekcha ("uz", "uzb") ro'yxatda yo'q -- API 400 qaytaradi (2026-10-22), "ru" qabul qilinadi;
+    # faqat "ru" berilsa model ruschaga og'ib ketadi, shuning uchun bo'sh: o'zbekcha ekani kontekstda aytilgan.
+    OPENAI_STT_LANGUAGES: str = ""
+    # Eski modellar (gpt-4o-transcribe, whisper-1) uchun bitta til. Bo'sh = tilni model o'zi aniqlaydi.
+    # "uz" ni gpt-4o-transcribe qabul qilmaydi (400 xatosi, 2026-10-12).
     OPENAI_STT_LANGUAGE: str = ""
     # Bo'sh = ~/.cache/faster-whisper-ct2/islomov--rubaistt_v2_medium (CTranslate2 papkasi)
     GROUP_STT_MODEL: str = ""

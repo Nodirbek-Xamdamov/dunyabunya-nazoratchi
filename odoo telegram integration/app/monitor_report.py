@@ -224,8 +224,7 @@ async def summarize_overall(report: Report) -> str:
     )
     text = await _ask_summary(
         f"Sana: {format_period(report.day)}\n"
-        f"Tayyor raqamlar: kompaniyaga oid xabarlar {_numbers(stats)}. "
-        f"Kompaniyaga aloqasiz (filtrlangan) xabarlar: {stats.filtered} ta.\n\n"
+        f"Tayyor raqamlar: kompaniyaga oid xabarlar {_numbers(stats)}.\n\n"
         f"Toifalar bo'yicha raqamlar:\n{table}\n\nToifalar bo'yicha xulosalar:\n{summaries}\n\n"
         "Kun bo'yicha 3-4 jumlali umumiy xulosa yoz: asosiy muammolar va ijobiy jihatlar. Shikoyatlar "
         "sonining oldingi kun bilan solishtirmasi va javobsiz so'rovlar haqida YOZMA -- ular alohida qo'shiladi."
@@ -451,8 +450,7 @@ def _write_stats_table(sheet, row: int, stats: DayStats) -> int:
         bold=True,
     )
     row += 1
-    write_row((monitor_db.STAT_FILTERED, stats.filtered, None, None, None, None), gray=True)
-    row += 1
+    # Kompaniyaga aloqasiz xabarlar statistikaga qo'shilmaydi (2026-10-22, foydalanuvchi talabi)
     if stats.unclassified:
         write_row(("Tasniflab bo'lmagan xabarlar", stats.unclassified, None, None, None, None), gray=True)
         row += 1

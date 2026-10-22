@@ -6,7 +6,9 @@ dunyabunya monitoring dashboard'ini ishga tushiradi (Streamlit, dashboard\.venv 
   powershell -ExecutionPolicy Bypass -File dashboard\run_dashboard.ps1 -Demo -RebuildDemo
   powershell -ExecutionPolicy Bypass -File dashboard\run_dashboard.ps1 -Stop           # shu skript ishga tushirgan dashboard'ni to'xtatish
 
-Skript faqat dashboard papkasi ichidagi fayllarga tegadi: .venv, logs, demo bazasi.
+Dashboard bilan birga agentlarning Telegram botlari jarayoni ham ishga tushadi va to'xtaydi
+(agent_bots.py; demo rejimda ishga tushmaydi). Skript faqat dashboard papkasi ichidagi fayllarga
+tegadi: .venv, logs, demo bazasi.
 #>
 param([switch]$Demo, [switch]$RebuildDemo, [switch]$Stop)
 
@@ -15,6 +17,7 @@ $dash = $PSScriptRoot
 $venvPython = Join-Path $dash ".venv\Scripts\python.exe"
 $logs = Join-Path $dash "logs"
 $pidFile = Join-Path $logs "dashboard.pid"
+$botsPidFile = Join-Path $logs "agent_bots.pid"
 $localHosts = @("127.0.0.1", "localhost", "::1")
 
 function Read-DashboardEnv {
@@ -48,7 +51,21 @@ function Stop-Dashboard {
     Remove-Item -LiteralPath $pidFile -Force
 }
 
-if ($Stop) { Stop-Dashboard; exit 0 }
+function Stop-AgentBots {
+    if (-not (Test-Path -LiteralPath $botsPidFile)) { return }
+    $procId = [int](Get-Content -LiteralPath $botsPidFile -Raw).Trim()
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
+    if ($proc -and $proc.CommandLine -match "agent_bots\.py") {
+        foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$procId" -ErrorAction SilentlyContinue)) {
+            if ($child.CommandLine -match "agent_bots\.py") { Stop-Process -Id $child.ProcessId -Force }
+        }
+        Stop-Process -Id $procId -Force
+        Write-Host "Agentlarning Telegram botlari to'xtatildi (PID $procId)."
+    }
+    Remove-Item -LiteralPath $botsPidFile -Force
+}
+
+if ($Stop) { Stop-Dashboard; Stop-AgentBots; exit 0 }
 
 # 1) Alohida muhit: dashboard\.venv (botning .venv'iga hech narsa o'rnatilmaydi)
 if (-not (Test-Path -LiteralPath $venvPython)) {
@@ -75,7 +92,13 @@ $port = if ($config["DASHBOARD_PORT"]) { [int]$config["DASHBOARD_PORT"] } else {
 if (($localHosts -notcontains $listen) -and -not $config["DASHBOARD_PASSWORD"]) {
     throw "DASHBOARD_HOST=$listen, lekin DASHBOARD_PASSWORD bo'sh. Tashqi manzil uchun parol majburiy -- ishga tushirish rad etildi."
 }
-if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
+# Faqat dashboard tinglaydigan manzil hisobga olinadi: LAN dagi portproxy (192.168.87.2:8502 -> 127.0.0.1:8502) band hisoblanmaydi.
+$listenAddresses = @(if ($listen -eq "localhost") { "127.0.0.1", "::1" } else { $listen }) + @("0.0.0.0", "::")
+function Test-PortListening {
+    Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { ($listen -in @("0.0.0.0", "::")) -or ($listenAddresses -contains $_.LocalAddress) }
+}
+if (Test-PortListening) {
     throw "Port $port band. dashboard\.env faylida DASHBOARD_PORT ni boshqa portga o'zgartiring (8501 bu serverda band)."
 }
 
@@ -104,7 +127,20 @@ $process = Start-Process -FilePath $venvPython -ArgumentList $arguments -Working
 Set-Content -LiteralPath $pidFile -Value $process.Id -Encoding ascii
 for ($i = 0; $i -lt 90; $i++) {
     Start-Sleep -Milliseconds 500
-    if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { break }
+    if (Test-PortListening) { break }
 }
 $mode = if ($Demo) { "DEMO" } else { "haqiqiy baza, faqat o'qish" }
 Write-Host "Dashboard ($mode): http://${listen}:$port   (PID $($process.Id); loglar: $logs)"
+
+# 5) Agentlarning Telegram botlari (agent_bots.py) -- demo rejimda emas
+if (-not $Demo) {
+    Stop-AgentBots
+    foreach ($name in "agent_bots.out.log", "agent_bots.err.log") {
+        $file = Join-Path $logs $name
+        if (Test-Path -LiteralPath $file) { Move-Item -LiteralPath $file -Destination "$file.prev" -Force }
+    }
+    $bots = Start-Process -FilePath $venvPython -ArgumentList @("agent_bots.py") -WorkingDirectory $dash -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $logs "agent_bots.out.log") -RedirectStandardError (Join-Path $logs "agent_bots.err.log") -PassThru
+    Set-Content -LiteralPath $botsPidFile -Value $bots.Id -Encoding ascii
+    Write-Host "Agentlarning Telegram botlari: PID $($bots.Id) (log: agent_bots.err.log)"
+}

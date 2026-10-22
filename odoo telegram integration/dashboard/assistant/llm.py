@@ -122,7 +122,7 @@ class AnthropicProvider:
             conversation.append({"role": "system", "content": context})
         return {"system": system, "messages": conversation}
 
-    def create(self, conversation: dict, tools: list[Tool], usage: Usage) -> Turn:
+    def create(self, conversation: dict, tools: list[Tool], usage: Usage, force: str | None = None) -> Turn:
         import anthropic
 
         kwargs = {
@@ -135,6 +135,8 @@ class AnthropicProvider:
         if tools:
             kwargs["tools"] = [{"name": tool.name, "description": tool.description, "input_schema": tool.schema,
                                 "strict": True} for tool in tools]
+            if force:
+                kwargs["tool_choice"] = {"type": "tool", "name": force}
         if self.chat.fallbacks:
             kwargs["betas"] = [FALLBACK_BETA]
             kwargs["fallbacks"] = "default"
@@ -214,7 +216,7 @@ class OpenAIProvider:
             return self.chat.effort
         return None
 
-    def create(self, conversation: dict, tools: list[Tool], usage: Usage) -> Turn:
+    def create(self, conversation: dict, tools: list[Tool], usage: Usage, force: str | None = None) -> Turn:
         import openai
 
         kwargs = {"model": self.chat.model, "messages": conversation["messages"],
@@ -226,6 +228,8 @@ class OpenAIProvider:
             kwargs["tools"] = [{"type": "function", "function": {"name": tool.name, "description": tool.description,
                                                                  "parameters": tool.schema, "strict": True}}
                                for tool in tools]
+            if force:
+                kwargs["tool_choice"] = {"type": "function", "function": {"name": force}}
         try:
             response = self.client.chat.completions.create(**kwargs)
         except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
@@ -300,6 +304,27 @@ def make_client(settings: Settings):
     return openai.OpenAI(api_key=chat.api_key, timeout=TIMEOUT_SECONDS, max_retries=1)
 
 
+class ClientPool:
+    """One API client per provider for one request: agents may use different models and providers. A
+    client given from outside (a test's fake) is used for every provider."""
+
+    def __init__(self, fixed=None) -> None:
+        self._fixed = fixed
+        self._clients: dict[str, object] = {}
+
+    def get(self, settings: Settings):
+        if self._fixed is not None:
+            return self._fixed
+        provider = settings.chat.provider
+        if provider not in self._clients:
+            self._clients[provider] = make_client(settings)
+        return self._clients[provider]
+
+
+def pool(client=None) -> ClientPool:
+    return client if isinstance(client, ClientPool) else ClientPool(client)
+
+
 # --------------------------------------------------------------------------- the tool loop
 
 
@@ -329,16 +354,17 @@ def _execute(tool: Tool | None, use: ToolUse) -> tuple[str, bool]:
 def run_agent(client, settings: Settings, *, name: str, system: str, messages: list, context: str = "",
               tools: list[Tool] | tuple = (), max_steps: int | None = None,
               on_tool: Callable[[str], None] | None = None,
-              handoff: Callable[[list, list, str], str | None] | None = None) -> AgentResult:
+              handoff: Callable[[list, list, str], str | None] | None = None,
+              force_tool: str | None = None) -> AgentResult:
     """The manual tool loop. ``handoff(tool_uses, outputs, text)`` may end the turn right after the
     tools ran by returning the final text (the orchestrator uses it to pass a sub-agent's answer
-    through without another model call)."""
+    through without another model call). ``force_tool``: the first response must call this tool."""
     provider = PROVIDERS[settings.chat.provider](client, settings)
     conversation = provider.start(system, messages, context)
     by_name = {tool.name: tool for tool in tools}
     usage, calls = Usage(), []
     for step in range(max_steps or settings.chat.max_steps):
-        turn = provider.create(conversation, list(tools), usage)
+        turn = provider.create(conversation, list(tools), usage, force_tool if step == 0 else None)
         if turn.stop == "refusal":
             log.info("agent=%s refused", name)
             return AgentResult(t("chat.err.refusal"), usage, calls)

@@ -6,6 +6,8 @@
 > **Texnologiyalar:** Python, FastAPI, Aiogram 3, Telethon (userbot), PostgreSQL, SQLite; dashboard — Streamlit
 >
 > **Ishga tushirish:** FastAPI + bot + userbot alohida jarayonlar (pastda batafsil; sozlamalar `.env` da)
+>
+> **Arxitektura:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — hozirgi tuzilish, maqsadli tuzilish (yangi kanallar, Odoo, qo'ng'iroqlar) va o'tish rejasi
 
 FastAPI + Aiogram 3 (Bot) + Telethon (Premium Userbot) asosida ishlaydigan
 asinxron integratsiya. Odoo'dan kelgan buyurtma va PDF hujjatni avtomatik
@@ -398,6 +400,7 @@ WAL rejimi, `busy_timeout`, `foreign_keys` yoqilgan. Jadvallar bot ishga tushgan
 | `manager_checks` | 5 daqiqa qoidasi tekshiruvlari: `pending` / `answered` / `missed` |
 | `daily_stats` | Kun bo'yicha sonlar: 8 toifa, jami, filtrlangan, javobsiz |
 | `daily_summaries` | Kun bo'yicha matnli xulosalar va hisobot yuborilgan vaqt |
+| `media_files` | Rasm/GIF bo'yicha qaror (`saved` / `skipped` / `limit` / `too_big` / `failed`) va `MEDIA_DIR`dagi fayl yo'li |
 
 `daily_stats` va `daily_summaries` kun sayin to'planadi -- keyingi oylik taqqoslash ("shikoyatlar
 kamaydimi") shulardan qilinadi (oylik hisobotning o'zi hali yozilmagan). PostgreSQL'ga o'tish
@@ -410,6 +413,15 @@ Botning asosiy (Odoo buyurtmalari) bazasi -- alohida, PostgreSQL (`DATABASE_URL`
   `media_type` va Telegram fayl ID'si. Ovozli xabar, audio va video (ovozi) `GROUP_STT_ENABLED=true`
   bo'lsa OpenAI transkripsiya API'si orqali matnga aylantiriladi (`OPENAI_STT_MODEL`,
   `messages.transcript`) va shu matn bo'yicha tasniflanadi. Rasmning o'zi tahlil qilinmaydi.
+  2026-10-22 dan model `gpt-transcribe`: unga yozuv konteksti (qurilish mollari, o'zbekcha lotin
+  yozuvida) va soha atamalari (`keywords`) beriladi; model so'rovdagi atamalar ro'yxatini qaytarsa
+  ("Assalamu alaykum, dunyabunya, buyurtma, ...") bu nutq hisoblanmaydi. Faylni Telegram'dan yuklab
+  olishda tarmoq xatosi bo'lsa ovoz qayta uriniladi (oldin darhol matnsiz qolardi).
+- Rasm va GIF (`app/monitor_media.py`, `MEDIA_*`): kompaniyaga oid suhbatdagisi (rasmdan
+  `MEDIA_CONTEXT_MINUTES` daqiqa oldin/keyin yoki javob orqali bog'langan xabarlardan biri kompaniyaga
+  oid bo'lsa) yuklab olinib `MEDIA_DIR`ga yoziladi, qaror `media_files` jadvalida; CEO dashboard'i
+  ularni guruhning suhbat lentasida ko'rsatadi. Kuniga ko'pi bilan `MEDIA_DAILY_LIMIT` ta fayl,
+  `MEDIA_MAX_FILE_MB`dan kattasi saqlanmaydi. Kompaniyaga aloqasiz suhbatdagi rasm saqlanmaydi.
 - Saqlanmaydi: xizmat xabarlari, botlarning xabarlari, hisobot guruhi va
   `GROUP_MONITOR_EXCLUDED_GROUP_IDS`dagi guruhlar.
 - Xodim (`is_staff`) = guruh admini yoki egasi. Xodim xabarlari kontekst bo'ladi, statistikaga
@@ -429,7 +441,8 @@ Xizmat Ko'rsatish · Narx va To'lovlar · Qaytarish va Kafolat · Ijobiy Fikrlar
 - Xabarlar guruh bo'yicha paketlanadi (`CLASSIFY_BATCH_SIZE`) va suhbat konteksti bilan beriladi.
 - Model JSON qaytaradi, javob tekshiriladi; xato bo'lsa qayta so'raladi. Har xabar bir marta
   tasniflanadi; `CLASSIFY_MAX_ATTEMPTS` martadan keyin ham bo'lmasa "failed" bo'ladi.
-- Model: `GROUP_AI_PROVIDER` / `GROUP_AI_MODEL` (hozir lokal `gemma4:12b`, Ollama).
+- Model: `GROUP_AI_PROVIDER` / `GROUP_AI_MODEL` (2026-10-22 dan OpenAI `gpt-5.4-mini`; oldin lokal `gemma4:12b` edi --
+  videokarta kameraning YOLO modeliga bo'shatildi).
 
 ### 5 daqiqa qoidasi
 
@@ -461,7 +474,8 @@ SQL/kod hisoblaydi**; model faqat matnli xulosa yozadi. "Boshqa" toifasi uchun x
 yozilmaydi -- gap umuman nimalar haqida ketgani aytiladi.
 
 - 1-varaq "Umumiy" (hamma guruhlar birga): toifalar jadvali (Toifa | Jami | Shikoyat | Ijobiy |
-  Neytral | Ulush), "Jami kompaniyaga oid", "Kompaniyaga aloqasiz (filtrlangan)", har toifa
+  Neytral | Ulush), "Jami kompaniyaga oid" (kompaniyaga aloqasiz xabarlar 2026-10-22 dan jadvalga
+  kirmaydi), har toifa
   bo'yicha xulosa, umumiy xulosa (oldingi kun bilan shikoyatlar solishtirmasi va javobsiz so'rovlar
   soni bilan), ostida "Javobsiz so'rovlar": Guruh | Vaqt | Mijoz | So'rov mazmuni | Keyin kimdir
   javob berdimi | Menejer.
@@ -493,7 +507,7 @@ Register-ScheduledTask -TaskName "odoo_telegram_bot_watchdog" -Action $action -T
 
 ```
 .venv\Scripts\python.exe -m pip install -r requirements.txt
-ollama pull gemma4:12b                          # lokal model (GROUP_AI_PROVIDER=ollama)
+ollama pull gemma4:12b                          # faqat GROUP_AI_PROVIDER=ollama bo'lsa (hozir openai)
 .venv\Scripts\python.exe -m app.bot             # bot: yig'ish, tasniflash, 5 daqiqa qoidasi, hisobot
 .venv\Scripts\python.exe -m pytest -q           # testlar (haqiqiy model/Telegram chaqirilmaydi)
 .venv\Scripts\python.exe scripts\test_monitor.py  # haqiqiy model bilan, vaqtinchalik bazada:

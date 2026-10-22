@@ -33,6 +33,12 @@ def _remember(choice: str, names: list[str]) -> None:
     st.session_state["_cat_url"] = value
 
 
+def _open(choice: str, names: list[str]) -> None:
+    st.session_state["cat_pick"] = choice
+    _remember(choice, names)
+    st.rerun()
+
+
 def _category_daily(d: PageData) -> pd.DataFrame:
     window = d.window
     return d.memo("cat.daily", lambda: data.get("category_daily", window.start_db, window.end_db,
@@ -68,11 +74,10 @@ def _cards(d: PageData) -> None:
                     rate = m_.complaint_rate(current["complaints"], current["related"])
                     share = m_.ratio(current["related"], total)
                     st.caption(f"{t('cat.share', share=tu.fmt_pct(share))} · {t('cat.complaint_share', rate=tu.fmt_pct(rate))}")
-                    if st.button(t("cat.open"), key=f"catopen-{names.index(name)}", icon=":material/arrow_forward:",
-                                 type="tertiary"):
-                        st.session_state["cat_pick"] = name
-                        _remember(name, names)
-                        st.rerun()
+                    st.html(f'<div class="db-cat-more">{esc(t("cat.hint"))}</div>')
+                    # the whole card is this button (stretched over the card, invisible; see style.css)
+                    if st.button(t("cat.open", name=name), key=f"catopen-{names.index(name)}"):
+                        _open(name, names)
 
 
 def _heat(d: PageData) -> None:
@@ -293,19 +298,13 @@ def render() -> None:
     ctx = shell.header(t("cat.title"))
     names = list(m_.category_names())
     d = PageData(ctx)
-    counts = dict(zip(d.cats["category"], d.cats["related"]))
-    _selected(names)
-    st.session_state.setdefault("cat_pick", _ALL)
-    choice = st.segmented_control(
-        t("gr.feed.category"), [_ALL, *names], key="cat_pick", required=True,
-        format_func=lambda v: f"{t('cat.all')} · {tu.fmt_int(sum(counts.values()))}" if v == _ALL
-        else f"{v} · {tu.fmt_int(counts.get(v, 0))}")
-    choice = choice or _ALL
-    if choice != st.session_state.get("_cat_last"):
-        st.session_state["_cat_last"] = choice
-        _remember(choice, names)
-    if choice == _ALL:
+    choice = _selected(names)
+    if choice not in names:
         layout.render_page(CARDS_PAGE, d)
-    else:
-        d.category = choice
-        layout.render_page(DETAIL_PAGE, d)
+        return
+    if st.button(t("cat.back"), icon=":material/arrow_back:", key="cat_back"):
+        _open(_ALL, names)
+    st.html(f'<div class="db-cat-name"><span class="db-dot" style="background:{theme.category_color(choice)}"></span>'
+            f'{esc(choice)}</div>')
+    d.category = choice
+    layout.render_page(DETAIL_PAGE, d)

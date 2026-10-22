@@ -12,7 +12,9 @@ def describe_tools(settings: Settings) -> list[llm.Tool]:
     return data_tools.build(settings, {"group_id": "-"})
 
 
-def run(client, settings: Settings, question: str, context: dict, pictures=()) -> llm.AgentResult:
-    return llm.run_agent(client, settings, name="data", system=prompts.system("data", settings),
+def run(client, settings: Settings, question: str, context: dict, pictures=(), extra_tools=(),
+        agents: dict | None = None) -> llm.AgentResult:
+    """``extra_tools``: the tools that call the created agents below this one."""
+    return llm.run_agent(client, settings, name="data", system=prompts.system("data", settings, agents),
                          messages=[llm.user_message(question, pictures)], context=prompts.data_context(context),
-                         tools=data_tools.build(settings, context))
+                         tools=[*data_tools.build(settings, context), *extra_tools])

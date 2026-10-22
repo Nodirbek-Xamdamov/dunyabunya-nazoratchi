@@ -20,7 +20,7 @@ def test_prompts_are_built_from_instructions_and_the_dashboards_reference():
     assert prompts.system("orchestrator", settings) == prompts.ORCHESTRATOR.strip()
     assert f"within {settings.sla_minutes} minutes" in prompts.reference("data", settings)
     assert "## agents — AI agentlar" in prompts.reference("view", settings)  # the new page is in the catalog
-    assert "[data-testid=\"stMetric\"]" in prompts.reference("design", settings)
+    assert prompts.AGENTS == ("orchestrator", "data", "view")  # no design agent since 2026-10-22
 
     state.set_agent_prompt(settings, "data", "Sen qisqa javob beradigan agentsan.", "save")
     composed = prompts.system("data", settings)
@@ -47,16 +47,17 @@ def test_agents_are_called_with_the_edited_prompts(fake):
     assert system_text(client.requests[0]) == "Sen Boshqaruvchisan. Ma'lumot savolini ask_data ga ber."
     data_prompt = system_text(client.requests[1])
     assert data_prompt.startswith("Sen ma'lumot agentisan.") and "Definitions used by the dashboard" in data_prompt
-    assert [tool.name for tool in orchestrator.describe_tools()] == ["ask_data", "change_view", "change_design"]
+    assert [tool.name for tool in orchestrator.describe_tools()] == ["ask_data", "change_view"]
 
 
 def test_tree_and_every_agents_settings_render():
     app = run_page("agents")
     assert_clean(app)
     assert app.title[0].value == "AI agentlar"
-    headings = [header.value for header in app.subheader]
-    for name in ("Boshqaruvchi", "Savol-javob agenti", "Ko'rinish agenti", "Dizayn agenti"):
+    headings = [header.value.replace("\\", "") for header in app.subheader]  # names are Markdown-escaped
+    for name in ("Boshqaruvchi", "Savol-javob agenti", "Ko'rinish agenti"):
         assert any(name in heading for heading in headings), headings
+    assert not any("Dizayn" in heading for heading in headings)
     for agent in prompts.AGENTS:
         app = run_page("agents", {"a": agent})
         assert_clean(app)
@@ -89,36 +90,36 @@ def _submit(app):
 
 def test_save_reset_and_restore_a_prompt():
     settings = load_settings()
-    app = run_page("agents", {"a": "design"})
-    assert _button(app, "agreset-design").disabled  # already the default
-    app.text_area[0].set_value("Sen dizayn agentisan. Faqat och ranglar tanla.")
+    app = run_page("agents", {"a": "view"})
+    assert _button(app, "agreset-view").disabled  # already the default
+    app.text_area[0].set_value("Sen ko'rinish agentisan. Faqat so'ralganini o'zgartir.")
     _submit(app).click().run()
     assert_clean(app)
-    assert prompts.instructions("design", settings) == "Sen dizayn agentisan. Faqat och ranglar tanla."
+    assert prompts.instructions("view", settings) == "Sen ko'rinish agentisan. Faqat so'ralganini o'zgartir."
     assert app.success[0].value.startswith("Saqlandi")
-    assert app.text_area[0].value == "Sen dizayn agentisan. Faqat och ranglar tanla."  # the new version is shown
+    assert app.text_area[0].value == "Sen ko'rinish agentisan. Faqat so'ralganini o'zgartir."  # the new version is shown
 
     _submit(app).click().run()  # nothing changed
-    assert "o'zgarmagan" in app.info[0].value and len(state.agent_prompt_history(settings, "design")) == 1
+    assert "o'zgarmagan" in app.info[0].value and len(state.agent_prompt_history(settings, "view")) == 1
     app.text_area[0].set_value("   ")
     _submit(app).click().run()
-    assert "Bo'sh prompt" in app.warning[0].value and len(state.agent_prompt_history(settings, "design")) == 1
+    assert "Bo'sh prompt" in app.warning[0].value and len(state.agent_prompt_history(settings, "view")) == 1
 
-    _button(app, "agreset-design").click().run()
+    _button(app, "agreset-view").click().run()
     assert_clean(app)
-    assert prompts.saved_instructions("design", settings) is None
-    assert app.text_area[0].value == prompts.DESIGN
+    assert prompts.saved_instructions("view", settings) is None
+    assert app.text_area[0].value == prompts.VIEW
 
-    saved_id = state.agent_prompt_history(settings, "design")[1]["id"]
+    saved_id = state.agent_prompt_history(settings, "view")[1]["id"]
     _button(app, f"agrestore-{saved_id}").click().run()
     assert_clean(app)
-    assert prompts.instructions("design", settings) == "Sen dizayn agentisan. Faqat och ranglar tanla."
-    assert [row["action"] for row in state.agent_prompt_history(settings, "design")] == ["restore", "reset", "save"]
+    assert prompts.instructions("view", settings) == "Sen ko'rinish agentisan. Faqat so'ralganini o'zgartir."
+    assert [row["action"] for row in state.agent_prompt_history(settings, "view")] == ["restore", "reset", "save"]
 
-    app.text_area[0].set_value(prompts.DESIGN)  # the default typed back in counts as the default
+    app.text_area[0].set_value(prompts.VIEW)  # the default typed back in counts as the default
     _submit(app).click().run()
-    assert prompts.saved_instructions("design", settings) is None
-    assert state.agent_prompt_history(settings, "design")[0]["action"] == "reset"
+    assert prompts.saved_instructions("view", settings) is None
+    assert state.agent_prompt_history(settings, "view")[0]["action"] == "reset"
 
 
 def test_the_page_can_be_hidden_and_renamed_like_any_other():

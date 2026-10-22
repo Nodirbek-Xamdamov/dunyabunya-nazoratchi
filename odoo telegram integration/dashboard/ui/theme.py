@@ -24,6 +24,8 @@ LEVEL_SYMBOLS = {"green": "●", "yellow": "▲", "red": "■"}  # shape as well
 HEAT_SCALE = [[0.0, "rgba(79, 70, 229, 0.04)"], [0.25, "rgba(79, 70, 229, 0.30)"], [1.0, "rgba(79, 70, 229, 1)"]]
 HEAT_RED = [[0.0, "rgba(220, 38, 38, 0.04)"], [0.25, "rgba(220, 38, 38, 0.35)"], [1.0, "rgba(185, 28, 28, 1)"]]
 
+# colors of the sections built in the chat, in this order (also .streamlit/config.toml chartCategoricalColors)
+CHART_COLORS = ("#4F46E5", "#EA580C", "#16A34A", "#DC2626", "#94A3B8", "#0EA5E9", "#A855F7", "#EAB308")
 TEMPLATE_NAME = "dunyabunya"
 
 pio.templates[TEMPLATE_NAME] = go.layout.Template(

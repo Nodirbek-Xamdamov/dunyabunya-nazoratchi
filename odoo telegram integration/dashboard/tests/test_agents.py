@@ -1,7 +1,7 @@
-"""The four agents with scripted fake model clients (no network, no API key) for both providers
+"""The built-in agents with scripted fake model clients (no network, no API key) for both providers
 (OpenAI chat completions and Anthropic messages): routing, hand-off, layout changes and undo, new
-sections and own pages, the design, data tools running on the demo database, errors, refusals, step
-limits and the exact request shape.
+sections and own pages, design requests declined, data tools running on the demo database, errors,
+refusals, step limits and the exact request shape.
 
 Scripts are written once in a neutral form (``say`` / ``call`` / ``response``); each fake client
 turns them into its provider's response objects."""
@@ -16,7 +16,7 @@ import httpx2
 import openai
 import pytest
 
-from assistant import data_tools, design_agent, llm, orchestrator, ui_agent
+from assistant import data_tools, llm, orchestrator, ui_agent
 from core import state
 from core import timeutil as tu
 from core.settings import load_settings
@@ -259,35 +259,15 @@ def test_the_view_agent_builds_an_own_page_with_new_sections(fake, monkeypatch):
     assert "p-0000000001 — Shikoyatlar nazorati" in last_message(client.requests[1])["content"]
 
 
-UNSET = {name: None for name in ("mode", "primary_color", "background_color", "surface_color", "text_color",
-                                 "sidebar_color", "border_color", "link_color", "font", "heading_font", "radius",
-                                 "font_size", "chart_colors", "custom_css", "reset")}
-
-
-def test_the_design_agent_changes_the_look(fake):
+def test_design_requests_are_declined_there_is_no_design_agent(fake):
+    """2026-10-22: the design agent was removed -- the look of the dashboard is fixed."""
     settings = load_settings()
-    css = '[data-testid="stMetric"] { box-shadow: 0 2px 8px #000000; }'
-    client = fake(call(("o1", "change_design", {"instruction": "Qorong'i va zamonaviy qil"})),
-                  call(("d1", "set_design", {**UNSET, "mode": "dark", "background_color": "#FFFFFF"})),
-                  call(("d2", "set_design", {**UNSET, "mode": "dark", "primary_color": "#22C55E", "font": "Inter",
-                                             "custom_css": css})),
-                  say("Dizayn qorong'i rejimga o'tdi; sahifa bir lahzada yangilanadi."))
-    reply = orchestrator.handle(settings, "Qorong'i qil", [], context(), client=client)
-    assert reply.agents == ["design"] and reply.text.startswith("Dizayn qorong'i")
-    content, is_error = tool_results(client.requests[2])[0]
-    assert is_error and "hard to read" in content
-    design = state.current_layout(settings)["theme"]
-    assert design == {"mode": "dark", "primary_color": "#22C55E", "font": "Inter", "custom_css": css}
-    assert reply.changes and reply.changes[0].startswith("Dizayn: o'zgartirildi")
-    assert "Design settings" in system_text(client.requests[1]) and "set_design" in tool_names(client.requests[1])
-
-    client = fake(call(("o2", "change_design", {"instruction": "Chat tugmasini yashir"})),
-                  call(("d3", "set_design", {**UNSET, "custom_css": ".st-key-chat_fab { color: transparent; }"})),
-                  say("Chatni yashirib bo'lmaydi."))
-    reply = orchestrator.handle(settings, "Chatni yashir", [], context("chat-2"), client=client)
-    content, is_error = tool_results(client.requests[2])[0]
-    assert is_error and "may not style the chat" in content and reply.changes == []
-    assert '"mode": "dark"' in last_message(client.requests[1])["content"]  # the design context shows the settings
+    client = fake(say("Dizaynni chatdan o'zgartirib bo'lmaydi; bo'limlarni yashirish yoki ko'chirish mumkin."))
+    reply = orchestrator.handle(settings, "Qorong'i rejimga o'tkaz", [], context(), client=client)
+    assert reply.agents == [] and reply.changes == [] and len(client.requests) == 1
+    assert tool_names(client.requests[0]) == {"ask_data", "change_view"}
+    assert "design cannot be changed" in system_text(client.requests[0])
+    assert "theme" not in state.current_layout(settings)
 
 
 def _strict(schema: dict, where: str) -> None:
@@ -303,9 +283,8 @@ def _strict(schema: dict, where: str) -> None:
 
 def test_every_tool_schema_is_strict():
     settings = load_settings()
-    tools = [*ui_agent._tools(settings, context(), []), *design_agent._tools(settings, context(), []),
-             *data_tools.build(settings, context())]
-    assert {"add_data_view", "create_page", "rename", "set_design", "overview"} <= {tool.name for tool in tools}
+    tools = [*ui_agent._tools(settings, context(), []), *data_tools.build(settings, context())]
+    assert {"add_data_view", "create_page", "rename", "overview"} <= {tool.name for tool in tools}
     for tool in tools:
         _strict(tool.schema, tool.name)
 

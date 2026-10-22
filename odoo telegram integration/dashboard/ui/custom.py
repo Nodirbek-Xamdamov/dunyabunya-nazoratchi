@@ -28,7 +28,6 @@ import streamlit as st
 
 from assistant import data_tools
 from assistant.llm import ToolError
-from core import theme as design
 from core import timeutil as tu
 from core.settings import Settings, load_settings
 from core.text import esc
@@ -52,7 +51,6 @@ MAX_NOTE = 4000
 MAX_SERIES = 4
 MAX_METRICS = 6
 CHART_HEIGHT = 330
-SESSION_DESIGN = "_design"  # app.py keeps the active design tokens here (chart colors)
 _PERIOD = ("period", "date_from", "date_to")
 _ROWS = ("table", "list", *CHARTS)
 _PRIVATE = ("customer", "author", "request", "summary", "text")  # not shown to the agent in previews
@@ -83,8 +81,7 @@ class Source:
 
 SOURCES: dict[str, Source] = {
     "overview": Source(None, (*_PERIOD, "group"), ("kpi", "table"), {
-        "customer_messages": "int", "company_related_messages": "int", "unrelated_filtered_messages": "int",
-        "not_yet_classified": "int", "complaints": "int", "complaint_rate": "pct", "positive_messages": "int",
+        "company_related_messages": "int", "not_yet_classified": "int", "complaints": "int", "complaint_rate": "pct", "positive_messages": "int",
         "neutral_messages": "int", "requests.total": "int", "requests.answered_in_time": "int",
         "requests.missed": "int", "requests.missed_but_answered_later": "int", "requests.never_answered": "int",
         "requests.still_waiting": "int", "answered_in_time_share": "pct", "median_answer_time": "min",
@@ -93,8 +90,8 @@ SOURCES: dict[str, Source] = {
     "groups_ranking": Source("rows", (*_PERIOD, "sort_by", "limit"), ("kpi", *_ROWS), {
         "group": "text", "risk_score": "num", "risk_level": "text", "risk_reasons": "list", "complaints": "int",
         "complaint_rate": "pct", "missed_requests": "int", "answered_in_time_share": "pct",
-        "median_answer_time": "min", "company_related_messages": "int", "customer_messages": "int",
-        "manager": "text", "bot_in_group": "bool"}, totals=("groups_total", "groups_with_customer_messages")),
+        "median_answer_time": "min", "company_related_messages": "int",
+        "manager": "text", "bot_in_group": "bool"}, totals=("groups_total", "groups_with_company_messages")),
     "categories": Source("rows", (*_PERIOD, "group"), ("kpi", *_ROWS), {
         "category": "text", "responsible_department": "text", "company_related_messages": "int",
         "complaints": "int", "positive": "int", "share_of_company_related": "pct"},
@@ -117,7 +114,7 @@ SOURCES: dict[str, Source] = {
         "name": "text", "messages_written": "int", "groups": "num", "answered_in_time": "int",
         "answered_late": "int", "median_answer_time": "min"}, totals=("active_staff", "answered_requests")),
     "daily_trend": Source("days", (*_PERIOD, "group"), ("kpi", "table", "bar", "stacked_bar", "line", "area"), {
-        "day": "day", "customer_messages": "int", "company_related": "int", "complaints": "int",
+        "day": "day", "company_related": "int", "complaints": "int",
         "positive": "int", "answered_in_time": "int", "missed": "int"}, sums=True),
     "report_summaries": Source("summaries", ("date_from", "date_to", "category"), ("list", "table"), {
         "report_window": "text", "category": "text", "summary": "text"}, long=("summary",)),
@@ -212,11 +209,8 @@ def _text(column: str, kind: str, value) -> str:
 
 
 def palette() -> list[str]:
-    """Chart colors of the active design."""
-    tokens = st.session_state.get(SESSION_DESIGN) or {}
-    if tokens.get("chart_colors"):
-        return list(tokens["chart_colors"])
-    return list(design.DARK_CHART_COLORS if tokens.get("mode") == "dark" else design.LIGHT_CHART_COLORS)
+    """Chart colors of the sections built in the chat."""
+    return list(theme.CHART_COLORS)
 
 
 # --------------------------------------------------------------------------- specs

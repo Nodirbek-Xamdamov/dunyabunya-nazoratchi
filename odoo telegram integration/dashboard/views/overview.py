@@ -1,5 +1,5 @@
 """Umumiy: "is everything fine?" in three seconds -- status, key numbers, groups that need attention,
-then the summary, charts, requests waiting right now and the latest complaints. Every section is a
+then the summary, charts and the latest complaints. Every section is a
 layout block (ui.layout), so it can be hidden, moved or added to another page from the chat."""
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ def _kpi_sla(d: PageData) -> None:
 def _kpi_related(d: PageData) -> None:
     cur, prev = d.cur, d.prev
     c.kpi(t("kpi.related"), tu.fmt_int(cur.related), common.change_text(cur.related, prev.related if prev else None),
-          neutral=True, compare=prev is not None, help=t("kpi.related.help", filtered=tu.fmt_int(cur.filtered)),
+          neutral=True, compare=prev is not None, help=t("kpi.related.help"),
           spark=_sparks(d)["related"])
     _more_link("categories")
 
@@ -156,7 +156,7 @@ def _summary(d: PageData) -> None:
 def _daily(d: PageData) -> None:
     c.section(t("ov.daily"), t("ov.daily.help") + _window_note(d))
     days = d.days
-    if days["customer"].sum() == 0:
+    if days["related"].sum() == 0:
         c.empty()
     else:
         c.plot(charts.daily_dynamics(days), key="ov-daily")
@@ -165,6 +165,7 @@ def _daily(d: PageData) -> None:
 def _categories(d: PageData) -> None:
     c.section(t("ov.categories"), t("ov.categories.help"))
     cats = d.cats
+    cats = cats[cats["category"] != m_.OTHER_CATEGORY]  # «Boshqa» is most talk and hid the real categories
     if cats["related"].sum() == 0:
         c.empty()
     else:
@@ -271,7 +272,7 @@ PAGE = layout.register(layout.Page("overview", "page.overview", "overview", (
     P(YOUNG, hidden=True), P(common.ISSUES, hidden=True), P(STATUS),
     P(KPI_COMPLAINTS, row="ov-kpi1", **_KPI), P(KPI_MISSED, row="ov-kpi1", **_KPI), P(KPI_SLA, row="ov-kpi1", **_KPI),
     P(CATEGORIES, row="ov-cats", weight=3), P(SENTIMENT, row="ov-cats", weight=2, hidden=True),
-    P(ATTENTION, row="ov-attention", weight=7), P(common.WAITING, row="ov-attention", weight=5),
+    P(ATTENTION, row="ov-attention", weight=7), P(common.WAITING, row="ov-attention", weight=5, hidden=True),
     P(KPI_RELATED, row="ov-kpi2", hidden=True, **_KPI), P(KPI_POSITIVE, row="ov-kpi2", hidden=True, **_KPI),
     P(KPI_MEDIAN, row="ov-kpi2", hidden=True, **_KPI),
     P(DAILY), P(SUMMARY),

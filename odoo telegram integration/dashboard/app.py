@@ -3,7 +3,7 @@
 Start it with ``powershell -ExecutionPolicy Bypass -File dashboard\\run_dashboard.ps1`` (it runs
 ``streamlit run app.py`` inside dashboard\\.venv). It only reads the monitoring database and never
 sends anything to Telegram or Odoo. The chat button in the bottom-right corner (ui.chat) talks to the AI
-and changes only the dashboard's own layout, pages and design (stored in dashboard\\data\\state.db).
+and changes only the dashboard's own layout and pages (stored in dashboard\\data\\state.db).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ if str(DASHBOARD_DIR) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from core.settings import load_settings  # noqa: E402
-from ui import auth, chat, design, layout, nav, overrides, shell  # noqa: E402
+from ui import auth, chat, layout, nav, overrides, shell  # noqa: E402
 from ui import components as c  # noqa: E402
 from ui.i18n import t  # noqa: E402
 from views import agents, categories, groups, overview, own, reports, response, search, staff, system, trends  # noqa: E402
@@ -34,8 +34,7 @@ st.set_page_config(page_title=t("app.title"), page_icon=str(ASSETS / "icon.svg")
 st.logo(str(ASSETS / "logo.svg"), size="large", icon_image=str(ASSETS / "icon.svg"))
 settings = load_settings()
 c.inject_css()
-overlay = layout.current_overlay()  # what the CEO changed from the chat: pages, names, sections, design
-design.apply(settings, overlay)
+overlay = layout.current_overlay()  # what the CEO changed from the chat: pages, names, sections
 auth.gate(settings)
 
 SPECS = {  # key: (render, title, icon, url path)

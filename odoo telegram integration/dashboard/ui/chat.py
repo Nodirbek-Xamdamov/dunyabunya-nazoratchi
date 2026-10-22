@@ -19,7 +19,7 @@ from core import timeutil as tu
 from core.settings import Settings
 from core.text import esc
 from ui import components as c
-from ui import design, layout
+from ui import layout
 from ui.i18n import t
 
 log = logging.getLogger("dashboard.chat")
@@ -31,7 +31,7 @@ HISTORY_SHOWN = 30
 BUTTON = "button"
 ERROR = "error"
 THUMB_PANEL, THUMB_DIALOG = 120, 280
-_SYMBOLS = {"add": "+", "remove": "−", "move": "⇅", "rename": "✎", "edit": "✎", "design": "◐", "undo": "↶",
+_SYMBOLS = {"add": "+", "remove": "−", "move": "⇅", "rename": "✎", "edit": "✎", "undo": "↶",
             "reset": "⟲", "restore": "⟳", "other": "•"}
 
 
@@ -89,14 +89,12 @@ def _verb_kind(verb: str) -> str:
         return "rename"
     if verb == t("layout.updated"):
         return "edit"
-    if verb == t("layout.restyled"):
-        return "design"
     return "other"
 
 
 def describe(summary: str, source: str = "chat") -> dict:
     """A stored change summary as {kind, page, verb, items}: kind is add / remove / move / rename /
-    edit / design / undo / reset / restore / other; items are section names (or design settings)."""
+    edit / undo / reset / restore / other; items are section names."""
     summary = str(summary or "")
     if source == state.UNDO:
         return {"kind": "undo", "page": "", "verb": t("chat.kind.undo"),
@@ -107,8 +105,6 @@ def describe(summary: str, source: str = "chat") -> dict:
         return describe(summary[len(t("layout.undone", summary="")):], state.UNDO)
     if summary == t("layout.reset_all") or re.match(r"^«[^»]+» asl holatiga qaytarildi$", summary):
         return {"kind": "reset", "page": "", "verb": summary, "items": []}
-    if summary == t("layout.design_reset"):
-        return {"kind": "design", "page": "", "verb": summary, "items": []}
     if summary.endswith(t("layout.restored", time="").strip()):
         return {"kind": "restore", "page": "", "verb": summary, "items": []}
     match = re.match(r"^«(?P<page>[^»]+)» sahifasi (?P<verb>.+)$", summary)
@@ -350,9 +346,6 @@ def panel(settings: Settings, ctx, nav_key: str) -> None:
     the ``chat_fab`` popover there). The open/closed state lives in Session State, so the panel stays
     open across the reruns a chat message causes."""
     page_id = page_id_for(nav_key)
-    if st.query_params.get(design.REOPEN_CHAT) == "1":  # the page reloaded itself for a new design
-        del st.query_params[design.REOPEN_CHAT]
-        st.session_state["chat_fab"] = True
     with st.popover("", icon=":material/forum:", help=t("chat.fab.help"), key="chat_fab", on_change="rerun"):
         st.html(f'<div class="db-chat-title">{esc(t("chat.title"))}</div>')
         try:

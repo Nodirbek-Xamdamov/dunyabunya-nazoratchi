@@ -1,8 +1,7 @@
 """Tests run on a small demo database built in a temporary folder. The real monitoring database is
 only ever opened read-only (test_real_smoke.py). The dashboard's own state database (layout changes,
-chat history) is a temporary file emptied before every test, so is the Streamlit config the design is
-written to, and no test can reach a real model API: the keys are blanked here and agent tests use a
-scripted fake client."""
+chat history) is a temporary file emptied before every test, and no test can reach a real model API:
+the keys are blanked here and agent tests use a scripted fake client."""
 
 from __future__ import annotations
 
@@ -36,7 +35,6 @@ def state_db(tmp_path_factory) -> Path:
     folder = tmp_path_factory.mktemp("state")
     path = folder / "state_test.db"
     os.environ["DASHBOARD_STATE_DB_PATH"] = str(path)
-    os.environ["DASHBOARD_THEME_CONFIG_PATH"] = str(folder / "config_test.toml")  # never the real config.toml
     return path
 
 
@@ -55,7 +53,8 @@ def clear_state(path: Path) -> None:
         return
     conn = sqlite3.connect(path)
     try:
-        for table in ("layout_versions", "chat_messages", "agent_prompts"):
+        for table in ("layout_versions", "chat_messages", "agent_prompts", "custom_agents", "agent_models", "connections",
+                      "bot_offsets", "bot_messages"):
             try:
                 conn.execute(f"DELETE FROM {table}")
             except sqlite3.OperationalError:

@@ -13,6 +13,7 @@ Jadvallar:
   manager_checks   -- "5 daqiqa qoidasi" tekshiruvlari (pending / answered / missed)
   daily_stats      -- kun bo'yicha sonlar (toifalar, jami, filtrlangan, javobsiz)
   daily_summaries  -- kun bo'yicha matnli xulosalar va hisobot yuborilgan vaqt
+  media_files      -- rasm/GIF fayllari bo'yicha qaror va saqlangan fayl yo'li (dashboard ko'rsatadi)
 
 `daily_stats` va `daily_summaries` kun sayin to'planib boradi: keyingi oylik taqqoslash
 ("shikoyatlar kamaydimi") aynan shulardan qilinadi.
@@ -68,6 +69,9 @@ SUMMARY_OVERALL = "umumiy"
 PENDING, DONE, STAFF, FAILED = "pending", "done", "staff", "failed"
 # `manager_checks.status`
 CHECK_PENDING, CHECK_ANSWERED, CHECK_MISSED = "pending", "answered", "missed"
+# `media_files.status` va web sahifaga o'tkaziladigan media turlari (rasm, GIF)
+MEDIA_SAVED, MEDIA_SKIPPED, MEDIA_LIMIT, MEDIA_TOO_BIG, MEDIA_FAILED = "saved", "skipped", "limit", "too_big", "failed"
+MEDIA_KINDS: tuple[str, ...] = ("photo", "animation")
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +245,20 @@ class DailySummary(Base):
     summary_text: Mapped[str] = mapped_column(Text)
     # Shu kunning hisoboti Telegram'ga yuborilgan vaqt ("umumiy" qatorida)
     report_sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
+class MediaFile(Base):
+    """Rasm/GIF fayli bo'yicha qaror (2026-10-22, `app/monitor_media.py`): saqlandi (`path`),
+    kompaniyaga aloqasiz suhbat, kunlik limit, juda katta yoki yuklab bo'lmadi. Har xabarga bitta qator."""
+
+    __tablename__ = "media_files"
+
+    message_ref: Mapped[int] = mapped_column(ForeignKey("messages.id"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(12), index=True)
+    path: Mapped[str | None] = mapped_column(String(255))  # `MEDIA_DIR`ga nisbatan, "/" bilan
+    size: Mapped[int | None] = mapped_column(Integer)  # bayt
+    local_date: Mapped[date] = mapped_column(Date, index=True)  # xabar kuni -- kunlik limit shu bo'yicha
+    decided_at: Mapped[datetime] = mapped_column(UTCDateTime)
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +534,74 @@ async def set_transcript(message_pk: int, transcript: str) -> None:
     async with session_maker() as session:
         await session.execute(update(Message).where(Message.id == message_pk).values(transcript=transcript))
         await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Rasm va GIF'lar (web sahifa uchun)
+# ---------------------------------------------------------------------------
+
+
+async def media_candidates(sent_before: datetime, limit: int) -> list[Message]:
+    """Hali qaror qilinmagan rasm/GIF xabarlari (eskisidan boshlab), `sent_before`dan oldin yuborilganlari."""
+    async with session_maker() as session:
+        rows = await session.execute(
+            select(Message)
+            .outerjoin(MediaFile, MediaFile.message_ref == Message.id)
+            .where(
+                Message.media_type.in_(MEDIA_KINDS), Message.file_id.is_not(None), MediaFile.message_ref.is_(None),
+                Message.sent_at_utc < sent_before,
+            )
+            .order_by(Message.sent_at_utc, Message.id)
+            .limit(limit)
+        )
+        return list(rows.scalars())
+
+
+async def in_company_conversation(message: Message, minutes: int) -> bool | None:
+    """Xabar kompaniyaga oid suhbatdami. Suhbat -- shu guruhda `minutes` daqiqa oldin/keyin yozilgan
+    xabarlar (xabarning o'zi ham), u javob bergan xabar va unga javob bergan xabarlar; ulardan birortasi
+    kompaniyaga oid deb tasniflangan bo'lsa True. Mijoz xabarlaridan biri hali tasniflanmagan bo'lsa None."""
+    window = timedelta(minutes=minutes)
+    linked = or_(
+        Message.sent_at_utc.between(message.sent_at_utc - window, message.sent_at_utc + window),
+        Message.reply_to_message_id == message.message_id,
+    )
+    if message.reply_to_message_id is not None:
+        linked = or_(linked, Message.message_id == message.reply_to_message_id)
+    async with session_maker() as session:
+        rows = (
+            await session.execute(
+                select(Message.status, Classification.is_company_related)
+                .outerjoin(Classification, Classification.message_ref == Message.id)
+                .where(Message.chat_id == message.chat_id, linked)
+            )
+        ).all()
+    if any(related for _status, related in rows):
+        return True
+    if any(status == PENDING for status, _related in rows):
+        return None
+    return False
+
+
+async def media_saved_count(day: date) -> int:
+    """Shu kun (xabar kuni) uchun saqlangan rasm/GIF soni -- kunlik limit uchun."""
+    async with session_maker() as session:
+        return (
+            await session.execute(
+                select(func.count()).select_from(MediaFile)
+                .where(MediaFile.local_date == day, MediaFile.status == MEDIA_SAVED)
+            )
+        ).scalar_one()
+
+
+async def save_media_decision(message: Message, status: str, path: str | None = None, size: int | None = None) -> None:
+    async with session_maker() as session:
+        session.add(MediaFile(message_ref=message.id, status=status, path=path, size=size,
+                              local_date=message.local_date, decided_at=utc_now()))
+        try:
+            await session.commit()
+        except IntegrityError:  # shu xabar bo'yicha qaror allaqachon yozilgan
+            await session.rollback()
 
 
 async def conversation(chat_id: int, first_message_id: int, last_message_id: int, context: int) -> list[Message]:

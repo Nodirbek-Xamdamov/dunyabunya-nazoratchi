@@ -148,7 +148,8 @@ async def test_excel_overall_sheet_has_stats_summaries_and_missed_requests_below
     assert rows[2] == ["Dastavka va Logistika", 2, 1, 0, 1, 0.4]
     assert [row[0] for row in rows[2:10]] == list(monitor_db.CATEGORIES)
     assert rows[10] == ["Jami kompaniyaga oid", 5, 1, 1, 3, 1]
-    assert rows[11] == ["Kompaniyaga aloqasiz (filtrlangan)", 1, None, None, None, None]
+    # Kompaniyaga aloqasiz xabarlar (bu kuni 1 ta) statistikaga qo'shilmaydi
+    assert rows[11] == [None] * 6 and monitor_db.STAT_FILTERED not in _texts(sheet)
     assert sheet["A4"].font.bold and sheet["A13"].font.bold and sheet["F5"].number_format == "0%"
     assert all(row[1] == row[2] + row[3] + row[4] for row in rows[2:11])
 
@@ -157,8 +158,8 @@ async def test_excel_overall_sheet_has_stats_summaries_and_missed_requests_below
         heading = f"{index}) {category} — umumiy xulosa"
         assert texts[texts.index(heading) + 1] == report.category_summaries[category]
     assert texts[texts.index("Umumiy xulosa") + 1] == report.overall_summary
-    summary_cell = sheet.cell(row=17, column=1)
-    assert summary_cell.alignment.wrap_text and "A17:F17" in [str(r) for r in sheet.merged_cells.ranges]
+    summary_cell = sheet.cell(row=16, column=1)
+    assert summary_cell.alignment.wrap_text and "A16:F16" in [str(r) for r in sheet.merged_cells.ranges]
 
     # Umumiy xulosa ostida -- hamma guruhlarning javobsiz so'rovlari
     start = _find(sheet, "Javobsiz so'rovlar (1 ta)")

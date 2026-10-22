@@ -23,6 +23,8 @@ DEFAULTS: dict[str, str] = {
     "DB_PATH": "../data/monitor.db",
     "REPORTS_DIR": "../reports",
     "BACKUP_DIR": "../backups",
+    # pictures and GIFs the bot saved from company-related conversations (read-only here)
+    "MEDIA_DIR": "../data/media",
     "DEMO_MODE": "0",
     "DEMO_DB_PATH": "demo/demo_monitor.db",
     "TIMEZONE": "Asia/Tashkent",
@@ -54,8 +56,6 @@ DEFAULTS: dict[str, str] = {
     "RISK_YELLOW": "40",
     # the dashboard's own read-write file: layout changes and chat history (never the bot's database)
     "STATE_DB_PATH": "data/state.db",
-    # Streamlit's config file: the design the CEO chooses in the chat is written into its [theme] part
-    "THEME_CONFIG_PATH": ".streamlit/config.toml",
     # AI assistant (chat button in the bottom-right corner): provider openai | anthropic
     "CHAT_ENABLED": "1",
     "CHAT_PROVIDER": "openai",
@@ -68,6 +68,14 @@ DEFAULTS: dict[str, str] = {
     "CHAT_MAX_STEPS": "6",
     "CHAT_CONTEXT_MESSAGES": "20",
     "CHAT_DAILY_LIMIT": "200",
+    # Agents created on the «AI agentlar» page
+    "AGENT_BUILDER_MODEL": "",
+    "AGENT_MAX": "20",
+    "AGENT_ODOO_MODELS": ("res.partner,sale.order,sale.order.line,account.move,crm.lead,product.product,"
+                          "product.template,stock.quant,purchase.order,project.task,res.users"),
+    "AGENT_BOT_DAILY_LIMIT": "200",
+    "AGENT_BOT_HISTORY": "12",
+    "PROTECTED_BOT_USERNAMES": "dunyabunya_assistant_bot,db_hisobchi_bot,david_prototype_bot",
 }
 
 
@@ -157,12 +165,29 @@ class ChatConfig:
 
 
 @dataclass(frozen=True)
+class AgentsConfig:
+    """Agents made on the «AI agentlar» page. ``builder_model`` empty = models.builder_default()."""
+
+    builder_model: str
+    max_agents: int
+    odoo_models: tuple[str, ...]
+    bot_daily_limit: int
+    bot_history: int
+    protected_bots: tuple[str, ...]
+
+
+def _list(value: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
+
+
+@dataclass(frozen=True)
 class Settings:
     db_path: Path
     real_db_path: Path
     demo: bool
     reports_dir: Path
     backup_dir: Path
+    media_dir: Path
     tz_name: str
     report_time: time
     sla_minutes: int
@@ -181,8 +206,8 @@ class Settings:
     pending_stale_min: int
     risk: RiskConfig
     state_db_path: Path
-    theme_config_path: Path
     chat: ChatConfig
+    agents: AgentsConfig
     password: str = field(default="", repr=False)
 
     @property
@@ -223,6 +248,7 @@ def load_settings() -> Settings:
         demo=demo,
         reports_dir=_resolve(v["REPORTS_DIR"]),
         backup_dir=_resolve(v["BACKUP_DIR"]),
+        media_dir=_resolve(v["MEDIA_DIR"]),
         tz_name=v["TIMEZONE"].strip() or "Asia/Tashkent",
         report_time=_hhmm(v["REPORT_TIME"], time(0, 0)),
         sla_minutes=int(num("SLA_MINUTES")),
@@ -246,7 +272,6 @@ def load_settings() -> Settings:
             min_related=int(num("RISK_MIN_RELATED")), red=int(num("RISK_RED")), yellow=int(num("RISK_YELLOW")),
         ),
         state_db_path=_resolve(v["STATE_DB_PATH"]),
-        theme_config_path=_resolve(v["THEME_CONFIG_PATH"]),
         chat=ChatConfig(
             enabled=_flag(v["CHAT_ENABLED"]), provider=provider,
             model=v["CHAT_MODEL"].strip() or DEFAULT_MODELS[provider],
@@ -254,6 +279,12 @@ def load_settings() -> Settings:
             max_steps=max(2, int(num("CHAT_MAX_STEPS"))), context_messages=max(0, int(num("CHAT_CONTEXT_MESSAGES"))),
             daily_limit=max(0, int(num("CHAT_DAILY_LIMIT"))), workspace_id=v["ANTHROPIC_WORKSPACE_ID"].strip(),
             openai_api_key=v["OPENAI_API_KEY"].strip(), anthropic_api_key=v["ANTHROPIC_API_KEY"].strip(),
+        ),
+        agents=AgentsConfig(
+            builder_model=v["AGENT_BUILDER_MODEL"].strip(), max_agents=max(0, int(num("AGENT_MAX"))),
+            odoo_models=_list(v["AGENT_ODOO_MODELS"]), bot_daily_limit=max(0, int(num("AGENT_BOT_DAILY_LIMIT"))),
+            bot_history=max(0, int(num("AGENT_BOT_HISTORY"))),
+            protected_bots=tuple(name.lstrip("@").lower() for name in _list(v["PROTECTED_BOT_USERNAMES"])),
         ),
         password=v["DASHBOARD_PASSWORD"],
     )

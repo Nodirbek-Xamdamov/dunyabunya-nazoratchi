@@ -111,7 +111,7 @@ async def main() -> None:
     # yuklanib qolardi (aynan shu muammo tekshirilib topildi). main() esa FAQAT
     # bot konteynerida (python -m app.bot) chaqiriladi, shu sabab bu yerga ko'chirish
     # xulq-atvorni o'zgartirmaydi -- faqat qachon import qilinishini kechiktiradi.
-    from app import monitor_classifier, monitor_db, monitor_report, monitor_sla
+    from app import monitor_classifier, monitor_db, monitor_media, monitor_report, monitor_sla
     from app.bot.handlers import (
         chat_events, edit_info, fallback, group_mentions, group_monitor, menu, monitor_admin, orders, start,
     )
@@ -160,6 +160,8 @@ async def main() -> None:
             asyncio.create_task(monitor_sla.sla_loop(bot_instance)),
             asyncio.create_task(monitor_report.report_loop(bot_instance)),
         ]
+        if settings.MEDIA_ENABLED:  # kompaniyaga oid suhbatdagi rasm/GIF'lar -> dashboard (2026-10-22)
+            dp["monitor_tasks"].append(asyncio.create_task(monitor_media.media_loop(bot_instance)))
 
     logger.info("Aiogram Bot ishga tushdi.")
     await dp.start_polling(bot_instance)

@@ -135,10 +135,9 @@ def test_change_descriptions():
     assert chat.describe("Umumiy: nomi o'zgartirildi — So'nggi shikoyatlar → Bugun")["kind"] == "rename"
     assert chat.describe("Umumiy: yangi bo'lim qo'shildi — Toifalar")["kind"] == "add"
     assert chat.describe("Umumiy: bo'lim o'zgartirildi — Toifalar")["kind"] == "edit"
-    design = chat.describe("Dizayn: o'zgartirildi — asosiy rang, shrift")
-    assert design == {"kind": "design", "page": "Dizayn", "verb": "o'zgartirildi", "items": ["asosiy rang", "shrift"]}
-    assert chat.describe(t("layout.design_reset"))["kind"] == "design"
-    assert chat.describe(t("layout.design_reset"), "reset")["kind"] == "reset"
+    # a design change stored before the design agent was removed (2026-10-22) is still described
+    assert chat.describe("Dizayn: o'zgartirildi — asosiy rang, shrift")["kind"] == "other"
+    assert chat.describe("Dizayn asl holatiga qaytarildi", "reset")["kind"] == "reset"
 
 
 # --------------------------------------------------------------------------- dialogs render
@@ -151,8 +150,7 @@ def _seed_history() -> None:
     state.update_layout(settings, lambda o: layout.set_page_visible(o, "system", True), group_id="g2", source="chat")
     state.undo(settings, group_id="u1")
     for number, change in enumerate((lambda o: layout.rename(o, "overview", "ov.latest", "Bugun"),
-                                     lambda o: layout.create_page(o, "p-0000000001", "Nazorat"),
-                                     lambda o: layout.set_theme(o, {"mode": "dark"}))):
+                                     lambda o: layout.create_page(o, "p-0000000001", "Nazorat"))):
         state.update_layout(settings, change, group_id=f"g{number + 3}", source="chat")
     picture = images.store(settings, _png())
     state.chat_add(settings, "user", "Shu joyini qo'sh", files=[picture.name])

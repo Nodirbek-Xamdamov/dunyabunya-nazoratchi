@@ -153,9 +153,7 @@ class DataTools:
         return {
             "period": tu.fmt_period(period),
             "group": group[1] if group else "all groups",
-            "customer_messages": cur.customer,
             "company_related_messages": cur.related,
-            "unrelated_filtered_messages": cur.filtered,
             "not_yet_classified": cur.pending,
             "complaints": cur.complaints,
             "complaint_rate": tu.fmt_pct(cur.complaint_rate),
@@ -180,14 +178,14 @@ class DataTools:
         previous = period.previous(self._now())
         frame = self._query("groups_overview", period.start_db, period.end_db, previous.start_db, previous.end_db)
         frame = m_.add_risk(frame, self._query("checks", period.start_db, period.end_db), self.settings)
-        total, active = len(frame), int((frame["customer"] > 0).sum())
+        total, active = len(frame), int((frame["related"] > 0).sum())
         frame["requests"] = frame["answered"] + frame["missed"]
         frame["sla"] = frame["answered"] / frame["requests"].where(frame["requests"] > 0)
         orders = {
             "risk": (["risk", "missed", "complaints"], [False, False, False]),
             "complaints": (["complaints", "risk"], [False, False]),
             "missed": (["missed", "risk"], [False, False]),
-            "messages": (["related", "customer"], [False, False]),
+            "messages": (["related", "complaints"], [False, False]),
             "answer_rate_worst": (["sla", "missed"], [True, False]),
         }
         sort_by = args.get("sort_by") or "risk"
@@ -203,12 +201,12 @@ class DataTools:
             "complaint_rate": tu.fmt_pct(m_.complaint_rate(row.complaints, row.related)),
             "missed_requests": int(row.missed), "answered_in_time_share": tu.fmt_pct(_seconds(row.sla)),
             "median_answer_time": tu.fmt_duration(_seconds(row.median_response_s)),
-            "company_related_messages": int(row.related), "customer_messages": int(row.customer),
+            "company_related_messages": int(row.related),
             "manager": row.manager_username if isinstance(row.manager_username, str) else "none",
             "bot_in_group": bool(row.is_present),
         } for row in ranked.head(_limit(args.get("limit"))).itertuples()]
         return {"period": tu.fmt_period(period), "sorted_by": sort_by, "groups_total": total,
-                "groups_with_customer_messages": active, "rows": rows}
+                "groups_with_company_messages": active, "rows": rows}
 
     def categories(self, args: dict) -> dict:
         period, group = self._scope(args)
@@ -305,7 +303,7 @@ class DataTools:
             raise ToolError(f"At most {MAX_TREND_DAYS} days; use a shorter period.")
         frame = self._query("daily", period.start_db, period.end_db, period.offset_modifier(),
                             group[0] if group else None)
-        rows = [{"day": row.day, "customer_messages": int(row.customer), "company_related": int(row.related),
+        rows = [{"day": row.day, "company_related": int(row.related),
                  "complaints": int(row.complaints), "positive": int(row.positive),
                  "answered_in_time": int(row.answered), "missed": int(row.missed)} for row in frame.itertuples()]
         return {"period": tu.fmt_period(period), "group": group[1] if group else "all groups", "days": rows}
@@ -358,8 +356,8 @@ def _category_field() -> dict:
 def build(settings: Settings, context: dict) -> list[Tool]:
     tools = DataTools(settings, context)
     return [
-        Tool("overview", "Key numbers for a period, for all groups or one group: customer messages, company-related "
-                         "messages, complaints and complaint rate, positive, requests answered in time / missed / "
+        Tool("overview", "Key numbers for a period, for all groups or one group (messages not about the company "
+                         "are never counted): company-related messages, complaints and complaint rate, positive, requests answered in time / missed / "
                          "answered later / waiting, answered-in-time share, median and P90 answer time, and the same "
                          "numbers for the previous period of equal length with the changes.",
              obj({**_PERIOD, **_GROUP}), tools.overview),
@@ -384,7 +382,7 @@ def build(settings: Settings, context: dict) -> list[Tool]:
         Tool("staff", "Who answers customers: per staff member answers in time, late answers, median answer time, "
                       "groups and messages written; non-staff answerers are one line.",
              obj({**_PERIOD, **_LIMIT}), tools.staff),
-        Tool("daily_trend", "Per-day numbers (customer messages, company-related, complaints, positive, answered in "
+        Tool("daily_trend", "Per-day numbers (company-related messages, complaints, positive, answered in "
                             "time, missed) for a period of at most 92 days.",
              obj({**_PERIOD, **_GROUP}), tools.daily_trend),
         Tool("report_summaries", "The AI summaries the bot stored with its daily Excel reports (overall or one "
