@@ -59,6 +59,21 @@ def test_group_detail_and_category_detail_render(demo_db):
         assert_clean(run_page("categories", {"c": str(index), "p": "last7"}))
 
 
+def test_category_card_opens_detail_and_back():
+    app = run_page("categories", {"p": "last7"})
+    assert_clean(app)
+    assert not app.segmented_control  # no "Toifa" picker: the cards are the way in
+    app.button(key="catopen-2").click().run()
+    assert_clean(app)
+    from core import metrics as m_
+
+    assert app.session_state["cat_pick"] == m_.category_names()[2] and app.query_params["c"] == "3"
+    app.button(key="cat_back").click().run()
+    assert_clean(app)
+    assert app.session_state["cat_pick"] == "all" and "c" not in app.query_params
+    assert app.button(key="catopen-0")
+
+
 def test_custom_period_and_comparison_off():
     assert_clean(run_page("overview", {"p": "custom", "from": "2000-01-01", "to": "2000-01-03", "cmp": "0"}))
 
@@ -94,10 +109,9 @@ def test_every_text_key_exists():
     assert not missing, missing
 
 
-def test_auto_refresh_and_group_name_filter():
+def test_auto_refresh_and_group_filters():
     assert_clean(run_page("overview", {"p": "last7"}, {"f_auto": True}))
-    assert_clean(run_page("groups", {"p": "last7"}, {"gr_name": "dunyabunya"}))
-    assert_clean(run_page("groups", {"p": "last7"}, {"gr_name": "hech-qanday-guruh-yoq"}))
+    assert_clean(run_page("groups", {"p": "last7"}, {"gr_filters": ["complaints", "missed"]}))
 
 
 def test_full_app_entry_point():
@@ -282,28 +296,15 @@ def test_full_app_with_own_pages_and_sections_on_built_in_pages():
     assert any("Eski guruh" in item.value for item in app.warning)  # a section that no longer fits says so
 
 
-def test_design_is_applied_and_the_chat_reopens_after_the_reload():
-    from core import theme
-    from core.settings import load_settings
-    from ui import design
-
-    tokens = {"mode": "dark", "primary_color": "#22C55E", "custom_css": "h1 { letter-spacing: 1px; }"}
-    _save({"pages": {}, "theme": tokens})
+def test_an_old_stored_design_does_nothing_and_the_config_is_not_written():
+    """2026-10-22: the design agent was removed -- a design in an old overlay is ignored and the app no
+    longer writes .streamlit/config.toml."""
+    config = DASHBOARD_DIR / ".streamlit" / "config.toml"
+    before = config.read_bytes()
+    _save({"pages": {}, "theme": {"mode": "dark", "primary_color": "#22C55E"}})
     app = _app({"chat": "1"})
-    config = load_settings().theme_config_path.read_text(encoding="utf-8")
-    assert f"{theme.MARKER} {theme.fingerprint(tokens)}" in config and 'base = "dark"' in config
-    assert app.session_state["chat_fab"] is True and "chat" not in app.query_params
-    assert app.session_state[design.SEEN] == design.RELOAD_PENDING  # config.toml was written: the page reloads
-    app.run()
-    assert app.session_state[design.SEEN] == design.RELOAD_PENDING  # ... and keeps asking until it has
-    fresh = _app()  # the reloaded page is a new session with the new design
-    assert fresh.session_state[design.SEEN] == theme.fingerprint(tokens)
-    _save({"pages": {}})
-    fresh.run()  # the design changed while the page was open
-    assert_clean(fresh)
-    assert fresh.session_state[design.SEEN] == design.RELOAD_PENDING
-    assert f"{theme.MARKER} default" in load_settings().theme_config_path.read_text(encoding="utf-8")
-    assert _app().session_state[design.SEEN] == "default"
+    assert_clean(app)
+    assert config.read_bytes() == before and "_design_seen" not in app.session_state
 
 
 def test_app_with_optional_pages_added():
@@ -341,3 +342,11 @@ def test_chat_end_to_end_with_a_fake_client(monkeypatch):
     finally:
         monkeypatch.setenv("DASHBOARD_OPENAI_API_KEY", "")
         load_settings.cache_clear()
+
+
+def test_overview_categories_chart_leaves_out_other():
+    """2026-10-22: «Boshqa» is most of the talk and hid the real categories on Umumiy."""
+    app = run_page("overview", {"p": "last30"})
+    assert_clean(app)
+    chart = next(item for item in app.get("plotly_chart") if '"orientation":"h"' in item.proto.spec.replace(" ", ""))
+    assert "Boshqa" not in chart.proto.spec and "Dastavka" in chart.proto.spec

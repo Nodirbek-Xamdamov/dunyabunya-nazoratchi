@@ -36,6 +36,7 @@ import importlib.util
 import io
 import logging
 import os
+import re
 import sys
 import threading
 import wave
@@ -209,6 +210,29 @@ def transcribe_sync(path: str) -> str | None:
 # API qabul qiladigan fayl turlari (kengaytma bo'yicha tekshiradi)
 _OPENAI_AUDIO_SUFFIXES = {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
 _OPENAI_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+# gpt-transcribe oilasi (OpenAI, 2026-07; 2026-10-22 dan monitoring shuni ishlatadi): `prompt` --
+# yozuv haqida erkin kontekst, `keywords` -- yozuvda uchrashi mumkin bo'lgan atamalar, `languages` --
+# kutilgan tillar (eski `language` o'rniga). Oxirgi ikkitasi `extra_body` orqali yuboriladi. Eski
+# modellarga (gpt-4o-transcribe, whisper-1) `prompt` sifatida atamalar ro'yxati (`INITIAL_PROMPT`) ketadi.
+_CONTEXT_MODELS = ("gpt-transcribe", "gpt-live-transcribe")
+# gpt-transcribe ogg/flac'ni qabul qilmaydi -- Telegram ovozi (.oga) WAV qilib yuboriladi
+_CONTEXT_MODEL_SUFFIXES = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm"}
+STT_CONTEXT = (
+    "Voice message in a Telegram group of dunyabunya, a construction materials seller in Uzbekistan. "
+    "Customers and staff talk informally about orders, prices, delivery and products, mostly in Uzbek, "
+    "sometimes in Russian or mixed. Uzbek is written in Latin script, Russian in Cyrillic."
+)
+# Faqat soha atamalari: salom-alik va umumiy so'zlar kerak emas (model ularni o'zi eshitadi)
+STT_KEYWORDS = (
+    "dunyabunya", "sement", "g'isht", "armatura", "bo'yoq", "plitka", "kafel", "shifer", "gips", "beton", "qum",
+    "shag'al", "profil", "gipsokarton", "penopleks", "rotband", "alebastr", "shpatlevka", "penoblok", "kley",
+)
+# Model nutq o'rniga so'rovdagi atamalar ro'yxatini qaytarishi mumkin: 2026-10 da gpt-4o-transcribe
+# bitta yozuvga "Assalamu alaykum, dunyabunya, buyurtma, yetkazib berish, ombor, tovar, hisob-kitob,
+# sement" deb javob bergan. Ro'yxatdagi atamalardan shuncha tasi ketma-ket, aynan o'sha tartibda
+# kelsa -- bu takror, nutq emas.
+_ECHO_MIN_RUN = 4
 # Videoning tasviri transkripsiyaga kerak emas: shundan kattasi faqat ovoz yo'lagiga aylantirib yuboriladi
 _SEND_AS_IS_MAX_BYTES = 2 * 1024 * 1024
 
@@ -249,20 +273,75 @@ def _upload_name(path: str) -> str:
     return "audio" + {".oga": ".ogg", ".opus": ".ogg"}.get(suffix, suffix)
 
 
+def _uses_context(model: str) -> bool:
+    return model.startswith(_CONTEXT_MODELS)
+
+
+def _languages() -> list[str]:
+    return [code.strip() for code in settings.OPENAI_STT_LANGUAGES.split(",") if code.strip()]
+
+
+def _term(piece: str) -> str:
+    piece = piece.lower().replace("ʻ", "'").replace("‘", "'").replace("’", "'").replace("`", "'")
+    return " ".join(re.sub(r"[^\w' -]", " ", piece).split())
+
+
+_ECHO_TERM_LISTS = (
+    tuple(_term(part) for part in INITIAL_PROMPT.rstrip(".").split(",")),
+    tuple(_term(keyword) for keyword in STT_KEYWORDS),
+)
+
+
+def is_prompt_echo(text: str) -> bool:
+    """Matn so'rovdagi atamalar ro'yxatining takrori bo'lsa True (`_ECHO_MIN_RUN`ga qarang)."""
+    pieces = [term for term in (_term(part) for part in re.split(r"[,.;\n]", text)) if term]
+    for terms in _ECHO_TERM_LISTS:
+        positions = {term: index for index, term in enumerate(terms)}
+        run = best = 0
+        previous = None
+        for piece in pieces:
+            position = positions.get(piece)
+            if position is None:
+                run = 0
+            elif previous is not None and position == previous + 1:
+                run += 1
+            else:
+                run = 1
+            previous = position
+            best = max(best, run)
+        if best >= _ECHO_MIN_RUN:
+            return True
+    return False
+
+
 async def _request_openai_transcription(name: str, data: bytes) -> str:
-    kwargs = {"language": settings.OPENAI_STT_LANGUAGE} if settings.OPENAI_STT_LANGUAGE else {}
-    result = await _get_openai_client().audio.transcriptions.create(
-        model=settings.OPENAI_STT_MODEL, file=(name, data), prompt=INITIAL_PROMPT, **kwargs
-    )
-    return (result.text or "").strip()
+    model = settings.OPENAI_STT_MODEL
+    if _uses_context(model):
+        extra = {"keywords": list(STT_KEYWORDS)}
+        if _languages():
+            extra["languages"] = _languages()
+        result = await _get_openai_client().audio.transcriptions.create(
+            model=model, file=(name, data), prompt=STT_CONTEXT, extra_body=extra
+        )
+    else:
+        kwargs = {"language": settings.OPENAI_STT_LANGUAGE} if settings.OPENAI_STT_LANGUAGE else {}
+        result = await _get_openai_client().audio.transcriptions.create(
+            model=model, file=(name, data), prompt=INITIAL_PROMPT, **kwargs
+        )
+    text = (result.text or "").strip()
+    if is_prompt_echo(text):
+        logger.warning("Transkripsiya so'rovdagi atamalar ro'yxatini qaytardi -- nutq yo'q deb olinadi")
+        return ""
+    return text
 
 
 async def transcribe_openai(path: str) -> str | None:
     """OpenAI orqali matnga o'giradi. Nutq bo'lmasa bo'sh satr, so'rov bajarilmasa None."""
     name = _upload_name(path)
     size = os.path.getsize(path)
+    suffixes = _CONTEXT_MODEL_SUFFIXES if _uses_context(settings.OPENAI_STT_MODEL) else _OPENAI_AUDIO_SUFFIXES
     try:
-        if Path(name).suffix in _OPENAI_AUDIO_SUFFIXES and size <= _SEND_AS_IS_MAX_BYTES:
+        if Path(name).suffix in suffixes and size <= _SEND_AS_IS_MAX_BYTES:
             try:
                 with open(path, "rb") as source:
                     return await _request_openai_transcription(name, source.read())

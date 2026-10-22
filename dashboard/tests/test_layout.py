@@ -1,6 +1,6 @@
 """Layout overlay (ui.layout) and the dashboard's own state database (core.state): everything can be
 hidden and shown again (blocks, columns, pages), moving, renaming, sections made in the chat, own
-pages, the design, reset, undo and restore, chat history, and the block registry."""
+pages, an old design ignored, reset, undo and restore, chat history, and the block registry."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 from core import state
 from core.settings import load_settings
 from ui import custom, layout
-from ui.i18n import UZ
+from ui.i18n import UZ, t
 from views import categories, groups, overview, reports, response, search, staff, system, trends  # noqa: F401
 
 E = layout.empty_overlay
@@ -59,8 +59,6 @@ def test_catalog_lists_every_hideable_block():
     for block in layout.BLOCKS.values():
         assert (f"- {block.id} |" in text) == block.hideable
     assert "hidden by default" in text and "portable" in text and "MAIN" not in text
-    names = layout.block_names_text()
-    assert "ov.latest (" in names and names.count("\n") == len(layout.PAGES) - 1
 
 
 # --------------------------------------------------------------------------- hiding and showing anything
@@ -80,15 +78,15 @@ def test_any_block_can_be_hidden_and_shown_again():
 
 
 def test_any_column_or_card_can_be_hidden_and_shown_again():
-    overlay, summary = layout.set_visible(E(), "groups", [{"block_id": "gr.ranking", "item_ids": ["customer", "missed"]}],
+    overlay, summary = layout.set_visible(E(), "groups", [{"block_id": "gr.ranking", "item_ids": ["related", "missed"]}],
                                           True)
     page_state = overlay["pages"]["groups"]
-    assert page_state["shown_items"]["gr.ranking"] == ["customer"] and "Mijoz xabarlari" in summary
-    overlay, _ = layout.set_visible(overlay, "groups", [{"block_id": "gr.ranking", "item_ids": ["customer", "missed"]}],
+    assert page_state["shown_items"]["gr.ranking"] == ["related"] and t("gr.c.related") in summary
+    overlay, _ = layout.set_visible(overlay, "groups", [{"block_id": "gr.ranking", "item_ids": ["related", "missed"]}],
                                     False)
     page_state = overlay["pages"]["groups"]
     assert page_state == {"hidden_items": {"gr.ranking": ["missed"]}}
-    assert {"missed", "customer", "spark"} <= layout.hidden_item_ids(page_state, "gr.ranking")
+    assert {"missed", "related", "spark"} <= layout.hidden_item_ids(page_state, "gr.ranking")
     assert layout.set_visible(overlay, "groups", [{"block_id": "gr.ranking", "item_ids": ["missed"]}], True)[0] == E()
     first = categories.m_.category_names()[0]
     overlay, _ = layout.set_visible(E(), "categories", [{"block_id": "cat.cards", "item_ids": [first]}], False)
@@ -244,20 +242,14 @@ def test_own_pages_are_created_filled_renamed_and_deleted():
     assert _show("ov.hours")(orphan)[0] == {"pages": {"overview": {"shown": ["ov.hours"]}}}
 
 
-# --------------------------------------------------------------------------- the design
+# --------------------------------------------------------------------------- no design
 
 
-def test_design_is_part_of_the_overlay():
-    overlay, summary = layout.set_theme(E(), {"mode": "dark", "primary_color": "#22c55e", "radius": "large"})
-    assert overlay["theme"] == {"mode": "dark", "primary_color": "#22C55E", "radius": "large"}
-    assert summary.startswith("Dizayn: o'zgartirildi — ") and "asosiy rang" in summary
-    overlay, summary = layout.set_theme(overlay, {"radius": None, "font": "Inter"})
-    assert overlay["theme"] == {"mode": "dark", "primary_color": "#22C55E", "font": "Inter"}
-    assert "Design: mode=dark" in layout.overlay_text(overlay)
-    with pytest.raises(layout.LayoutError, match="contrast"):
-        layout.set_theme(overlay, {"background_color": "#FFFFFF"})  # light background, dark-mode text
-    overlay, summary = layout.reset_theme(overlay)
-    assert overlay == E() and summary == "Dizayn asl holatiga qaytarildi"
+def test_a_design_stored_before_the_design_agent_was_removed_is_ignored():
+    """2026-10-22: the design agent was removed; an old overlay (history, «Tiklash») may still hold one."""
+    old = {"pages": {"overview": {"shown": ["ov.hours"]}}, "theme": {"mode": "dark", "primary_color": "#22C55E"}}
+    assert layout.normalize(old) == {"pages": {"overview": {"shown": ["ov.hours"]}}}
+    assert "Design" not in layout.overlay_text(old) and "theme" not in _show("ov.daily")(old)[0]
 
 
 def test_reset_puts_everything_back():
@@ -273,7 +265,7 @@ def test_reset_puts_everything_back():
     overlay, _ = layout.reset(overlay, "p-0000000001")  # an own page loses its sections but stays
     assert [page.id for page in layout.custom_pages(overlay)] == ["p-0000000001"]
     assert _visible("p-0000000001", overlay) == []
-    overlay, _ = layout.set_theme(overlay, {"mode": "dark"})
+    overlay, _ = layout.rename(overlay, "overview", None, "Bosh sahifa")
     overlay, summary = layout.reset(overlay, "all")
     assert overlay == E() and "asl holatiga" in summary
 
@@ -320,15 +312,6 @@ def test_versions_undo_restore():
     assert state.current_layout(settings) == {}
 
 
-def test_a_design_only_change_is_a_change():
-    settings = load_settings()
-    assert state.update_layout(settings, lambda o: layout.set_theme(o, {"mode": "dark"}), group_id="g1", source="chat")
-    assert state.current_layout(settings)["theme"] == {"mode": "dark"}
-    assert state.update_layout(settings, lambda o: layout.set_theme(o, {"mode": "dark"}), group_id="g2",
-                               source="chat") is None
-    assert state.undo(settings, group_id="u1") and "theme" not in state.current_layout(settings)
-
-
 def test_reset_of_the_default_layout_changes_nothing():
     settings = load_settings()
     assert state.update_layout(settings, lambda o: layout.reset(o, "all"), group_id="g", source="reset") is None
@@ -341,7 +324,7 @@ def test_reset_of_the_default_layout_changes_nothing():
 
 def test_failed_change_leaves_state_untouched():
     settings = load_settings()
-    for change in (_hide("nope"), lambda o: layout.set_theme(o, {"font": "Comic Sans"}),
+    for change in (_hide("nope"), lambda o: layout.rename(o, "overview", "nope", "X"),
                    lambda o: layout.delete_page(o, "p-0000000404")):
         with pytest.raises(layout.LayoutError):
             state.update_layout(settings, change, group_id="g", source="chat")

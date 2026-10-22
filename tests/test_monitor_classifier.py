@@ -2,9 +2,10 @@
 konteksti, model javobini tekshirish, qayta urinish. Haqiqiy model chaqirilmaydi."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 
 from app import llm_client, monitor_classifier, monitor_db
 from app.llm_client import LLMUnavailable
@@ -245,18 +246,33 @@ async def test_failed_transcription_is_retried_then_given_up(monkeypatch, voice_
     assert (await get_message(CHAT, 1)).transcript == ""
 
 
-async def test_long_recordings_and_download_errors_are_not_retried(monkeypatch, voice_bot):
+async def test_long_recordings_and_files_telegram_refuses_are_not_retried(monkeypatch, voice_bot):
     await add_group()
     await _add_voice(1, media_type="video", duration=3600)  # juda uzun
     await _add_voice(2, caption="Mana qarang, hammasi singan")
     transcribe = _fake_stt(monkeypatch)
-    voice_bot.download = AsyncMock(side_effect=RuntimeError("file is too big"))
+    voice_bot.download = AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message="file is too big"))
     request = _fake_model(monkeypatch, {"results": [_item(1, "Mahsulot Sifati va Nuqsonlar", "Shikoyat")]})
 
     assert await classify_pending() == 2
     voice_bot.download.assert_awaited_once()  # uzun video umuman yuklanmadi
     transcribe.assert_not_called()
     assert "Mana qarang, hammasi singan" in request.await_args.args[1]  # izohi bo'yicha tasniflandi
+
+
+async def test_download_network_error_is_retried_not_saved_as_empty(monkeypatch, voice_bot):
+    """2026-10-21: yuklab olish vaqti tugagan ovozlar darhol matnsiz qolgan edi -- endi qayta uriniladi."""
+    await add_group()
+    await _add_voice()
+    transcribe = _fake_stt(monkeypatch, "sement keldimi")
+    voice_bot.download = AsyncMock(side_effect=[TimeoutError(), None])
+    _fake_model(monkeypatch, {"results": [_item(1)]})
+
+    assert await classify_pending() == 0
+    message = await get_message(CHAT, 1)
+    assert (message.status, message.transcript, message.attempts) == ("pending", None, 1)
+    assert await classify_pending() == 1
+    assert transcribe.await_count == 1 and (await get_message(CHAT, 1)).transcript == "sement keldimi"
 
 
 async def test_voice_is_not_transcribed_when_switched_off_or_without_bot(monkeypatch, voice_bot):

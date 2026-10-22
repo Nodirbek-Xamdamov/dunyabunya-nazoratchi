@@ -11,10 +11,9 @@ from ui.i18n import t
 
 def summary(kpis: m_.Kpis, previous: m_.Kpis | None, categories: pd.DataFrame | None,
             top_group: tuple[str, int] | None) -> list[str]:
-    if kpis.customer == 0:
+    if kpis.related == 0:  # messages not about the company are not counted anywhere
         return [t("nar.empty")]
-    sentences = [t("nar.volume", customer=fmt_int(kpis.customer), related=fmt_int(kpis.related),
-                   filtered=fmt_int(kpis.filtered))]
+    sentences = [t("nar.volume", related=fmt_int(kpis.related))]
     if kpis.complaints:
         text = t("nar.complaints", n=fmt_int(kpis.complaints), rate=fmt_pct(kpis.complaint_rate))
         if previous is not None:

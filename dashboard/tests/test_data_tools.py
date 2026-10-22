@@ -26,7 +26,9 @@ def test_overview_matches_queries(tools):
     period = tools.period(NO_PERIOD)
     with db.session(tools.settings) as session:
         totals = queries.totals(session, period.start_db, period.end_db)
-    assert result["complaints"] == totals["complaints"] and result["customer_messages"] == totals["customer"]
+    assert result["complaints"] == totals["complaints"] and result["company_related_messages"] == totals["related"]
+    # messages not about the company are not part of any statistic (2026-10-22)
+    assert not {"customer_messages", "unrelated_filtered_messages"} & set(result)
     assert result["requests"]["missed"] == totals["missed"]
     assert result["period"] == tu.fmt_period(period)
 

@@ -244,9 +244,14 @@ def _tools(settings: Settings, context: dict, changes: list[str]) -> list[Tool]:
         Tool("undo", "Undo the most recent changes (steps = how many earlier CEO requests to undo).",
              obj({"steps": nullable({"type": "integer"}, "Default 1")}), undo),
         Tool("reset_layout", "Put one page (with its detail view) back to its default layout, or everything (scope "
-                             "all: every page, own pages, names and the design).",
+                             "all: every page, own pages and names).",
              obj({"scope": {"type": "string", "description": "all, or a page id"}}), reset_layout),
     ]
+
+
+def tools(settings: Settings, context: dict, changes: list[str]) -> list[Tool]:
+    """The view tools (also given to created agents with the "view" tool group)."""
+    return _tools(settings, context, changes)
 
 
 def describe_tools(settings: Settings) -> list[Tool]:
@@ -254,12 +259,15 @@ def describe_tools(settings: Settings) -> list[Tool]:
     return _tools(settings, {"group_id": "-"}, [])
 
 
-def run(client, settings: Settings, instruction: str, context: dict, pictures=()) -> ViewResult:
+def run(client, settings: Settings, instruction: str, context: dict, pictures=(), extra_tools=(),
+        agents: dict | None = None) -> ViewResult:
+    """``extra_tools``: the tools that call the created agents below this one."""
     changes: list[str] = []
     overlay = layout.current_overlay()
     recent = state.history(settings, RECENT_CHANGES)
-    result = llm.run_agent(client, settings, name="view", system=prompts.system("view", settings),
+    result = llm.run_agent(client, settings, name="view", system=prompts.system("view", settings, agents),
                            messages=[llm.user_message(instruction, pictures)],
                            context=prompts.view_context(context, overlay, recent, settings.tz),
-                           tools=_tools(settings, context, changes), max_steps=max(settings.chat.max_steps, VIEW_STEPS))
+                           tools=[*_tools(settings, context, changes), *extra_tools],
+                           max_steps=max(settings.chat.max_steps, VIEW_STEPS))
     return ViewResult(result.text, changes, result.usage)

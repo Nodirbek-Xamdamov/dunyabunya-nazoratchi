@@ -5,7 +5,11 @@
   row. One chat message (or one button press) is one change group = one undo step.
 * ``chat_messages`` -- the conversation with the assistant (it survives reloads and restarts).
 * ``agent_prompts`` -- the system prompts edited on the «AI agentlar» page: every save is a new row,
-  the newest row of an agent is its prompt, an empty text means the built-in default.
+  the newest row of an agent is its prompt, an empty text means the default.
+* ``custom_agents`` -- agents created on that page; ``agent_models`` -- the model chosen for a
+  built-in agent; ``connections`` -- Odoo and Telegram bot connections of the agents (the key or
+  token is DPAPI-encrypted, core.secrets); ``bot_offsets`` / ``bot_messages`` -- the agents'
+  Telegram bots (agent_bots.py): the next update to read and the conversations.
 
 This file has nothing to do with the bot's monitoring database, which stays read-only (core.db).
 """
@@ -53,6 +57,52 @@ CREATE TABLE IF NOT EXISTS agent_prompts (
     text TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_agent_prompts_agent ON agent_prompts (agent, id);
+CREATE TABLE IF NOT EXISTS custom_agents (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    name TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    routing TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL DEFAULT '',
+    parent TEXT NOT NULL,
+    model TEXT NOT NULL,
+    tool_groups TEXT NOT NULL DEFAULT '[]',
+    odoo_connection TEXT,
+    telegram_connection TEXT,
+    generated_prompt TEXT NOT NULL DEFAULT '',
+    missing TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS agent_models (
+    agent TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS connections (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    config TEXT NOT NULL DEFAULT '{}',
+    secret BLOB,
+    status TEXT NOT NULL DEFAULT 'new',
+    status_text TEXT NOT NULL DEFAULT '',
+    checked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS bot_offsets (
+    connection TEXT PRIMARY KEY,
+    next_update INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bot_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    connection TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_bot_messages_chat ON bot_messages (connection, chat_id, id);
 """
 # columns added after the first release: (table, column, definition)
 _MIGRATIONS = (("chat_messages", "files", "TEXT NOT NULL DEFAULT '[]'"),)
@@ -69,7 +119,7 @@ def _dump(layout: dict) -> str:
 
 
 def _same(first: dict, second: dict) -> bool:
-    """Equal layouts; empty parts ({} pages, [] lists, no design) count as not there."""
+    """Equal layouts; empty parts ({} pages, [] lists) count as not there."""
     def canonical(layout: dict) -> str:
         return _dump({key: value for key, value in layout.items() if value})
 
@@ -313,3 +363,197 @@ def agent_prompt_version(settings: Settings, agent: str, version_id: int) -> dic
         row = conn.execute("SELECT id, created_at, action, text FROM agent_prompts WHERE agent = ? AND id = ?",
                            (agent, version_id)).fetchone()
     return dict(zip(_PROMPT_COLUMNS, row)) if row else None
+
+
+# --------------------------------------------------------------------------- agents made on the page
+
+_AGENT_COLUMNS = ("id", "created_at", "updated_at", "name", "summary", "routing", "task", "parent", "model",
+                  "tool_groups", "odoo_connection", "telegram_connection", "generated_prompt", "missing")
+_JSON_LISTS = ("tool_groups", "missing")
+
+
+def _agent_row(row) -> dict:
+    item = dict(zip(_AGENT_COLUMNS, row))
+    for key in _JSON_LISTS:
+        try:
+            value = json.loads(item[key] or "[]")
+        except ValueError:
+            value = []
+        item[key] = value if isinstance(value, list) else []
+    return item
+
+
+def custom_agents(settings: Settings) -> list[dict]:
+    """Agents created on the «AI agentlar» page, oldest first."""
+    with connect(settings) as conn:
+        rows = conn.execute(f"SELECT {', '.join(_AGENT_COLUMNS)} FROM custom_agents ORDER BY created_at, id").fetchall()
+    return [_agent_row(row) for row in rows]
+
+
+def custom_agent(settings: Settings, agent_id: str) -> dict | None:
+    with connect(settings) as conn:
+        row = conn.execute(f"SELECT {', '.join(_AGENT_COLUMNS)} FROM custom_agents WHERE id = ?",
+                           (agent_id,)).fetchone()
+    return _agent_row(row) if row else None
+
+
+def save_custom_agent(settings: Settings, agent: dict) -> None:
+    """Inserts or updates one agent (``agent`` holds every column except the timestamps)."""
+    values = {key: agent.get(key) for key in _AGENT_COLUMNS if key not in ("created_at", "updated_at")}
+    for key in _JSON_LISTS:
+        values[key] = json.dumps(values.get(key) or [], ensure_ascii=False)
+    for key in ("summary", "routing", "task", "generated_prompt"):
+        values[key] = values.get(key) or ""
+    columns = list(values)
+    now = _now()
+    with connect(settings) as conn:
+        conn.execute(
+            f"INSERT INTO custom_agents (created_at, updated_at, {', '.join(columns)}) "
+            f"VALUES (?, ?, {', '.join('?' for _ in columns)}) ON CONFLICT(id) DO UPDATE SET "
+            "updated_at = excluded.updated_at, "
+            + ", ".join(f"{column} = excluded.{column}" for column in columns if column != "id"),
+            (now, now, *values.values()))
+
+
+def delete_custom_agent(settings: Settings, agent_id: str) -> list[str]:
+    """Deletes an agent. Its sub-agents move one level up (to its parent), its Telegram bot connection
+    is deleted, and so is its Odoo connection when no other agent uses it. Returns the moved ids."""
+    with connect(settings) as conn, _transaction(conn):
+        row = conn.execute("SELECT parent, odoo_connection, telegram_connection FROM custom_agents WHERE id = ?",
+                           (agent_id,)).fetchone()
+        if row is None:
+            return []
+        parent, odoo, telegram = row
+        moved = [item[0] for item in conn.execute("SELECT id FROM custom_agents WHERE parent = ?", (agent_id,))]
+        conn.execute("UPDATE custom_agents SET parent = ?, updated_at = ? WHERE parent = ?", (parent, _now(), agent_id))
+        conn.execute("DELETE FROM custom_agents WHERE id = ?", (agent_id,))
+        if telegram:
+            conn.execute("DELETE FROM connections WHERE id = ?", (telegram,))
+            conn.execute("DELETE FROM bot_offsets WHERE connection = ?", (telegram,))
+        if odoo and not conn.execute("SELECT 1 FROM custom_agents WHERE odoo_connection = ? LIMIT 1",
+                                     (odoo,)).fetchone():
+            conn.execute("DELETE FROM connections WHERE id = ?", (odoo,))
+        return moved
+
+
+def agent_model(settings: Settings, agent: str) -> str | None:
+    """The model chosen on the page for a built-in agent (None = the default from the settings)."""
+    with connect(settings) as conn:
+        row = conn.execute("SELECT model FROM agent_models WHERE agent = ?", (agent,)).fetchone()
+    return row[0] if row else None
+
+
+def set_agent_model(settings: Settings, agent: str, model: str | None) -> None:
+    with connect(settings) as conn:
+        if model:
+            conn.execute("INSERT INTO agent_models (agent, model, updated_at) VALUES (?, ?, ?) ON CONFLICT(agent) "
+                         "DO UPDATE SET model = excluded.model, updated_at = excluded.updated_at",
+                         (agent, model, _now()))
+        else:
+            conn.execute("DELETE FROM agent_models WHERE agent = ?", (agent,))
+
+
+# --------------------------------------------------------------------------- connections (Odoo, Telegram bots)
+
+_CONNECTION_COLUMNS = ("id", "created_at", "updated_at", "kind", "name", "config", "secret", "status",
+                       "status_text", "checked_at")
+
+
+def _connection_row(row) -> dict:
+    item = dict(zip(_CONNECTION_COLUMNS, row))
+    try:
+        config = json.loads(item["config"] or "{}")
+    except ValueError:
+        config = {}
+    item["config"] = config if isinstance(config, dict) else {}
+    return item
+
+
+def connection(settings: Settings, connection_id: str | None) -> dict | None:
+    if not connection_id:
+        return None
+    with connect(settings) as conn:
+        row = conn.execute(f"SELECT {', '.join(_CONNECTION_COLUMNS)} FROM connections WHERE id = ?",
+                           (connection_id,)).fetchone()
+    return _connection_row(row) if row else None
+
+
+def connections(settings: Settings, kind: str) -> list[dict]:
+    with connect(settings) as conn:
+        rows = conn.execute(f"SELECT {', '.join(_CONNECTION_COLUMNS)} FROM connections WHERE kind = ? "
+                            "ORDER BY created_at, id", (kind,)).fetchall()
+    return [_connection_row(row) for row in rows]
+
+
+def save_connection(settings: Settings, connection_id: str, kind: str, name: str, config: dict,
+                    secret: bytes | None, status: str = "ok", status_text: str = "") -> None:
+    """Inserts or updates a connection; ``secret`` None keeps the stored one."""
+    now = _now()
+    with connect(settings) as conn:
+        conn.execute(
+            "INSERT INTO connections (id, created_at, updated_at, kind, name, config, secret, status, status_text, "
+            "checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+            "updated_at = excluded.updated_at, name = excluded.name, config = excluded.config, "
+            "secret = COALESCE(excluded.secret, connections.secret), status = excluded.status, "
+            "status_text = excluded.status_text, checked_at = excluded.checked_at",
+            (connection_id, now, now, kind, name, json.dumps(config, ensure_ascii=False), secret, status,
+             status_text, now))
+
+
+def set_connection_status(settings: Settings, connection_id: str, status: str, status_text: str = "") -> None:
+    with connect(settings) as conn:
+        conn.execute("UPDATE connections SET status = ?, status_text = ?, checked_at = ? WHERE id = ?",
+                     (status, status_text, _now(), connection_id))
+
+
+def delete_connection(settings: Settings, connection_id: str) -> None:
+    with connect(settings) as conn, _transaction(conn):
+        conn.execute("DELETE FROM connections WHERE id = ?", (connection_id,))
+        conn.execute("DELETE FROM bot_offsets WHERE connection = ?", (connection_id,))
+        conn.execute("UPDATE custom_agents SET odoo_connection = NULL WHERE odoo_connection = ?", (connection_id,))
+        conn.execute("UPDATE custom_agents SET telegram_connection = NULL WHERE telegram_connection = ?",
+                     (connection_id,))
+
+
+# --------------------------------------------------------------------------- the agents' Telegram bots
+
+
+def bot_offset(settings: Settings, connection_id: str) -> int:
+    with connect(settings) as conn:
+        row = conn.execute("SELECT next_update FROM bot_offsets WHERE connection = ?", (connection_id,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def set_bot_offset(settings: Settings, connection_id: str, next_update: int) -> None:
+    with connect(settings) as conn:
+        conn.execute("INSERT INTO bot_offsets (connection, next_update) VALUES (?, ?) ON CONFLICT(connection) "
+                     "DO UPDATE SET next_update = excluded.next_update", (connection_id, int(next_update)))
+
+
+def add_bot_message(settings: Settings, connection_id: str, chat_id: int, role: str, text: str) -> None:
+    with connect(settings) as conn:
+        conn.execute("INSERT INTO bot_messages (created_at, connection, chat_id, role, text) VALUES (?, ?, ?, ?, ?)",
+                     (_now(), connection_id, int(chat_id), role, text))
+
+
+def bot_history(settings: Settings, connection_id: str, chat_id: int, limit: int) -> list[dict]:
+    """The last ``limit`` messages of one chat with an agent's bot, oldest first."""
+    if limit <= 0:
+        return []
+    with connect(settings) as conn:
+        rows = conn.execute("SELECT role, text FROM bot_messages WHERE connection = ? AND chat_id = ? "
+                            "ORDER BY id DESC LIMIT ?", (connection_id, int(chat_id), limit)).fetchall()
+    return [{"role": role, "text": text} for role, text in reversed(rows)]
+
+
+def clear_bot_history(settings: Settings, connection_id: str, chat_id: int) -> None:
+    with connect(settings) as conn:
+        conn.execute("DELETE FROM bot_messages WHERE connection = ? AND chat_id = ?", (connection_id, int(chat_id)))
+
+
+def bot_questions_since(settings: Settings, connection_id: str, since_utc: datetime) -> int:
+    with connect(settings) as conn:
+        row = conn.execute("SELECT COUNT(*) FROM bot_messages WHERE connection = ? AND role = 'user' "
+                           "AND created_at >= ?",
+                           (connection_id, since_utc.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))).fetchone()
+    return int(row[0]) if row else 0

@@ -1,14 +1,15 @@
 """The orchestrator ("Boshqaruvchi"): answers general questions itself and hands data questions to the
-data agent, changes of what the dashboard shows to the view agent and changes of its look to the design
-agent (all three are tools of its loop). When exactly one agent was needed, that agent's answer goes
-straight to the CEO without another model call."""
+data agent, changes of what the dashboard shows to the view agent, and anything matching a created
+agent below it to that agent (all are tools of its loop). When
+exactly one agent was needed, that agent's answer goes straight to the CEO without another model call.
+Every agent runs with its own model (chosen on the «AI agentlar» page; default from dashboard\\.env)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Callable
 
-from assistant import data_agent, design_agent, llm, prompts, ui_agent
+from assistant import data_agent, llm, prompts, team, ui_agent
 from assistant.llm import AgentError, Tool, obj
 from core.settings import Settings
 from ui.i18n import t
@@ -26,9 +27,6 @@ TOOL_SPECS = (  # (name, description, input schema); the handlers are made per m
     ("change_view", "Ask the view agent to change what the dashboard shows: hide, show, move or rename sections, "
                     "columns and pages; add new sections (KPI cards, tables, lists, charts, notes); create or delete "
                     "own pages; undo, reset.", _INSTRUCTION),
-    ("change_design", "Ask the design agent to change how the dashboard looks: light/dark mode, colors, fonts, "
-                      "corners, text size, chart colors, extra styling, or the look of a site in a screenshot.",
-     _INSTRUCTION),
 )
 
 
@@ -95,41 +93,28 @@ def handle(settings: Settings, message: str, history: list[dict], context: dict,
     ``pictures`` (core.images.Picture, usually screenshots of the dashboard) go to the orchestrator and
     to whichever agent it calls. Raises AgentError (with the text for the CEO) when the model cannot
     be used."""
-    client = client if client is not None else llm.make_client(settings)
-    reply = Reply(text="")
-    answers: dict[str, str] = {}
+    call = team.Call(settings, llm.pool(client), context, tuple(pictures), on_step)
+    answers = call.answers
 
-    def step(label: str) -> None:
-        if on_step is not None:
-            on_step(label)
+    def specialist(agent_id: str, label: str, run, text: str) -> object:
+        call.step(label)
+        call.used.append(agent_id)
+        result = run(call.client_of(agent_id), call.settings_of(agent_id), text, context, pictures,
+                     extra_tools=team.child_tools(call, agent_id), agents=call.agents)
+        call.usage.add(result.usage)
+        return result
 
     def ask_data(args: dict) -> dict:
-        question = str(args.get("question") or "").strip() or message
-        step(t("chat.step.data"))
-        reply.agents.append("data")
-        result = data_agent.run(client, settings, question, context, pictures)
-        reply.usage.add(result.usage)
+        result = specialist("data", t("chat.step.data"), data_agent.run,
+                            str(args.get("question") or "").strip() or message)
         answers["ask_data"] = result.text
         return {"answer": result.text}
 
     def change_view(args: dict) -> dict:
-        instruction = str(args.get("instruction") or "").strip() or message
-        step(t("chat.step.ui"))
-        reply.agents.append("view")
-        result = ui_agent.run(client, settings, instruction, context, pictures)
-        reply.usage.add(result.usage)
-        reply.changes.extend(result.changes)
+        result = specialist("view", t("chat.step.ui"), ui_agent.run,
+                            str(args.get("instruction") or "").strip() or message)
+        call.changes.extend(result.changes)
         answers["change_view"] = result.text
-        return {"reply": result.text, "changes_made": result.changes or ["none"]}
-
-    def change_design(args: dict) -> dict:
-        instruction = str(args.get("instruction") or "").strip() or message
-        step(t("chat.step.design"))
-        reply.agents.append("design")
-        result = design_agent.run(client, settings, instruction, context, pictures)
-        reply.usage.add(result.usage)
-        reply.changes.extend(result.changes)
-        answers["change_design"] = result.text
         return {"reply": result.text, "changes_made": result.changes or ["none"]}
 
     def handoff(uses: list, outputs: list, text: str) -> str | None:
@@ -137,15 +122,17 @@ def handle(settings: Settings, message: str, history: list[dict], context: dict,
             return answers.get(uses[0].name) or None
         return None
 
-    handlers = {"ask_data": ask_data, "change_view": change_view, "change_design": change_design}
+    handlers = {"ask_data": ask_data, "change_view": change_view}
     tools = [Tool(name, description, schema, handlers[name]) for name, description, schema in TOOL_SPECS]
-    step(t("chat.step.start"))
-    result = llm.run_agent(client, settings, name="orchestrator", system=prompts.system("orchestrator", settings),
+    tools += team.child_tools(call, "orchestrator")
+    call.step(t("chat.step.start"))
+    result = llm.run_agent(call.client_of("orchestrator"), call.settings_of("orchestrator"), name="orchestrator",
+                           system=prompts.system("orchestrator", settings, call.agents),
                            messages=_attach(history_messages(history, message), pictures),
                            context=prompts.orchestrator_context(context),
                            tools=tools, max_steps=ORCHESTRATOR_STEPS, handoff=handoff)
-    reply.usage.add(result.usage)
-    fallback = (answers.get("change_view") or answers.get("change_design") or answers.get("ask_data")
-                or t("chat.err.internal"))
-    reply.text = without_repeats(result.text) or without_repeats(fallback)
-    return reply
+    call.usage.add(result.usage)
+    fallback = (answers.get("change_view") or answers.get("ask_data")
+                or next(iter(answers.values()), None) or t("chat.err.internal"))
+    return Reply(text=without_repeats(result.text) or without_repeats(fallback), agents=call.used,
+                 changes=call.changes, usage=call.usage)

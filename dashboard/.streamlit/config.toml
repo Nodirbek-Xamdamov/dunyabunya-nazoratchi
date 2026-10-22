@@ -1,14 +1,12 @@
 # Streamlit settings of the dashboard (run_dashboard.ps1 starts Streamlit from the dashboard folder,
 # so this file is used). Address/port can be overridden from dashboard\.env (DASHBOARD_HOST/PORT).
-# The [theme] part below is written by the dashboard (core/theme.py) from the design chosen in the chat;
-# edit the rest by hand if needed. runOnSave makes open pages rerun (and pick up a new design) when this
-# file changes; with fileWatcherType = "none" nothing else is watched.
+# The design is fixed: the [theme] part below (the chat's design agent was removed on 2026-10-22).
+# With fileWatcherType = "none" no file is watched.
 
 [server]
 headless = true
 address = "127.0.0.1"
 port = 8502
-runOnSave = true
 fileWatcherType = "none"
 
 [browser]
@@ -21,7 +19,6 @@ showErrorDetails = "none"
 [logger]
 level = "warning"
 
-# dashboard theme: default
 [theme]
 baseRadius = "0.75rem"
 

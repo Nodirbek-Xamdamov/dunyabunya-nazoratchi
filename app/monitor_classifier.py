@@ -31,6 +31,7 @@ from datetime import date
 from itertools import groupby
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 
 from app import llm_client, monitor_db, monitor_sla, stt
 from app.config import settings
@@ -169,6 +170,9 @@ def is_junk(message: Message) -> bool:
 
 _SPEECH_SUFFIXES = {"voice": ".ogg", "audio": ".mp3", "video": ".mp4", "video_note": ".mp4"}
 _TRANSCRIBE_ATTEMPTS = 3
+# Faylni Telegram'dan yuklab olish: aiogram'ning standart 30 soniyasi bu serverda yetmay qolgan
+# (2026-10-21/22 -- TimeoutError, ovozlar matnsiz qolgan)
+_DOWNLOAD_TIMEOUT = 90
 # Faylni yuklab olish uchun bot (`classifier_loop` o'rnatadi). Botsiz (sinov skripti, testlar)
 # ovozli xabarlar matnga aylantirilmaydi.
 _bot: Bot | None = None
@@ -195,11 +199,17 @@ async def transcribe(message: Message) -> bool:
         fd, path = tempfile.mkstemp(prefix="tg_voice_", suffix=_SPEECH_SUFFIXES[message.media_type])
         os.close(fd)
         try:
-            await _bot.download(message.file_id, destination=path)
-            text = await stt.transcribe_openai(path)
-        except Exception as exc:
+            await _bot.download(message.file_id, destination=path, timeout=_DOWNLOAD_TIMEOUT)
+        except TelegramBadRequest as exc:
             # Fayl 20 MB dan katta, o'chirilgan va h.k. -- qayta urinishdan foyda yo'q
-            logger.warning("Ovozli xabarni yuklab bo'lmadi (xabar=%s): %s", message.id, exc)
+            logger.warning("Ovozli xabarni yuklab bo'lmadi (xabar=%s): %r", message.id, exc)
+        except Exception as exc:
+            # Tarmoq uzilishi, vaqt tugashi -- keyingi aylanishda qayta uriniladi (2026-10-21 da shu
+            # sabab bir necha ovoz qayta urinilmay matnsiz qolgan edi)
+            logger.warning("Ovozli xabarni yuklab olishda xato (xabar=%s), qayta uriniladi: %r", message.id, exc)
+            text = None
+        else:
+            text = await stt.transcribe_openai(path)
         finally:
             try:
                 os.unlink(path)

@@ -39,6 +39,7 @@ os.environ["DB_PATH"] = str(_MONITOR_DB_PATH)
 os.environ["TIMEZONE"] = "Asia/Tashkent"
 os.environ["REPORTS_DIR"] = str(TEST_DIR / "_tmp_reports")
 os.environ["BACKUP_DIR"] = str(TEST_DIR / "_tmp_backups")
+os.environ["MEDIA_DIR"] = str(TEST_DIR / "_tmp_media")
 os.environ["REPORT_CHAT_ID"] = "-1009990000001"
 os.environ["REPORT_TIME"] = "00:00"
 os.environ["GROUP_MONITOR_EXCLUDED_GROUP_IDS"] = ""
@@ -75,6 +76,7 @@ def _cleanup_test_artifacts():
     yield
     for path in (
         _TEST_DB_PATH, _TMP_PDF_DIR, _TMP_LOG_DIR, TEST_DIR / "_tmp_reports", TEST_DIR / "_tmp_backups",
+        TEST_DIR / "_tmp_media",
         _MONITOR_DB_PATH, Path(f"{_MONITOR_DB_PATH}-wal"), Path(f"{_MONITOR_DB_PATH}-shm"),
     ):
         if path.is_dir():

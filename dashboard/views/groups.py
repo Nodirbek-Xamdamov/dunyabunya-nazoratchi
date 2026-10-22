@@ -11,7 +11,7 @@ import streamlit as st
 from core import metrics as m_
 from core import timeutil as tu
 from core.text import esc
-from ui import charts, data, layout, narrative, shell, theme
+from ui import charts, data, layout, media, narrative, shell, theme
 from ui import components as c
 from ui.i18n import t
 from views import common
@@ -20,10 +20,10 @@ from views.common import PageData
 _FILTERS = ("complaints", "missed", "manager", "present")
 _LEVELS = ("all", "red", "yellow", "green")
 # ranking table columns that can be hidden: (column, title key)
-_RANKING_COLUMNS = (("level", "gr.c.level"), ("risk", "gr.c.risk"), ("reasons", "gr.c.reasons"),
+_RANKING_COLUMNS = (("level", "gr.c.level"), ("risk", "gr.c.risk"),
                     ("complaints", "gr.c.complaints"), ("rate", "gr.c.rate"), ("missed", "gr.c.missed"),
                     ("sla", "gr.c.sla"), ("median", "gr.c.median"), ("spark", "gr.c.spark"),
-                    ("related", "gr.c.related"), ("customer", "gr.c.customer"), ("last", "gr.c.last"))
+                    ("related", "gr.c.related"), ("last", "gr.c.last"))
 
 
 def _percent(value: float | None) -> float | None:
@@ -54,19 +54,14 @@ def _remember(choice: int | None) -> None:
 
 def _ranking(d: PageData) -> None:
     ctx, groups = d.ctx, d.groups
-    left, middle, right = st.columns([2.2, 3, 2], vertical_alignment="bottom")
+    left, right = st.columns([3, 2], vertical_alignment="bottom")
     with left:
-        name_filter = st.text_input(t("gr.name_filter"), key="gr_name", max_chars=80,
-                                    placeholder="…", icon=":material/search:").strip().lower()
-    with middle:
         chosen = st.pills(t("gr.f.filters"), _FILTERS, selection_mode="multi", key="gr_filters",
                           format_func=lambda key: t(f"gr.f.{key}"))
     with right:
         level = st.segmented_control(t("gr.f.risk"), _LEVELS, key="gr_level", default="all",
                                      format_func=lambda key: t("cat.all") if key == "all" else t(f"gr.risk.{key}"))
     frame = groups.copy()
-    if name_filter:
-        frame = frame[frame["title"].astype(str).str.lower().str.contains(name_filter, regex=False)]
     chosen = set(chosen or [])
     if "complaints" in chosen:
         frame = frame[frame["complaints"] > 0]
@@ -95,7 +90,6 @@ def _ranking(d: PageData) -> None:
         "level": [f"{theme.LEVEL_SYMBOLS[lv]} {t('gr.risk.' + lv)}" for lv in frame["risk_level"]],
         "risk": frame["risk"],
         "title": frame["title"],
-        "reasons": [", ".join(reasons) for reasons in frame["risk_reasons"]],
         "complaints": frame["complaints"],
         "rate": [_percent(m_.complaint_rate(cmp, rel)) for cmp, rel in zip(frame["complaints"], frame["related"])],
         "missed": frame["missed"],
@@ -103,7 +97,6 @@ def _ranking(d: PageData) -> None:
         "median": frame["median_response_s"] / 60,
         "spark": [spark_map.get(chat, [0] * len(days)) for chat in frame["chat_id"]],
         "related": frame["related"],
-        "customer": frame["customer"],
         "last": common.local_time_column(frame, "last_activity", ctx.settings.tz),
     })
     config = {
@@ -111,7 +104,6 @@ def _ranking(d: PageData) -> None:
         "risk": st.column_config.ProgressColumn(t("gr.c.risk"), min_value=0, max_value=100, format="%d", width="small"),
         "level": st.column_config.TextColumn(t("gr.c.level"), width="small", pinned=True),
         "title": st.column_config.TextColumn(t("gr.c.title"), width="large", pinned=True),
-        "customer": st.column_config.NumberColumn(t("gr.c.customer"), format="%d"),
         "related": st.column_config.NumberColumn(t("gr.c.related"), format="%d"),
         "complaints": st.column_config.NumberColumn(t("gr.c.complaints"), format="%d"),
         "rate": st.column_config.ProgressColumn(t("gr.c.rate"), min_value=0, max_value=100, format="%.0f%%"),
@@ -120,7 +112,6 @@ def _ranking(d: PageData) -> None:
         "median": st.column_config.NumberColumn(t("gr.c.median"), format="%.0f daq"),
         "last": st.column_config.DatetimeColumn(t("gr.c.last"), format="DD.MM.YYYY HH:mm"),
         "spark": st.column_config.LineChartColumn(t("gr.c.spark"), y_min=0),
-        "reasons": st.column_config.TextColumn(t("gr.c.reasons")),
     }
     shown = layout.shown_columns(d, "gr.ranking", [column for column in table.columns if column != "chat_id"])
     event = st.dataframe(table, column_config=config, hide_index=True, width="stretch", key="gr_table",
@@ -128,10 +119,10 @@ def _ranking(d: PageData) -> None:
                          placeholder="—", column_order=shown)
     export = pd.DataFrame({
         t("gr.c.level"): table["level"], t("gr.c.risk"): table["risk"], t("gr.c.title"): table["title"],
-        t("gr.c.reasons"): table["reasons"], t("gr.c.complaints"): table["complaints"],
+        t("gr.c.complaints"): table["complaints"],
         t("gr.c.rate") + ", %": table["rate"], t("gr.c.missed"): table["missed"], t("gr.c.sla") + ", %": table["sla"],
         t("gr.c.median") + ", daq": table["median"].round(1), t("gr.c.related"): table["related"],
-        t("gr.c.customer"): table["customer"], t("gr.c.last"): table["last"],
+        t("gr.c.last"): table["last"],
     })
     st.caption(t("gr.export_table"))
     c.download_buttons(export, c.export_name("guruhlar_reytingi", ctx.first_day, ctx.last_day), key="gr-rank-export")
@@ -171,7 +162,7 @@ def _averages(d: PageData) -> dict:
         groups = d.groups
         active = groups[groups["related"] > 0]
         medians = groups["median_response_s"].dropna()
-        avg_missed = groups[groups["customer"] > 0]["missed"].mean() if (groups["customer"] > 0).any() else None
+        avg_missed = active["missed"].mean() if not active.empty else None
         return {
             "rate": m_.complaint_rate(active["complaints"].sum(), active["related"].sum()),
             "sla": m_.sla_share(groups["answered"].sum(), groups["missed"].sum()),
@@ -226,7 +217,7 @@ def _summary(d: PageData) -> None:
 def _dynamics(d: PageData) -> None:
     window, days = d.window, d.days
     c.section(t("gr.dynamics"), tu.fmt_period(window) if window is not d.ctx.period else None)
-    if days["customer"].sum() == 0:
+    if days["related"].sum() == 0:
         c.empty()
     else:
         c.plot(charts.daily_dynamics(days, height=300), key="gr-daily")
@@ -280,7 +271,7 @@ def _missed(d: PageData) -> None:
                      t("col.after"): st.column_config.NumberColumn(format="%.0f daq")})
 
 
-_CUSTOMER_COLUMNS = (("col.customer", "col.customer"), ("username", "col.username"), ("col.messages", "col.messages"),
+_CUSTOMER_COLUMNS = (("col.customer", "col.customer"), ("username", "col.username"),
                      ("col.related", "col.related"), ("col.complaints", "col.complaints"), ("col.last", "col.last"))
 
 
@@ -294,13 +285,16 @@ def _customers(d: PageData) -> None:
     table = pd.DataFrame({
         t("col.customer"): customers["name"].fillna(customers["username"]),
         t("col.username"): customers["username"].map(lambda v: f"@{v}" if isinstance(v, str) and v else None),
-        t("col.messages"): customers["messages"], t("col.related"): customers["related"],
+        t("col.related"): customers["related"],
         t("col.complaints"): customers["complaints"],
         t("col.last"): common.local_time_column(customers, "last_at", ctx.settings.tz),
     })
     st.dataframe(table, hide_index=True, width="stretch", placeholder="—",
                  column_order=layout.shown_columns(d, "grd.customers", table.columns),
                  column_config={t("col.last"): st.column_config.DatetimeColumn(format="DD.MM.YYYY HH:mm")})
+
+
+_PICTURE_LABELS = {"photo": "gr.feed.photo", "animation": "gr.feed.gif"}
 
 
 def _feed(d: PageData) -> None:
@@ -342,17 +336,24 @@ def _feed(d: PageData) -> None:
         if row.needs_manager:
             tags.append(c.chip(t("col.needs"), "yellow"))
         body = row.text or ""
+        picture = ""
         if row.media_type in m_.SPEECH_MEDIA:
             label = t("gr.feed.voice") if row.transcript else t("gr.feed.voice_empty")
             body = f"[{label}] {row.transcript or ''}".strip()
+        elif row.media_type in _PICTURE_LABELS:
+            label = t(_PICTURE_LABELS[row.media_type])
+            picture = media.html(row.media_type, row.media_status, row.media_path, ctx.settings.media_dir, label)
+            if not picture:  # not saved: not a company-related conversation, daily limit, too big
+                body = f"[{label}] {body}".strip()
         elif row.media_type != "text":
             body = f"[{row.media_type}] {body}".strip()
         reply = (f'<div class="db-msg-reply">↩ {esc(t("gr.feed.reply", name=row.reply_name or "—", text=row.reply_text or ""))}</div>'
                  if row.reply_to_message_id and row.reply_name else "")
         summary = f'<div class="db-msg-summary">{esc(row.summary)}</div>' if row.summary and not staff else ""
         kind = "staff" if staff else f"customer {row.sentiment or ''}"
+        text = f'<div class="db-msg-text">{esc(body)}</div>' if body or not picture else ""
         bubbles.append(f'<div class="db-msg {kind}"><div class="db-msg-head">{" · ".join(head)} {"".join(tags)}</div>'
-                       f'{reply}<div class="db-msg-text">{esc(body)}</div>{summary}</div>')
+                       f'{reply}{picture}{text}{summary}</div>')
     st.html(f'<div class="db-feed">{"".join(bubbles)}</div>')
 
 
@@ -380,7 +381,7 @@ def _export(d: PageData) -> None:
 
 B, P = layout.Block, layout.Place
 RANKING = B("gr.ranking", "blk.gr.ranking", _ranking, items=_RANKING_COLUMNS,
-            hidden_items=("risk", "rate", "median", "spark", "related", "customer", "last"),
+            hidden_items=("risk", "rate", "median", "spark", "related", "last"),
             keywords="guruhlar reytingi, jadval, xavf bali, ustunlar")
 RANKING_PAGE = layout.register(layout.Page("groups", "page.groups", "groups",
                                            (P(common.ISSUES, hidden=True), P(RANKING))))

@@ -4,7 +4,7 @@ Every page is a list of named blocks (a section, a KPI card, a table ...). What 
 page's default layout plus the stored *overlay* (core.state). The CEO can change everything through
 the chat (user's decision, 2026-10-17): hide or show any block, table column or page, move blocks,
 rename blocks and pages, add sections built from the dashboard's own read-only data views or text
-notes (ui/custom.py), create own pages and change the design (core/theme.py). Only the chat itself and
+notes (ui/custom.py) and create own pages. Only the chat itself and
 the data stay out of reach: the chat button is not a block, and nothing here writes the monitoring
 database. The AI assistant and the chat buttons only ever change this overlay -- never code.
 
@@ -14,7 +14,7 @@ Overlay (JSON in core.state)::
                             "shown_items": {"block": [...]}, "order": [...], "added": [...],
                             "titles": {"block": "own name"}, "custom": {"c-...": spec}}},
      "hidden_pages": [...], "shown_pages": [...], "page_titles": {"overview": "own name"},
-     "custom_pages": [{"id": "p-...", "title": "...", "icon": "dashboard"}], "theme": {...}}
+     "custom_pages": [{"id": "p-...", "title": "...", "icon": "dashboard"}]}
 
 ``hidden`` / ``hidden_items`` / ``hidden_pages`` hide things that are visible by default; ``shown`` /
 ``shown_items`` / ``shown_pages`` show optional things (``Place(hidden=True)``, ``Block.hidden_items``,
@@ -34,7 +34,6 @@ from typing import Callable
 import streamlit as st
 
 from core import db, state
-from core import theme as theme_mod
 from core.settings import load_settings
 from ui import overrides
 from ui.i18n import t
@@ -174,8 +173,6 @@ def normalize(overlay) -> dict:
     if isinstance(custom_pages_, list):
         result["custom_pages"] = [dict(item) for item in custom_pages_
                                   if isinstance(item, dict) and _ID_RE.match(str(item.get("id", "")))]
-    if isinstance(overlay.get("theme"), dict):
-        result["theme"] = copy.deepcopy(overlay["theme"])
     return result
 
 
@@ -262,7 +259,7 @@ def _clean(overlay: dict) -> dict:
             overlay[key] = pages
         else:
             overlay.pop(key, None)
-    for key in ("page_titles", "theme", "custom_pages"):
+    for key in ("page_titles", "custom_pages"):
         if not overlay.get(key):
             overlay.pop(key, None)
     return overlay
@@ -694,28 +691,8 @@ def delete_page(overlay: dict, page_id: str) -> tuple[dict, str]:
     return new, t("layout.page_deleted", page=page.title)
 
 
-def set_theme(overlay: dict, tokens: dict) -> tuple[dict, str]:
-    new = normalize(overlay)
-    before = _dict(new, "theme")
-    try:
-        after = theme_mod.validate(tokens, base=before)
-    except theme_mod.ThemeError as exc:
-        raise LayoutError(str(exc)) from exc
-    new["theme"] = after
-    names = theme_mod.changed_names(before, after)
-    _clean(new)
-    return new, f"{t('layout.design')}: {t('layout.restyled')} — {', '.join(names) or '—'}"
-
-
-def reset_theme(overlay: dict) -> tuple[dict, str]:
-    new = normalize(overlay)
-    new.pop("theme", None)
-    _clean(new)
-    return new, t("layout.design_reset")
-
-
 def reset(overlay: dict, scope: str) -> tuple[dict, str]:
-    """``scope`` = "all" (everything: layout, own pages, names and the design) or a page id (a
+    """``scope`` = "all" (everything: layout, own pages and names) or a page id (a
     navigation page also resets its detail view; an own page loses its blocks)."""
     if scope == "all":
         return empty_overlay(), t("layout.reset_all")
@@ -763,12 +740,6 @@ def catalog_text() -> str:
                     for item_id, title in items))
             lines.append(f"- {block.id} | {block.title}" + "".join(f" | {part}" for part in extra))
     return "\n".join(lines)
-
-
-def block_names_text() -> str:
-    """Block ids and names per built-in page in one line each (for the design agent's CSS)."""
-    return "\n".join(f"- {page.id}: " + ", ".join(f"{place.block.id} ({place.block.title})" for place in page.places
-                                                    if place.block.hideable) for page in PAGES.values())
 
 
 def page_view(page_id: str, overlay: dict) -> dict:
@@ -847,12 +818,8 @@ def overlay_text(overlay: dict) -> str:
             parts.append("custom order")
         if parts:
             lines.append(f"{page_id}: " + "; ".join(parts))
-    design = _dict(overlay, "theme")
-    if design:
-        lines.append("Design: " + ", ".join(f"{key}={value}" for key, value in design.items() if key != "custom_css")
-                     + ("; custom CSS set" if design.get("custom_css") else ""))
     if len(lines) == 1 and hidden_pages == list(DEFAULT_HIDDEN_PAGES):
-        lines.append("Every page is in its default layout; the design is the default one.")
+        lines.append("Every page is in its default layout.")
     return "\n".join(lines)
 
 
