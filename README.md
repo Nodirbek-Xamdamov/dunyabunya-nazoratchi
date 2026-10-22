@@ -9,5 +9,6 @@ Bu yerda **dunyabunya** uchun qilingan proektlar jamlangan. Har bir papka — al
 | [telegram to odoo attachment bot](telegram%20to%20odoo%20attachment%20bot) | Telegram guruhiga tashlangan hujjat rasmi/PDF'ini Odoo'dagi hujjatning chatter'iga biriktiradi |
 | [Hisoblovchi](Hisoblovchi) | To'lov eslatma boti: sverka rasmi va reply asosida to'lov kuni eslatma yuboradi |
 | [db_web_chatbot](db_web_chatbot) | Sayt uchun savdo chatboti: mahsulot narxi va mavjudligi bo'yicha javob beradi |
+| [Kamera](Kamera) | Kamera orqali hodimlarning stol oldida o'tirgan vaqtini hisoblaydi; natija CEO dashboard'idagi "Yangi kamera" bo'limida (prototip) |
 
 Maxfiy sozlamalar (`.env`), loglar va ish ma'lumotlari (bazalar, rasmlar) repoga kiritilmagan — har bir proektda `.env.example` namunasi bor.
