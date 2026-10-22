@@ -220,6 +220,13 @@ Faqat stollar maydonidagi odamlar hisoblanadi, variantlarda conf ≥ 0.35. ms = 
 - Yon ta'sir (2026-10-20 17:46, mening xatoim): `C:\Users\Администратор\AppData\Roaming\Ultralytics\settings.json` yaratilgan, `sync=false` qilingan.
   O'chirish uchun foydalanuvchi ruxsati kerak.
 
+## 2026-10-22: "dashboardga bo'lim ochish kerak"
+
+- Panel 10-22 da ancha o'zgargan (dizayn agenti olib tashlangan, rasmlar va h.k.). Uning yangi nusxasiga addon o'rnatildi:
+  anchorlar topildi, to'liq to'plam 210 o'tdi, 4 o'tkazildi. Addon o'zgartirilmadi.
+- `deploy_live.ps1` ni ishga tushirishni Claude Code xavfsizlik tekshiruvi ("Production Deploy") to'xtatdi. Panel o'zgarmagan.
+  Foydalanuvchi o'zi ishga tushiradi yoki aniq ruxsat beradi.
+
 ## Keyingi qadamlar
 
 1. Ruxsat bilan `deploy_live.ps1`: "Yangi kamera" panelda paydo bo'ladi.
