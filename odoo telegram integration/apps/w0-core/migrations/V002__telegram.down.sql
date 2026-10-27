@@ -1,0 +1,15 @@
+DROP FUNCTION core.purge_unrelated_text(timestamptz);
+DROP TABLE core.dashboard_users;
+DROP TABLE core.report_deliveries;
+DROP TABLE core.response_pairs;
+DROP TABLE core.review_queue;
+DROP TABLE core.daily_summaries;
+DROP TABLE core.daily_stats;
+DROP TABLE core.chat_context;
+DROP TABLE core.analyses;
+DROP TABLE core.episode_messages;
+DROP TABLE core.episodes;
+DROP FUNCTION core.episodes_set_retention();
+DROP TABLE core.transcripts;
+DROP TABLE core.media;
+DROP TABLE core.messages;

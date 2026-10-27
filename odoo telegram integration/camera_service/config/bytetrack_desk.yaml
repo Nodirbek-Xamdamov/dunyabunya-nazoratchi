@@ -1,0 +1,11 @@
+# ByteTrack for desk presence: Ultralytics bytetrack.yaml defaults (8.4.183), except track_buffer.
+# track_buffer counts frames: 150 = 30 s at 5 frames/s. pipeline.tracker_config() rewrites it for the
+# real target_fps (600 at 20 frames/s), so the same ID survives about 30 s of occlusion at any speed.
+
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 150
+match_thresh: 0.8
+fuse_score: True

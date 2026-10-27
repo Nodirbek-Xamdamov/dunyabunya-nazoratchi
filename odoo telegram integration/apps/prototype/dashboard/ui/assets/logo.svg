@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="40" viewBox="0 0 200 40">
+  <rect x="1" y="2" width="36" height="36" rx="10" fill="#4F46E5"/>
+  <rect x="9" y="21" width="5" height="10" rx="2" fill="#FFFFFF" opacity="0.75"/>
+  <rect x="16.5" y="15" width="5" height="16" rx="2" fill="#FFFFFF" opacity="0.9"/>
+  <rect x="24" y="9" width="5" height="22" rx="2" fill="#FFFFFF"/>
+  <text x="45" y="28.5" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#4F46E5" letter-spacing="-0.3">dunyabunya</text>
+</svg>

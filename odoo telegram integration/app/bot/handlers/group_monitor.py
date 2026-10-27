@@ -9,7 +9,8 @@ va bot qayta ishga tushsa ham hech narsa yo'qolmaydi.
 
 Saqlanmaydi: xizmat xabarlari (qo'shildi/chiqdi va h.k.), botlarning xabarlari, bog'langan
 kanaldan avtomatik tushgan postlar, hisobot guruhining o'zi (`REPORT_CHAT_ID`) va
-`GROUP_MONITOR_EXCLUDED_GROUP_IDS`dagi guruhlar.
+`GROUP_MONITOR_EXCLUDED_GROUP_IDS`dagi guruhlar. Xom arxivga (`app/raw_archive.py`, 2026-10-26)
+esa shu guruhlardagi HAMMA narsa yoziladi -- xizmat xabarlari va botlarniki ham.
 
 Xodim (`is_staff`) = guruh admini yoki egasi (anonim admin ham), yoki ismi/username'ida
 `STAFF_NAME_KEYWORDS`dagi so'z bor odam ("dunyabunya Santexnika" kabi kompaniya akkauntlari
@@ -30,7 +31,7 @@ from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import Message
 
-from app import monitor_classifier, monitor_db, monitor_sla
+from app import monitor_classifier, monitor_db, monitor_sla, raw_archive
 from app.config import settings
 
 logger = logging.getLogger("aiogram_bot")
@@ -133,8 +134,20 @@ async def collect(message: Message, *, edited: bool = False) -> None:
         monitor_classifier.wake()
 
 
+def archive(message: Message, *, edited: bool = False) -> None:
+    """Xom arxivga (`RAW_TELEGRAM_DIR`) HAMMA narsani yozadi: xizmat xabarlari va botlarniki ham.
+    Arxiv xatosi monitoringni to'xtatmaydi (`app/raw_archive.py`)."""
+    if not raw_archive.enabled() or message.chat.id in excluded_chat_ids():
+        return
+    try:
+        raw_archive.record(message, edited=edited)
+    except Exception:
+        logger.exception("Xom arxivga yozishda xatolik (chat_id=%s)", message.chat.id)
+
+
 @router.message(F.chat.type.in_(_GROUP_CHAT_TYPES))
 async def handle_group_message(message: Message) -> None:
+    archive(message)
     try:
         await collect(message)
     except Exception:
@@ -145,6 +158,7 @@ async def handle_group_message(message: Message) -> None:
 
 @router.edited_message(F.chat.type.in_(_GROUP_CHAT_TYPES))
 async def handle_group_edit(message: Message) -> None:
+    archive(message, edited=True)
     try:
         await collect(message, edited=True)
     except Exception:

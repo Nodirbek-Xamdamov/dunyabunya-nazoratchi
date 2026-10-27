@@ -23,6 +23,7 @@ from ui import auth, chat, layout, nav, overrides, shell  # noqa: E402
 from ui import components as c  # noqa: E402
 from ui.i18n import t  # noqa: E402
 from views import agents, categories, groups, overview, own, reports, response, search, staff, system, trends  # noqa: E402
+from views import kamera  # noqa: E402  «Yangi kamera» section (camera desk time), see views/kamera.py
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 for noisy in ("streamlit", "urllib3", "watchdog", "httpx", "httpx2", "httpcore", "httpcore2", "anthropic"):
@@ -64,10 +65,13 @@ PAGES = {key: st.Page(SPECS[key][0], title=layout.nav_title(key, overlay), icon=
 for item in own_pages:
     PAGES[item.id] = st.Page(own.make(item.id), title=item.title, icon=f":material/{item.icon}:", url_path=item.id,
                              default=item.id == first)
+for key, (render, title, icon, url_path) in kamera.PAGES.items():  # «Yangi kamera» pages
+    PAGES[key] = st.Page(render, title=title, icon=icon, url_path=url_path)
 nav.set_pages(PAGES)
 
 sections = {t(section): [PAGES[key] for key in keys if key in PAGES] for section, keys in SECTIONS.items()}
 sections[t("nav.custom")] = [PAGES[item.id] for item in own_pages]
+sections = kamera.with_section(sections, t("nav.main"), [PAGES[key] for key in kamera.PAGES])
 navigation = st.navigation({name: pages for name, pages in sections.items() if pages})
 current = next((key for key, page in PAGES.items() if page is navigation), None) or next(
     (key for key, page in PAGES.items() if page.url_path == navigation.url_path), first)

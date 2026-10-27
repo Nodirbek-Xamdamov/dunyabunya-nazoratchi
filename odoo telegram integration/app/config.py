@@ -151,6 +151,16 @@ class Settings(BaseSettings):
     MEDIA_MAX_FILE_MB: int = 10
     MEDIA_CONTEXT_MINUTES: int = 10
 
+    # --- Xom ma'lumotlar arxivi (2026-10-26, `app/raw_archive.py`) ---
+    # Guruhlardagi har bir xabar/tahrir Telegram'dan kelganicha shu papkaga yoziladi:
+    # <papka>\2026\10-Oktabr\<guruh>\2026-10-26.jsonl, fayllari "2026-10-26 fayllar" papkasida.
+    # Bo'sh = arxiv o'chiq.
+    RAW_TELEGRAM_DIR: str = ""
+    # Xabardagi fayllar (rasm, ovoz, video, hujjat) ham yuklab olinadimi (Bot API 20 MB gacha beradi)
+    RAW_TELEGRAM_FILES: bool = True
+    # Bot qayta ishga tushganda oxirgi shuncha kunning yuklanmay qolgan fayllari qayta navbatga qo'yiladi
+    RAW_RESCAN_DAYS: int = 7
+
     # --- Ovozli xabar / audio / video (ovozi) -> matn ---
     # Yoqilgan bo'lsa tasniflovchi matni yo'q ovozli xabarni OpenAI transkripsiya API'si orqali
     # matnga aylantiradi (`OPENAI_API_KEY` kerak; foydalanuvchi qarori, 2026-10-13) va shu matn
