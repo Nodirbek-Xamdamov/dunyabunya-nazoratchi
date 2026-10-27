@@ -1,0 +1,13 @@
+# Dashboard dependencies -- installed ONLY into dashboard\.venv (never into the bot's .venv).
+streamlit==1.66.0
+pandas==3.0.6
+plotly==7.1.0
+pyarrow==26.0.0
+numpy==2.5.4
+openpyxl==3.1.5
+tzdata==2026.5
+# AI assistant (CHAT_PROVIDER: openai or anthropic)
+openai==3.26.0
+anthropic==1.15.0
+# dev / tests
+pytest==9.1.1

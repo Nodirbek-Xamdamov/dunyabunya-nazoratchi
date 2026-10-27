@@ -1,0 +1,11 @@
+# W1 TG-Ingest sozlamasi (W1 o'zi boshqaradi; o'qish: load_config("w1-tg-ingest") -> cfg["app"]).
+# Sir yo'q: faqat secrets/ ichidagi fayl NOMLARI. Qaror va asoslash: CONNECTION.md (D-36, D-25 ni o'zgartiradi).
+
+[bot]
+token_secret = "w1_bot_token.txt"     # eski (mavjud) botning tokeni, bitta qator (D-36, SETUP.md §1)
+api_secret = "telegram_api.env"       # TG_API_ID, TG_API_HASH (my.telegram.org, SETUP.md §2)
+session_name = "w1_bot"               # secrets/w1_bot.session (Telethon bir marta yaratadi, keyin qayta ishlatiladi)
+db_role = "w1_ingest"
+
+# Eski botning fayllari, logi, sozlamasi va jarayoni o'qilmaydi (D-36). Eski bot ishi foydalanuvchi tomonidan
+# 8502 dashboardida tekshiriladi.

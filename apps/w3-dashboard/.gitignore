@@ -1,0 +1,10 @@
+.venv/
+.cache/
+logs/
+.env
+demo/*.db
+demo/*.db.tmp
+data/state.db
+__pycache__/
+.pytest_cache/
+data/chat_files/

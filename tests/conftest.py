@@ -40,6 +40,8 @@ os.environ["TIMEZONE"] = "Asia/Tashkent"
 os.environ["REPORTS_DIR"] = str(TEST_DIR / "_tmp_reports")
 os.environ["BACKUP_DIR"] = str(TEST_DIR / "_tmp_backups")
 os.environ["MEDIA_DIR"] = str(TEST_DIR / "_tmp_media")
+# Xom arxiv testlarda o'chiq (aks holda `.env`dagi E:\ ga yozilardi); kerakli test o'zi yoqadi
+os.environ["RAW_TELEGRAM_DIR"] = ""
 os.environ["REPORT_CHAT_ID"] = "-1009990000001"
 os.environ["REPORT_TIME"] = "00:00"
 os.environ["GROUP_MONITOR_EXCLUDED_GROUP_IDS"] = ""

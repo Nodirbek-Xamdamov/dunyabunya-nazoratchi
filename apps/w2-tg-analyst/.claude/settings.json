@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "additionalDirectories": [
+      "D:\\Demos\\odoo telegram integration\\.genesis",
+      "D:\\Demos\\odoo telegram integration\\shared"
+    ],
+    "deny": [
+      "Read(//d/Demos/odoo telegram integration/secrets/**)",
+      "Edit(//d/Demos/odoo telegram integration/secrets/**)",
+      "Read(//d/**/.env)",
+      "Edit(//d/**/.env)",
+      "Read(//d/**/.env.bak*)",
+      "Read(//d/**/*.session)",
+      "Edit(//d/**/*.session)",
+      "Read(//d/**/*.session-journal)",
+      "Read(//e/**/*.session)",
+      "Bash(*secrets/*)",
+      "Bash(*secrets\\*)",
+      "Bash(*.session*)",
+      "PowerShell(*secrets/*)",
+      "PowerShell(*secrets\\*)",
+      "PowerShell(*.session*)"
+    ]
+  }
+}

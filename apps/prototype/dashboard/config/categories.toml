@@ -1,0 +1,41 @@
+# Toifalar: tartib (hisobotdagi tartib), rang (barcha sahifa va grafiklarda bir xil) va mas'ul bo'lim.
+# Nomlar botdagi nomlar bilan AYNAN bir xil bo'lishi shart (app/monitor_db.py, CATEGORIES).
+# Mas'ul bo'limlar -- taxminiy standart qiymatlar: kompaniya tuzilishiga qarab tahrirlang.
+# O'zgartirgandan keyin dashboard'ni qayta ishga tushiring.
+
+[[category]]
+name = "Dastavka va Logistika"
+color = "#3B82F6"
+department = "Logistika bo'limi"
+
+[[category]]
+name = "Mahsulot Sifati va Nuqsonlar"
+color = "#F97316"
+department = "Sifat nazorati / ombor"
+
+[[category]]
+name = "Komplektatsiya va Hajm"
+color = "#A855F7"
+department = "Ombor (komplektatsiya)"
+
+[[category]]
+name = "Xodimlar va Xizmat Ko'rsatish"
+color = "#EC4899"
+department = "Savdo bo'limi rahbari"
+
+[[category]]
+name = "Narx va To'lovlar"
+color = "#EAB308"
+department = "Moliya / buxgalteriya"
+
+[[category]]
+name = "Qaytarish va Kafolat"
+color = "#14B8A6"
+department = "Savdo bo'limi"
+
+[[category]]
+name = "Ijobiy Fikrlar"
+color = "#22C55E"
+department = "Marketing"
+
+# Prototip (D-33, 2026-10-27): "Boshqa" yo'q -- faqat yuqoridagi 7 bo'lim.

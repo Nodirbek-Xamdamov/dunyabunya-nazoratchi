@@ -1,0 +1,10 @@
+DROP TABLE core.archive_log;
+DROP TABLE core.audit_log;
+DROP TABLE core.heartbeats;
+DROP TABLE core.jobs;
+DROP TABLE core.source_members;
+DROP TABLE core.sources;
+DROP TABLE core.people;
+DROP TABLE core.config;
+DROP FUNCTION core.touch_updated_at();
+DROP FUNCTION core.tashkent_day(timestamptz);

@@ -1,0 +1,49 @@
+# Genesis umumiy sozlamasi (W0 boshqaradi). Bu faylda sir YO'Q: parollar, tokenlar,
+# kamera manzillari faqat `secrets/` da. O'qish: shared/genesis_common (load_config).
+# Yo'llar bo'sh joyli: TOML da bitta qo'shtirnoqli (literal) satr ishlating, '\' qochirilmaydi.
+# Oynaga xos sozlama: apps/<oyna>/app.toml (oynaning o'zi yozadi) -> cfg["app"].
+# Lokal o'zgartirish (git'ga tushmaydi): config.local.toml, shu fayl ustidan yoziladi.
+
+[project]
+name = "genesis"
+root = 'D:\Demos\odoo telegram integration'   # D-18
+timezone = "Asia/Tashkent"                    # biznes kun, kun chegarasi 00:00 (P-07)
+db_timezone = "UTC"
+
+[paths]
+secrets = 'D:\Demos\odoo telegram integration\secrets'
+logs = 'D:\Demos\odoo telegram integration\var\logs'
+data_root = 'E:\data'                         # D-18: media va video, 2 TB HDD
+media = 'E:\data\media'                       # yil/oy/guruh/ (D-13)
+camera_video = 'E:\data\video'                # video bo'laklari, aylanma bufer (D-12); W4-02 [CONTRACT]: <kamera>\<kun>\
+tmp = 'E:\data\tmp'
+backup = 'F:\genesis\backup'                  # D-18: kunlik pg_dump (W0-03 yaratadi)
+archive = 'G:\genesis\archive'                # D-18: oylik arxiv (W0-04 yaratadi)
+
+[postgres]
+host = "127.0.0.1"                            # faqat localhost (D-21)
+port = 5433                                   # D-21; eski PostgreSQL 17 = 5432, unga tegilmaydi
+database = "genesis"
+data_dir = 'E:\pgdata'                        # D-18, D-21
+wal_dir = 'D:\pgwal'                          # D-22: E:\pgdata\pg_wal is a junction to it
+bin_dir = 'C:\Program Files\PostgreSQL\17\bin'   # mavjud PG17 dasturi, ikkinchi versiya o'rnatilmagan
+service = "genesis-postgresql"
+# Rol parollari: secrets/postgres.env, psql/pg_dump uchun secrets/pgpass.conf (apps/w0-core/pg/pgsecrets.py yozadi)
+
+[gpu]
+# Ish vaqtida manba: core.config gpu.* (W0-06; gate har siklda o'qiydi, o'zgartirish: python -m genesis_gpu mode ...).
+# Bu yerdagi qiymatlar faqat ma'lumot uchun / yangi bazaga boshlang'ich.
+mode = "timeslice"                            # D-30 standart; zaxira: "coresident" (D-14); "dedicated" ikkinchi GPU bilan
+llm_runtime = "ollama"                        # D-14
+ollama_url = "http://127.0.0.1:11434"
+llm_model = "gemma4:12b"
+llm_window = "10:00-22:00"                    # D-30: Telegram (Gemma)
+vision_window = "22:00-10:00"                 # D-30: kamera (YOLO); bo'sh bo'lsa GPU Gemma ga qaytadi (vision_idle_to_llm)
+switch_guard_minutes = 15
+
+[logging]
+level = "INFO"
+format = "json"                               # JSON qatorlar (STACK: Ko'rinish)
+rotate = "midnight"
+keep_days = 30
+console = true
