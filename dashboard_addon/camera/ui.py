@@ -1,5 +1,5 @@
-"""Streamlit pieces shared by the «Yangi kamera» pages: error guard, header, source picker, the day
-table, the hour table and the day timeline."""
+"""Streamlit pieces shared by the «Yangi kamera» pages: error guard, header, source picker, the day table
+(keldi, ketdi, tashqarida), the outings of one employee and their 5-second videos."""
 
 from __future__ import annotations
 
@@ -10,20 +10,18 @@ import time
 from datetime import date, datetime, timedelta, tzinfo
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
 from camera import report, store
 from camera.texts import ct
 from core.settings import load_settings
 from ui import components as c
-from ui import theme
 
 log = logging.getLogger("dashboard.camera")
 
-SEG_COLORS = {"seg.sitting": theme.POSITIVE, "seg.break": theme.NEUTRAL, "seg.prayer": "#A855F7",
-              "seg.no_data": theme.COMPLAINT}
 HEARTBEAT_OK_S = 60
+CLIP_MATCH_S = 2.0  # a video belongs to an arrival/departure when its time is this close
+VIDEO_COLUMNS = 3
 
 
 def guard(render):
@@ -104,104 +102,82 @@ def desk_states(status: dict, now: float) -> dict[int, str]:
     return result
 
 
-def day_table(rows: list[report.EmployeeDay], zone: tzinfo, states: dict[int, str] | None,
-              with_required: bool = True) -> pd.DataFrame:
-    """with_required=False for a test clip: it covers only part of a day, so "required" makes no sense."""
+def left_text(row: report.EmployeeDay, zone: tzinfo) -> str:
+    if row.first is None:
+        return "—"
+    return ct("still_in") if row.still_in else report.clock(row.last, zone)
+
+
+def day_table(rows: list[report.EmployeeDay], zone: tzinfo, states: dict[int, str] | None) -> pd.DataFrame:
     data = []
     for row in rows:
         item = {
             ct("col.employee"): row.employee,
-            ct("col.desk"): row.desk or "—",
             ct("col.first"): report.clock(row.first, zone),
-            ct("col.last"): report.clock(row.last, zone),
-            ct("col.sat"): report.hhmm(row.sat_s),
-            ct("col.prayer"): report.hhmm(row.prayer_s) if row.prayer_s else "—",
-            ct("col.work"): report.hhmm(row.work_s),
-            ct("col.required"): report.hhmm(row.required_s) if row.required_s else "—",
-            ct("col.diff"): report.hhmm(row.diff_s, signed=True) if row.required_s else "—",
-            ct("col.breaks"): row.break_count,
-            ct("col.longest"): report.hhmm(row.longest_s),
-            ct("col.no_data"): report.hhmm(row.no_data_s) if row.no_data_s >= 60 else "—",
+            ct("col.last"): left_text(row, zone),
+            ct("col.outside"): report.hhmm(row.outside_s) if row.first is not None else "—",
+            ct("col.out_count"): len(row.outings),
         }
-        if not with_required:
-            del item[ct("col.required")], item[ct("col.diff")]
         if states is not None:
             item[ct("col.state")] = states.get(row.employee_id, ct("state.off"))
         data.append(item)
     return pd.DataFrame(data)
 
 
-def hours_table(rows: list[report.EmployeeDay], first_hour: int, last_hour: int) -> tuple[pd.DataFrame, dict]:
-    hours = list(range(first_hour, last_hour + 1))
+def outings_table(rows: list[report.EmployeeDay], zone: tzinfo, with_employee: bool = True) -> pd.DataFrame:
     data = []
     for row in rows:
-        item = {ct("col.employee"): row.employee}
-        for hour in hours:
-            item[f"{hour:02d}"] = int(round(row.hours.get(hour, 0)))
-        item[ct("col.sat")] = report.hhmm(row.sat_s)
-        data.append(item)
-    config = {f"{hour:02d}": st.column_config.ProgressColumn(f"{hour:02d}", min_value=0, max_value=60, format="%d")
-              for hour in hours}
-    return pd.DataFrame(data), config
+        for number, outing in enumerate(row.outings, start=1):
+            item = {ct("col.employee"): row.employee} if with_employee else {}
+            item.update({
+                ct("col.number"): number,
+                ct("col.left"): report.clock(outing.left, zone, seconds=True),
+                ct("col.back"): report.clock(outing.back, zone, seconds=True),
+                ct("col.outside"): report.hhmm(outing.outside_s),
+                ct("col.note"): ct("note.no_data", time=report.hhmm(outing.no_data_s)) if outing.no_data_s >= 60 else "",
+            })
+            data.append(item)
+    return pd.DataFrame(data)
 
 
-def timeline(rows: list[report.EmployeeDay], gaps: list[tuple[float, float]], day: date, zone: tzinfo,
-             window: tuple[float, float] | None, now: float):
-    items = []
+def moments(row: report.EmployeeDay) -> list[tuple[str, str, float]]:
+    """(label key, video kind, time) of the day in order: came, every outing (left, back), went home."""
+    if row.first is None:
+        return []
+    items = [("moment.first", "in", row.first)]
+    for outing in row.outings:
+        items += [("moment.left", "out", outing.left), ("moment.back", "in", outing.back)]
+    if not row.still_in:
+        items.append(("moment.last", "out", row.last))
+    return items
 
-    def add(name: str, start: float, end: float, kind: str) -> None:
-        items.append({"who": name, "start": datetime.fromtimestamp(start, zone), "end": datetime.fromtimestamp(end, zone),
-                      "kind": ct(kind)})
 
-    for row in rows:
-        for s, e in row.segments:
-            add(row.employee, s, e, "seg.sitting")
-        for s, e in row.breaks:
-            add(row.employee, s, e, "seg.break")
-        for s, e, _name in row.prayers:
-            add(row.employee, s, e, "seg.prayer")
-        for s, e in gaps:
-            add(row.employee, s, e, "seg.no_data")
-    if not items:
+def find_clip(clips: pd.DataFrame, employee_id: int, kind: str, ts: float) -> str | None:
+    if clips.empty:
         return None
-    frame = pd.DataFrame(items)
-    order = [row.employee for row in rows]
-    fig = px.timeline(frame, x_start="start", x_end="end", y="who", color="kind",
-                      color_discrete_map={ct(k): v for k, v in SEG_COLORS.items()},
-                      category_orders={"who": order, "kind": [ct(k) for k in SEG_COLORS]})
-    day_start, _day_end = report.day_bounds(day, zone)
-    starts = [x.timestamp() for x in frame["start"]] + ([window[0]] if window else [])
-    ends = [x.timestamp() for x in frame["end"]] + ([window[1]] if window else [])
-    left = max(day_start, min(starts) - 1800)
-    right = min(day_start + 86400, max(ends) + 1800)
-    if window:
-        fig.add_vrect(x0=datetime.fromtimestamp(window[0], zone), x1=datetime.fromtimestamp(window[1], zone),
-                      fillcolor=theme.BRAND, opacity=0.06, line_width=0, layer="below")
-    if day_start <= now <= day_start + 86400:
-        fig.add_vline(x=datetime.fromtimestamp(now, zone), line_dash="dot", line_color=theme.NEUTRAL)
-    fig.update_yaxes(title=None, categoryorder="array", categoryarray=list(reversed(order)))  # first row on top
-    fig.update_xaxes(title=None, range=[datetime.fromtimestamp(left, zone), datetime.fromtimestamp(right, zone)],
-                     tickformat="%H:%M")
-    fig.update_traces(hovertemplate="%{y}<br>%{base|%H:%M} – %{x|%H:%M}<extra></extra>")
-    fig.update_layout(template=theme.TEMPLATE_NAME, height=110 + 46 * len(order), barmode="overlay",
-                      legend_title_text="", bargap=0.35)
-    return fig
+    near = clips[(clips["employee_id"] == employee_id) & (clips["kind"] == kind) & ((clips["event_ts"] - ts).abs()
+                                                                                     <= CLIP_MATCH_S)]
+    return None if near.empty else str(near.iloc[0]["path"])
 
 
-def intervals_table(frame: pd.DataFrame, zone: tzinfo) -> pd.DataFrame:
-    if frame.empty:
-        return pd.DataFrame()
-    reasons = {"away": ct("reason.away"), "no_data": ct("reason.no_data"), "stopped": ct("reason.stopped")}
-    return pd.DataFrame({
-        ct("col.date"): [datetime.fromtimestamp(s, zone).strftime("%Y-%m-%d") for s in frame["start_ts"]],
-        ct("col.employee"): frame["employee"].fillna("—"),
-        ct("col.desk"): frame["desk"],
-        ct("col.start"): [datetime.fromtimestamp(s, zone).strftime("%H:%M:%S") for s in frame["start_ts"]],
-        ct("col.end"): [datetime.fromtimestamp(e, zone).strftime("%H:%M:%S") for e in frame["end_ts"]],
-        ct("col.duration"): [report.hhmm(e - s) for s, e in zip(frame["start_ts"], frame["end_ts"])],
-        ct("col.reason"): [ct("reason.open") if is_open else reasons.get(r, r or "—")
-                           for r, is_open in zip(frame["close_reason"], frame["open"])],
-    })
+def show_clips(row: report.EmployeeDay, clips: pd.DataFrame, zone: tzinfo) -> None:
+    items = moments(row)
+    if not items:
+        st.caption(ct("today.empty"))
+        return
+    for start in range(0, len(items), VIDEO_COLUMNS):
+        cols = st.columns(VIDEO_COLUMNS)
+        for col, (label, kind, ts) in zip(cols, items[start:start + VIDEO_COLUMNS]):
+            with col:
+                st.markdown(f"**{ct(label)}** · {report.clock(ts, zone, seconds=True)}")
+                relative = find_clip(clips, row.employee_id, kind, ts)
+                path = store.clip_file(relative) if relative else None
+                if path is None:
+                    st.caption(ct("clip.none"))
+                elif path.suffix == ".jpg":
+                    st.image(path.read_bytes(), width="stretch")
+                else:
+                    st.video(path.read_bytes(), format="video/mp4")
 
 
 def now_ts() -> float:

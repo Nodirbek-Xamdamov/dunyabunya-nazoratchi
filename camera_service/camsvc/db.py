@@ -1,8 +1,10 @@
 """Camera database: SQLite in WAL mode, camera_service/data/camera.db, every table starts with cam_.
 
-Writers: the camera service (intervals, coverage, status, events) and the dashboard's "Yangi kamera"
+Writers: the camera service (intervals, coverage, status, events, 5-second videos) and the dashboard's "Yangi kamera"
 pages (employees, desks, settings). Times are UTC epoch seconds; the dashboard shows Asia/Tashkent.
 Desk zones are stored as fractions of the frame (0..1), so they fit both camera streams.
+An employee is known only through their desk (cam_desks.employee_id): every interval and video carries that
+fixed employee id. The tracker's per-frame person IDs are never stored.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from camsvc.config import SERVICE_DIR
 
 # CAMERA_DB_PATH points the service and tools at another file (tests, trial runs)
 DB_PATH = Path(os.environ.get("CAMERA_DB_PATH") or SERVICE_DIR / "data" / "camera.db")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cam_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -73,6 +75,18 @@ CREATE TABLE IF NOT EXISTS cam_events (
     message TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS cam_events_ts ON cam_events(ts);
+CREATE TABLE IF NOT EXISTS cam_clips (
+    id INTEGER PRIMARY KEY,
+    source TEXT NOT NULL DEFAULT 'live',
+    desk_id INTEGER,
+    employee_id INTEGER,
+    interval_id INTEGER,
+    kind TEXT NOT NULL,                             -- in (arrived at the desk) | out (left it)
+    event_ts REAL NOT NULL,                         -- interval start (in) or end (out)
+    path TEXT NOT NULL,                             -- relative to data/clips, forward slashes
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cam_clips_ts ON cam_clips(source, event_ts);
 """
 
 DEFAULT_SETTINGS = {
@@ -89,10 +103,7 @@ DEFAULT_SETTINGS = {
     "gap_s": 60.0,
     "stall_s": 30.0,
     "timezone": "Asia/Tashkent",
-    "prayer_credit": True,
-    "prayer_window_min": 30,       # absence that starts within this many minutes after a prayer time
-    "prayer_max_min": 20,          # credited at most this long per prayer
-    "prayer_offset_min": 0,
+    "clip_keep_days": 30,          # 5-second arrival/departure videos are deleted after this many days
 }
 
 
@@ -113,7 +124,8 @@ def connect(path: Path = DB_PATH, *, readonly: bool = False) -> sqlite3.Connecti
 def init(conn: sqlite3.Connection) -> None:
     with conn:
         conn.executescript(SCHEMA)
-        conn.execute("INSERT OR IGNORE INTO cam_meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        conn.execute("INSERT INTO cam_meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE"
+                     " SET value = excluded.value", (str(SCHEMA_VERSION),))
         now = time.time()
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO cam_settings(key, value, updated_at) VALUES (?, ?, ?)",
@@ -203,3 +215,12 @@ def add_coverage(conn: sqlite3.Connection, source: str, minute_ts: int, expected
                      " camera_frames = camera_frames + excluded.camera_frames,"
                      " connected_s = connected_s + excluded.connected_s",
                      (source, minute_ts, expected, processed, camera, connected_s))
+
+
+def add_clip(conn: sqlite3.Connection, source: str, desk_id: int, employee_id: int | None, interval_id: int | None,
+             kind: str, event_ts: float, path: str) -> int:
+    with conn:
+        cur = conn.execute("INSERT INTO cam_clips(source, desk_id, employee_id, interval_id, kind, event_ts, path,"
+                           " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                           (source, desk_id, employee_id, interval_id, kind, event_ts, path, time.time()))
+    return int(cur.lastrowid)

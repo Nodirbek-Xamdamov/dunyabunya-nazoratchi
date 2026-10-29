@@ -1,9 +1,12 @@
-"""Access to the camera service's database (SQLite, WAL) and its newest frame.
+"""Access to the camera service's database (SQLite, WAL), its newest frame and the 5-second videos.
 
 The file is made by the camera service (camera_service\\tools\\init_db.py); the dashboard never creates it.
 Reads open it read-only; edits of employees, desks and settings use short write transactions, and the
-service picks them up within about 10 seconds. Paths: CAMERA_DB_PATH / CAMERA_LIVE_DIR in dashboard\\.env,
-or DASHBOARD_CAMERA_DB_PATH / DASHBOARD_CAMERA_LIVE_DIR in the environment (tests)."""
+service picks them up within about 10 seconds. Paths: CAMERA_DB_PATH / CAMERA_LIVE_DIR / CAMERA_CLIPS_DIR in
+dashboard\\.env, or the same names with DASHBOARD_ in front in the environment (tests). The videos lie next to the
+database (clips\\) unless CAMERA_CLIPS_DIR says otherwise.
+One employee is one row of cam_employees with one fixed id, and sits at one desk: save_desk refuses to give
+an employee a second desk."""
 
 from __future__ import annotations
 
@@ -21,25 +24,30 @@ from core.settings import ENV_FILE, parse_env_file
 
 DEFAULT_DATA_DIR = Path(r"D:\Demos\Kamera\camera_service\data")
 SETTING_KEYS = ("target_fps", "channel", "model", "imgsz", "desk_conf", "anchor", "roi_margin", "sit_window_s",
-                "sit_ratio", "away_grace_s", "gap_s", "stall_s", "timezone", "prayer_credit", "prayer_window_min",
-                "prayer_max_min", "prayer_offset_min")
+                "sit_ratio", "away_grace_s", "gap_s", "stall_s", "timezone", "clip_keep_days")
 
 
 class CameraDbMissing(Exception):
     pass
 
 
+class EmployeeTaken(Exception):
+    """The employee already sits at another desk (the name of that desk)."""
+
+
 @dataclass(frozen=True)
 class Paths:
     db: Path
     live: Path
+    clips: Path
 
 
 def paths() -> Paths:
     values = parse_env_file(ENV_FILE)
     db = os.environ.get("DASHBOARD_CAMERA_DB_PATH") or values.get("CAMERA_DB_PATH") or DEFAULT_DATA_DIR / "camera.db"
     live = os.environ.get("DASHBOARD_CAMERA_LIVE_DIR") or values.get("CAMERA_LIVE_DIR") or DEFAULT_DATA_DIR / "live"
-    return Paths(Path(db), Path(live))
+    clips = os.environ.get("DASHBOARD_CAMERA_CLIPS_DIR") or values.get("CAMERA_CLIPS_DIR") or Path(db).parent / "clips"
+    return Paths(Path(db), Path(live), Path(clips))
 
 
 def _connect(write: bool = False) -> sqlite3.Connection:
@@ -100,6 +108,28 @@ def coverage(start_ts: float, end_ts: float, source: str = "live") -> pd.DataFra
            " WHERE source = ? AND minute_ts >= ? AND minute_ts < ? ORDER BY minute_ts")
     with closing(_connect()) as conn:
         return pd.read_sql_query(sql, conn, params=(source, int(start_ts // 60 * 60), end_ts))
+
+
+def clips(start_ts: float, end_ts: float, source: str = "live") -> pd.DataFrame:
+    """5-second videos (kind in = arrived at the desk, out = left it) with event_ts in [start_ts, end_ts)."""
+    sql = ("SELECT employee_id, kind, event_ts, path FROM cam_clips WHERE source = ? AND event_ts >= ? AND event_ts < ?"
+           " ORDER BY event_ts")
+    with closing(_connect()) as conn:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cam_clips'").fetchone() is None:
+            return pd.DataFrame(columns=["employee_id", "kind", "event_ts", "path"])  # made before the videos existed
+        return pd.read_sql_query(sql, conn, params=(source, start_ts, end_ts))
+
+
+def clip_file(relative: str) -> Path | None:
+    """The video file (or the single .jpg frame written when ffmpeg could not make one), only inside the clips folder."""
+    base = paths().clips.resolve()
+    path = (base / relative).resolve()
+    if base not in path.parents:
+        return None
+    for candidate in (path, path.with_suffix(".jpg")):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def status() -> dict:
@@ -164,6 +194,11 @@ def save_desk(desk_id: int | None, name: str, employee_id: int | None, zone: lis
     now = time.time()
     zone_json = json.dumps([[round(x, 4), round(y, 4)] for x, y in zone])
     with closing(_connect(write=True)) as conn, conn:
+        if employee_id is not None:
+            other = conn.execute("SELECT name FROM cam_desks WHERE active = 1 AND employee_id = ? AND id IS NOT ?",
+                                 (employee_id, desk_id)).fetchone()
+            if other is not None:
+                raise EmployeeTaken(other["name"])
         if desk_id is None:
             sort = conn.execute("SELECT COALESCE(MAX(sort), 0) + 1 FROM cam_desks").fetchone()[0]
             cur = conn.execute("INSERT INTO cam_desks(name, employee_id, zone, sort, active, updated_at)"

@@ -1,14 +1,15 @@
 """Day numbers for each employee from the camera intervals (pure functions, no Streamlit).
 
 Definitions:
-- O'tirgan: union of the employee's desk intervals inside the day. The camera service already keeps
-  absences shorter than the "turdi" wait (10 minutes) inside an interval.
-- Tanaffus: a gap between two intervals of the same day, minus the time without data (an outage
-  between two intervals is not a break). A gap counts as a break when at least a minute of it had data.
-- Namoz: the part of a break that falls into [prayer time, + prayer_window_min], at most prayer_max_min
-  per prayer, only between arrival and the last time the person was seen. It is added to the work time.
+- Keldi: start of the employee's first desk interval of the day. Ketdi: end of the last one; while that
+  interval is still open the person is in the room ("hali xonada").
+- Chiqish (outing): the gap between two intervals of the same day. The camera service already keeps
+  absences shorter than the "turdi" wait inside an interval, so they are not outings.
+- Tashqarida: length of the outings minus the time without data (an outage between two intervals is not
+  time outside). A gap counts as an outing when at least a minute of it had data.
 - Ma'lumot yo'q: minutes of the working hours in which the service analysed fewer than half of the frames
-  it should have (camera or service down); such time is neither present nor absent.
+  it should have (camera or service down); such time is neither in nor out.
+The employee is the one fixed to the desk (cam_desks.employee_id); camera tracker IDs play no part here.
 """
 
 from __future__ import annotations
@@ -18,9 +19,15 @@ from datetime import date, datetime, time, timedelta, tzinfo
 
 import pandas as pd
 
-from camera import prayer
-
 OK_SHARE = 0.5  # a minute counts as covered when at least half of the expected frames were analysed
+
+
+@dataclass(frozen=True)
+class Outing:
+    left: float  # chiqdi
+    back: float  # qaytdi
+    outside_s: float  # without the minutes that had no data
+    no_data_s: float
 
 
 @dataclass
@@ -30,23 +37,9 @@ class EmployeeDay:
     desk: str
     day: date
     segments: list[tuple[float, float]] = field(default_factory=list)
-    breaks: list[tuple[float, float]] = field(default_factory=list)
-    prayers: list[tuple[float, float, str]] = field(default_factory=list)
-    break_count: int = 0
-    sat_s: float = 0.0
-    prayer_s: float = 0.0
-    longest_s: float = 0.0
-    required_s: float = 0.0
+    outings: list[Outing] = field(default_factory=list)
+    still_in: bool = False  # the last interval is still open
     no_data_s: float = 0.0
-    hours: dict[int, float] = field(default_factory=dict)  # local hour -> minutes sat
-
-    @property
-    def work_s(self) -> float:
-        return self.sat_s + self.prayer_s
-
-    @property
-    def diff_s(self) -> float:
-        return self.work_s - self.required_s
 
     @property
     def first(self) -> float | None:
@@ -55,6 +48,10 @@ class EmployeeDay:
     @property
     def last(self) -> float | None:
         return self.segments[-1][1] if self.segments else None
+
+    @property
+    def outside_s(self) -> float:
+        return sum(o.outside_s for o in self.outings)
 
 
 def day_bounds(day: date, tz: tzinfo) -> tuple[float, float]:
@@ -97,19 +94,6 @@ def subtract(span: tuple[float, float], holes: list[tuple[float, float]]) -> lis
     return pieces
 
 
-def hour_minutes(segments: list[tuple[float, float]], tz: tzinfo) -> dict[int, float]:
-    result: dict[int, float] = {}
-    for start, end in segments:
-        cursor = start
-        while cursor < end:
-            local = datetime.fromtimestamp(cursor, tz)
-            hour_end = (local.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)).timestamp()
-            piece = min(end, hour_end) - cursor
-            result[local.hour] = result.get(local.hour, 0.0) + piece / 60
-            cursor += piece
-    return result
-
-
 def is_workday(employee: dict, day: date) -> bool:
     days = {int(x) for x in str(employee.get("workdays") or "").split(",") if x.strip().isdigit()}
     return day.isoweekday() in days
@@ -150,49 +134,28 @@ def work_window(employees: list[dict], day: date, tz: tzinfo) -> tuple[float, fl
     return min(s for s, _ in spans), max(e for _, e in spans)
 
 
-def employee_day(employee: dict, rows: pd.DataFrame, day: date, tz: tzinfo, settings: dict,
+def employee_day(employee: dict, rows: pd.DataFrame, day: date, tz: tzinfo,
                  gaps: list[tuple[float, float]]) -> EmployeeDay:
     day_start, day_end = day_bounds(day, tz)
     clipped = [(max(s, day_start), min(e, day_end)) for s, e in zip(rows["start_ts"], rows["end_ts"])]
     segments = merge(clipped)
     desks = sorted({str(d) for d in rows["desk"].dropna()}) if len(rows) else []
     result = EmployeeDay(employee["id"], employee["name"], ", ".join(desks), day, segments)
-    result.sat_s = sum(e - s for s, e in segments)
-    result.longest_s = max((e - s for s, e in segments), default=0.0)
     for i in range(len(segments) - 1):
-        pieces = subtract((segments[i][1], segments[i + 1][0]), gaps)
-        result.breaks += pieces
-        result.break_count += int(sum(e - s for s, e in pieces) >= 60)
-    result.hours = hour_minutes(segments, tz)
-    if is_workday(employee, day):
-        result.required_s = float(employee.get("required_minutes") or 0) * 60
+        left, back = segments[i][1], segments[i + 1][0]
+        outside = sum(e - s for s, e in subtract((left, back), gaps))
+        if outside >= 60:
+            result.outings.append(Outing(left, back, outside, (back - left) - outside))
+    if segments and "open" in rows and len(rows):
+        open_ends = rows.loc[rows["open"].astype(bool), "end_ts"]
+        result.still_in = any(min(e, day_end) >= segments[-1][1] for e in open_ends)
     work = (at(day, employee["work_start"], tz), at(day, employee["work_end"], tz))
     result.no_data_s = sum(overlap(g, work) for g in gaps)
-    if settings.get("prayer_credit", True) and result.breaks:
-        window_s = float(settings.get("prayer_window_min", 30)) * 60
-        cap_s = float(settings.get("prayer_max_min", 20)) * 60
-        times = prayer.times_for(day, tz, float(settings.get("prayer_offset_min", 0)))
-        for name in prayer.WORK_PRAYERS:
-            moment = times[name].timestamp()
-            window = (moment, moment + window_s)
-            if window[0] > result.last or window[1] < result.first:
-                continue
-            credit = 0.0
-            for gap in result.breaks:
-                piece = overlap(gap, window)
-                if piece <= 0 or credit >= cap_s:
-                    continue
-                take = min(piece, cap_s - credit)
-                begin = max(gap[0], window[0])
-                result.prayers.append((begin, begin + take, name))
-                credit += take
-            result.prayer_s += credit
     return result
 
 
 def day_report(employees: list[dict], intervals: pd.DataFrame, cov: pd.DataFrame, day: date, tz: tzinfo,
-               settings: dict, now_ts: float, clip: bool = False) -> tuple[list[EmployeeDay], list[tuple[float, float]],
-                                                                         float | None]:
+               now_ts: float, clip: bool = False) -> tuple[list[EmployeeDay], list[tuple[float, float]], float | None]:
     """Rows for every active employee (and anyone with intervals that day), the no-data periods inside the
     working hours, and the share of the working hours that had data."""
     if clip:  # a test clip: the window is the part of the day the clip covers
@@ -207,18 +170,17 @@ def day_report(employees: list[dict], intervals: pd.DataFrame, cov: pd.DataFrame
     for emp_id in intervals["employee_id"].dropna().astype(int).unique() if len(intervals) else []:
         if emp_id in known and known[emp_id] not in shown:
             shown.append(known[emp_id])
-    rows = [employee_day(e, intervals[intervals["employee_id"] == e["id"]], day, tz, settings, gaps) for e in shown]
+    rows = [employee_day(e, intervals[intervals["employee_id"] == e["id"]], day, tz, gaps) for e in shown]
     return rows, gaps, share
 
 
-def hhmm(seconds: float | None, signed: bool = False) -> str:
+def hhmm(seconds: float | None) -> str:
     """Duration as H:MM (the way people say working hours)."""
     if seconds is None:
         return "—"
-    sign = "-" if seconds < 0 else ("+" if signed and seconds > 0 else "")
     minutes = int(round(abs(seconds) / 60))
-    return f"{sign}{minutes // 60}:{minutes % 60:02d}"
+    return f"{'-' if seconds < 0 else ''}{minutes // 60}:{minutes % 60:02d}"
 
 
-def clock(ts: float | None, tz: tzinfo) -> str:
-    return datetime.fromtimestamp(ts, tz).strftime("%H:%M") if ts else "—"
+def clock(ts: float | None, tz: tzinfo, seconds: bool = False) -> str:
+    return datetime.fromtimestamp(ts, tz).strftime("%H:%M:%S" if seconds else "%H:%M") if ts else "—"

@@ -1,5 +1,6 @@
-"""«Yangi kamera»: day numbers, prayer times, zone drawing, Excel, the installer, and every camera page on a
-temporary camera database (the real camera_service\\data\\camera.db is never opened)."""
+"""«Yangi kamera»: day numbers (keldi, ketdi, tashqarida), the 5-second videos, one employee - one desk, zone
+drawing, Excel, the installer, and every camera page on a temporary camera database (the real
+camera_service\\data\\camera.db is never opened)."""
 
 from __future__ import annotations
 
@@ -35,11 +36,12 @@ CREATE TABLE cam_coverage (source TEXT NOT NULL DEFAULT 'live', minute_ts INTEGE
 CREATE TABLE cam_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL NOT NULL);
 CREATE TABLE cam_status (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL NOT NULL);
 CREATE TABLE cam_events (id INTEGER PRIMARY KEY, ts REAL NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL);
+CREATE TABLE cam_clips (id INTEGER PRIMARY KEY, source TEXT NOT NULL DEFAULT 'live', desk_id INTEGER, employee_id INTEGER,
+    interval_id INTEGER, kind TEXT NOT NULL, event_ts REAL NOT NULL, path TEXT NOT NULL, created_at REAL NOT NULL);
 """
 SETTINGS = {"target_fps": 5.0, "channel": 101, "model": "yolo26m.pt", "imgsz": 640, "desk_conf": 0.35, "anchor": "upper",
             "roi_margin": 0.25, "sit_window_s": 10.0, "sit_ratio": 0.7, "away_grace_s": 600.0, "gap_s": 60.0,
-            "stall_s": 30.0, "timezone": "Asia/Tashkent", "prayer_credit": True, "prayer_window_min": 30,
-            "prayer_max_min": 20, "prayer_offset_min": 0}
+            "stall_s": 30.0, "timezone": "Asia/Tashkent", "clip_keep_days": 30}
 INSTALLER = Path(r"D:\Demos\Kamera\dashboard_addon\install.py")
 
 
@@ -64,12 +66,6 @@ def ts(hhmm: str, day: date = DAY) -> float:
     return datetime.combine(day, time(hours, minutes), tzinfo=tz()).timestamp()
 
 
-def peshin(day: date = DAY) -> float:
-    from camera import prayer
-
-    return prayer.times_for(day, tz())["peshin"].timestamp()
-
-
 @pytest.fixture()
 def camera_db(tmp_path):
     path = tmp_path / "camera.db"
@@ -85,9 +81,8 @@ def camera_db(tmp_path):
         zone = json.dumps([[0.1 * i, 0.5], [0.1 * i + 0.08, 0.5], [0.1 * i + 0.08, 0.9], [0.1 * i, 0.9]])
         conn.execute("INSERT INTO cam_desks(id, name, employee_id, zone, sort, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                      (i, desk, i, zone, i, now))
-    p = peshin()
     rows = [  # desk, start, end, reason
-        (1, ts("09:05"), p - 120, "away"), (1, p + 1080, ts("18:55"), "away"),  # 20 min out around Peshin
+        (1, ts("09:05"), ts("12:10"), "away"), (1, ts("12:30"), ts("18:55"), "away"),  # 20 min outside
         (2, ts("09:30"), ts("14:00"), "no_data"), (2, ts("14:30"), ts("19:00"), "away"),  # camera down 14:00-14:30
     ]
     for desk, start, end, reason in rows:
@@ -103,6 +98,13 @@ def camera_db(tmp_path):
                  (json.dumps([{"desk_id": 1, "desk": "Uzoq stol", "employee": "Nodir", "state": "sitting", "since": now - 60}]),
                   now))
     conn.execute("INSERT INTO cam_events(ts, kind, message) VALUES (?, 'started', 'xizmat ishga tushdi')", (now,))
+    clips = tmp_path / "clips"
+    for kind, moment in (("in", "09:05"), ("out", "12:10"), ("in", "12:30")):  # no video for 18:55
+        rel = f"live/{DAY.isoformat()}/1_{moment.replace(':', '-')}-00_{kind}.mp4"
+        (clips / rel).parent.mkdir(parents=True, exist_ok=True)
+        (clips / rel).write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        conn.execute("INSERT INTO cam_clips(source, desk_id, employee_id, interval_id, kind, event_ts, path, created_at)"
+                     " VALUES ('live', 1, 1, 1, ?, ?, ?, ?)", (kind, ts(moment), rel, now))
     conn.commit()
     conn.close()
     (live / "latest.jpg").write_bytes(jpeg())
@@ -123,56 +125,60 @@ def test_day_report_numbers(camera_db):
 
     start, end = report.day_bounds(DAY, tz())
     rows, gaps, share = report.day_report(store.employees(), store.intervals(start, end), store.coverage(start, end),
-                                          DAY, tz(), store.settings(), now_ts=end + 3600)
+                                          DAY, tz(), now_ts=end + 3600)
     by_name = {r.employee: r for r in rows}
     nodir, husniddin, absent = by_name["Nodir"], by_name["Husniddin"], by_name["Muhammadumar"]
-    p = peshin()
-    assert nodir.break_count == 1
-    assert round(nodir.prayer_s / 60) == 18  # break from Peshin-2 to Peshin+18 -> 18 minutes inside the window
-    assert round(nodir.sat_s) == round((p - 120 - ts("09:05")) + (ts("18:55") - p - 1080))
-    assert nodir.required_s == 600 * 60 and nodir.diff_s == nodir.work_s - nodir.required_s
-    assert husniddin.break_count == 0 and husniddin.breaks == []  # the outage is not a break
-    assert round(husniddin.no_data_s / 60) == 30 and round(husniddin.sat_s / 3600, 2) == 9.0
-    assert absent.sat_s == 0 and absent.first is None
+    assert (nodir.first, nodir.last, nodir.still_in) == (ts("09:05"), ts("18:55"), False)
+    assert [(o.left, o.back, o.outside_s) for o in nodir.outings] == [(ts("12:10"), ts("12:30"), 1200.0)]
+    assert nodir.outside_s == 1200.0
+    assert husniddin.outings == [] and husniddin.outside_s == 0  # the camera outage is not time outside
+    assert round(husniddin.no_data_s / 60) == 30 and husniddin.last == ts("19:00")
+    assert absent.first is None and absent.outings == []
     assert gaps == [(ts("14:00"), ts("14:30"))]
     assert 0.94 < share < 0.96  # 30 of 600 minutes without data
-    assert round(sum(nodir.hours.values())) == round(nodir.sat_s / 60)
 
 
-def test_prayer_credit_is_capped_and_only_inside_the_window():
+def test_outing_partly_without_data_and_open_interval():
     from camera import report
 
-    p = peshin()
-    rows = pd.DataFrame({"start_ts": [ts("09:00"), p + 3600], "end_ts": [p - 600, ts("19:00")], "desk": ["A", "A"]})
-    employee = {"id": 1, "name": "X", "work_start": "09:00", "work_end": "19:00", "required_minutes": 600,
-                "workdays": "1,2,3,4,5,6"}
-    day = report.employee_day(employee, rows, DAY, tz(), SETTINGS, [])
-    assert round(day.prayer_s / 60) == 20  # 70-minute break: 30-minute window, capped at 20
-    no_credit = report.employee_day(employee, rows, DAY, tz(), {**SETTINGS, "prayer_credit": False}, [])
-    assert no_credit.prayer_s == 0
+    rows = pd.DataFrame({"start_ts": [ts("09:00"), ts("11:00")], "end_ts": [ts("10:00"), ts("12:00")], "desk": ["A", "A"],
+                         "open": [False, True]})
+    employee = {"id": 1, "name": "X", "work_start": "09:00", "work_end": "19:00", "workdays": "1,2,3,4,5,6"}
+    day = report.employee_day(employee, rows, DAY, tz(), [(ts("10:30"), ts("10:45"))])
+    assert [(o.outside_s, o.no_data_s) for o in day.outings] == [(2700.0, 900.0)]
+    assert day.still_in  # the last interval is still open: "hali xonada"
 
 
-def test_hours_and_merge_helpers():
+def test_merge_helpers_and_formatting():
     from camera import report
 
     assert report.merge([(5, 7), (1, 3), (2, 4)]) == [(1, 4), (5, 7)]
     assert report.subtract((0, 10), [(2, 3), (5, 12)]) == [(0, 2), (3, 5)]
-    minutes = report.hour_minutes([(ts("09:30"), ts("11:15"))], tz())
-    assert {h: round(m) for h, m in minutes.items()} == {9: 30, 10: 60, 11: 15}
-    assert report.hhmm(5400) == "1:30" and report.hhmm(-600, signed=True) == "-0:10" and report.hhmm(60, True) == "+0:01"
+    assert report.hhmm(5400) == "1:30" and report.hhmm(-600) == "-0:10" and report.hhmm(None) == "—"
+    assert report.clock(ts("09:05"), tz(), seconds=True) == "09:05:00"
 
 
-def test_prayer_times_for_tashkent_are_plausible():
-    from camera import prayer
+def test_videos_are_matched_to_arrivals_and_departures(camera_db):
+    from camera import report, store
+    from camera import ui as cu
 
-    times = prayer.times_for(DAY, tz())
-    order = [times[name] for name in prayer.NAMES]
-    assert order == sorted(order)
-    assert time(11, 55) <= times["peshin"].time() <= time(12, 25)  # solar noon in Tashkent, October
-    assert time(17, 15) <= times["shom"].time() <= time(17, 50)
-    assert time(6, 30) <= times["quyosh"].time() <= time(7, 5)
-    summer = prayer.times_for(date(2026, 6, 21), tz())
-    assert time(19, 45) <= summer["shom"].time() <= time(20, 15)  # Tashkent sunset at the solstice ~19:58
+    start, end = report.day_bounds(DAY, tz())
+    rows, _gaps, _share = report.day_report(store.employees(), store.intervals(start, end), store.coverage(start, end),
+                                            DAY, tz(), now_ts=end + 3600)
+    nodir = next(r for r in rows if r.employee == "Nodir")
+    clips = store.clips(start, end)
+    found = [cu.find_clip(clips, 1, kind, moment) for _label, kind, moment in cu.moments(nodir)]
+    assert [f is not None for f in found] == [True, True, True, False]
+    assert store.clip_file(found[0]) is not None
+    assert store.clip_file("../camera.db") is None  # never outside the clips folder
+
+
+def test_one_employee_sits_at_one_desk(camera_db):
+    from camera import store
+
+    with pytest.raises(store.EmployeeTaken):
+        store.save_desk(None, "Ikkinchi stol", 1, [[0.1, 0.1], [0.2, 0.1], [0.2, 0.2]])
+    store.save_desk(1, "Uzoq stol", 1, [[0.1, 0.1], [0.2, 0.1], [0.2, 0.2]])  # the same desk again is fine
 
 
 # --------------------------------------------------------------------------- zone drawing, Excel, installer
@@ -260,8 +266,13 @@ def test_today_page_shows_the_chosen_day(camera_db):
     app = run_page("kamera_bugun", {"cam_day_live": DAY})
     assert_clean(app)
     table = app.dataframe[0].value
+    assert list(table.columns) == ["Hodim", "Keldi", "Ketdi", "Tashqarida", "Necha marta chiqdi"]
     assert list(table["Hodim"]) == ["Nodir", "Husniddin", "Muhammadumar"]
-    assert table.loc[1, "Ma'lumot yo'q"] == "0:30"
+    assert list(table.loc[0, ["Keldi", "Ketdi", "Tashqarida", "Necha marta chiqdi"]]) == ["09:05", "18:55", "0:20", 1]
+    assert table.loc[1, "Tashqarida"] == "0:00"  # 14:00-14:30 the camera was down: not counted as outside
+    outings = app.dataframe[1].value
+    assert list(outings.loc[0, ["Chiqdi", "Qaytdi", "Tashqarida"]]) == ["12:10:00", "12:30:00", "0:20"]
+    assert app.warning  # the outage is reported
 
 
 def test_days_page_last_7_days(camera_db):
@@ -275,10 +286,9 @@ def test_days_page_last_7_days(camera_db):
     conn.close()
     app = run_page("kamera_kunlar", {"_url_loaded": True, "f_preset": "last7"})
     assert_clean(app)
-    summary, matrix = app.dataframe[0].value, app.dataframe[1].value
-    assert "Nodir" in set(summary["Hodim"])
-    assert yesterday.strftime("%d.%m") in matrix.columns
-    assert matrix.loc[matrix["Hodim"] == "Nodir", yesterday.strftime("%d.%m")].item() == "2:30"
+    table = app.dataframe[0].value
+    line = table[(table["Sana"] == yesterday.strftime("%d.%m.%Y")) & (table["Hodim"] == "Nodir")]
+    assert list(line[["Keldi", "Ketdi", "Tashqarida"]].iloc[0]) == ["10:00", "12:30", "0:00"]
 
 
 def test_missing_camera_database_gives_a_message(tmp_path):

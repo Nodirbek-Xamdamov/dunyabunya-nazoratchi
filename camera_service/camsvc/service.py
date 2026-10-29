@@ -4,7 +4,8 @@
     .venv\\Scripts\\python.exe -m camsvc.service
 
 Writes: data\\camera.db (cam_* tables), data\\live\\latest.jpg (annotated) and latest_raw.jpg (clean,
-for drawing zones), both replaced in place - no frame history. Logs: logs\\service.log (5 x 5 MB).
+for drawing zones), both replaced in place, and a 5-second video of every arrival and departure at a desk in
+data\\clips (kept `clip_keep_days`). Logs: logs\\service.log (5 x 5 MB).
 Stops cleanly on Ctrl+C or when the file data\\STOP exists (it is removed on the next start).
 Settings, desks and employees are re-read when the dashboard changes them.
 """
@@ -20,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from camsvc import runtime  # noqa: F401  (must come before ultralytics)
 from camsvc import db
+from camsvc.clips import ClipRecorder
 from camsvc.config import LOGS_DIR, camera_from_env, mask
 from camsvc.pipeline import Pipeline, draw, write_live
 from camsvc.stream import LatestFrameReader
@@ -105,7 +107,8 @@ def run() -> int:
     channel = {"value": int(settings["channel"])}
     reader = LatestFrameReader(lambda: camera.url(channel["value"]), stall_seconds=float(settings["stall_s"]),
                                log=log.info, name="kamera").start()
-    pipeline = Pipeline(conn, settings, db.active_desks(conn))
+    recorder = ClipRecorder(conn, tz=tz)
+    pipeline = Pipeline(conn, settings, db.active_desks(conn), recorder=recorder)
     pipeline.resume_open(time.time())
     coverage = Coverage(conn)
 
@@ -121,7 +124,7 @@ def run() -> int:
 
     last_seq = 0
     last_frames = 0
-    last_draw = last_status = last_check = 0.0
+    last_draw = last_status = last_check = last_cleanup = 0.0
     recent: list[float] = []
     fps = float(settings["target_fps"])
     period = 1.0 / fps
@@ -160,6 +163,10 @@ def run() -> int:
                     "gpu_mem_mb": round(torch.cuda.memory_reserved() / 2**20), "model": settings["model"],
                     "imgsz": settings["imgsz"], "channel": channel["value"], "target_fps": fps,
                     "reconnects": reader.stats.disconnects, "desks": pipeline.desk_states(now)})
+            if now - last_cleanup >= 3600:
+                last_cleanup = now
+                if deleted := recorder.cleanup(float(settings.get("clip_keep_days", 30))):
+                    log.info("eski videolar o'chirildi: %s", deleted)
             if now - last_check >= 10:
                 last_check = now
                 if STOP_FILE.exists():
@@ -176,7 +183,7 @@ def run() -> int:
                     if int(settings["channel"]) != channel["value"]:
                         channel["value"] = int(settings["channel"])
                         reader.drop_connection()
-                    pipeline = Pipeline(conn, settings, db.active_desks(conn))
+                    pipeline = Pipeline(conn, settings, db.active_desks(conn), recorder=recorder)
                     pipeline.resume_open(time.time())
             next_tick += period
             delay = next_tick - time.monotonic()
@@ -191,6 +198,7 @@ def run() -> int:
     finally:
         coverage.flush()
         pipeline.stop(close=False)
+        recorder.close()
         reader.stop()
         db.event(conn, "stopped", "xizmat to'xtadi")
         log.info("to'xtadi")

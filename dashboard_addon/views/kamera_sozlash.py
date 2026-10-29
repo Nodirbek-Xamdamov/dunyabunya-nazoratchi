@@ -1,5 +1,5 @@
 """«Yangi kamera» → Sozlash: desk zones drawn with the mouse on the newest camera picture, who sits at each
-desk, employees and their working hours, the counting rules and the prayer times. The camera service
+desk (one employee - one desk), employees and their working hours, and the counting rules. The camera service
 re-reads all of it within about 10 seconds."""
 
 from __future__ import annotations
@@ -11,10 +11,9 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-from camera import prayer, store, zone_editor
+from camera import store, zone_editor
 from camera import ui as cu
 from camera.texts import ct
-from core import timeutil as tu
 
 DAY_COLS = ("Du", "Se", "Ch", "Pa", "Ju", "Sh", "Ya")
 
@@ -22,16 +21,14 @@ DAY_COLS = ("Du", "Se", "Ch", "Pa", "Ju", "Sh", "Ya")
 @cu.guard
 def render() -> None:
     cu.header("title.setup")
-    desks_tab, people_tab, settings_tab, prayer_tab = st.tabs(
-        [ct("setup.tab.desks"), ct("setup.tab.people"), ct("setup.tab.settings"), ct("setup.tab.prayer")])
+    desks_tab, people_tab, settings_tab = st.tabs(
+        [ct("setup.tab.desks"), ct("setup.tab.people"), ct("setup.tab.settings")])
     with desks_tab:
         _desks()
     with people_tab:
         _people()
     with settings_tab:
         _settings()
-    with prayer_tab:
-        _prayer()
 
 
 # --------------------------------------------------------------------------- desks and zones
@@ -99,12 +96,16 @@ def _desks() -> None:
             elif len(draft) < 3:
                 st.error(ct("setup.need3"))
             else:
-                saved = store.save_desk(desk["id"] if desk else None, name.strip(), employee, draft)
-                st.session_state.pop(draft_key, None)
-                st.session_state.pop(f"cam_zone_{saved}", None)
-                st.session_state["cam_desk_next"] = saved
-                st.toast(ct("setup.saved"), icon=":material/check_circle:")
-                st.rerun()
+                try:
+                    saved = store.save_desk(desk["id"] if desk else None, name.strip(), employee, draft)
+                except store.EmployeeTaken as taken:
+                    st.error(ct("setup.desk.taken", name=names.get(employee, ""), desk=str(taken)))
+                else:
+                    st.session_state.pop(draft_key, None)
+                    st.session_state.pop(f"cam_zone_{saved}", None)
+                    st.session_state["cam_desk_next"] = saved
+                    st.toast(ct("setup.saved"), icon=":material/check_circle:")
+                    st.rerun()
         if desk:
             with st.popover(ct("setup.delete"), icon=":material/delete:", width="stretch"):
                 if st.button(ct("setup.delete.confirm"), type="primary", key=f"cam_delete_{choice}"):
@@ -136,27 +137,30 @@ def _people() -> None:
     for e in employees:
         days = {int(x) for x in str(e["workdays"]).split(",") if x.strip().isdigit()}
         row = {"id": e["id"], "name": e["name"], "start": _hhmm_to_time(e["work_start"]),
-               "end": _hhmm_to_time(e["work_end"]), "hours": round(e["required_minutes"] / 60, 2),
-               "active": bool(e["active"])}
+               "end": _hhmm_to_time(e["work_end"]), "required": e["required_minutes"], "active": bool(e["active"])}
         row.update({col: (index + 1) in days for index, col in enumerate(DAY_COLS)})
         rows.append(row)
-    frame = pd.DataFrame(rows, columns=["id", "name", "start", "end", "hours", *DAY_COLS, "active"])
+    frame = pd.DataFrame(rows, columns=["id", "name", "start", "end", "required", *DAY_COLS, "active"])
     version = st.session_state.get("cam_people_n", 0)  # a new editor after saving, so it shows the saved rows
     edited = st.data_editor(
         frame, num_rows="add", hide_index=True, width="stretch", key=f"cam_people_{version}",
         column_config={
             "id": None,
+            "required": None,  # kept as it is: the pages no longer show a required number of hours
             "name": st.column_config.TextColumn(ct("setup.people.name"), required=True, max_chars=60),
             "start": st.column_config.TimeColumn(ct("setup.people.start"), format="HH:mm", step=timedelta(minutes=5),
                                                  default=time(9, 0), required=True),
             "end": st.column_config.TimeColumn(ct("setup.people.end"), format="HH:mm", step=timedelta(minutes=5),
                                                default=time(19, 0), required=True),
-            "hours": st.column_config.NumberColumn(ct("setup.people.required"), min_value=0.0, max_value=16.0,
-                                                   step=0.5, default=10.0, format="%.1f"),
             **{col: st.column_config.CheckboxColumn(col, default=col != "Ya") for col in DAY_COLS},
             "active": st.column_config.CheckboxColumn(ct("setup.people.active"), default=True),
         })
     if st.button(ct("setup.save"), icon=":material/save:", type="primary", key="cam_people_save"):
+        names = [str(row.get("name") or "").strip().casefold() for row in edited.to_dict("records")]
+        twice = sorted({n for n in names if n and names.count(n) > 1})
+        if twice:  # one person must stay one employee with one id
+            st.error(ct("setup.people.twice", names=", ".join(twice)))
+            return
         saved = 0
         for row in edited.to_dict("records"):
             name = str(row.get("name") or "").strip()
@@ -168,8 +172,9 @@ def _people() -> None:
                 return
             workdays = ",".join(str(i + 1) for i, col in enumerate(DAY_COLS) if row.get(col))
             employee_id = None if pd.isna(row.get("id")) else int(row["id"])
-            store.save_employee(employee_id, name, start.strftime("%H:%M"), end.strftime("%H:%M"),
-                                int(round(float(row.get("hours") or 0) * 60)), workdays, bool(row.get("active", True)))
+            required = 600 if pd.isna(row.get("required")) else int(row["required"])
+            store.save_employee(employee_id, name, start.strftime("%H:%M"), end.strftime("%H:%M"), required, workdays,
+                                bool(row.get("active", True)))
             saved += 1
         st.toast(ct("setup.saved"), icon=":material/check_circle:")
         st.session_state["cam_people_n"] = version + 1
@@ -202,38 +207,12 @@ def _settings() -> None:
             grace = st.slider(ct("setup.s.away_grace"), 1, 30, int(round(float(s.get("away_grace_s", 600)) / 60)),
                               help=ct("setup.s.away_grace.help"))
             gap = st.slider(ct("setup.s.gap"), 30, 600, int(s.get("gap_s", 60)), 10)
-        st.subheader(ct("setup.s.prayer"), anchor=False)
-        credit = st.toggle(ct("setup.s.prayer_credit"), value=bool(s.get("prayer_credit", True)))
-        a, b, d = st.columns(3)
-        with a:
-            p_window = st.number_input(ct("setup.s.prayer_window"), 5, 120, int(s.get("prayer_window_min", 30)),
-                                       help=ct("setup.s.prayer_window.help"))
-        with b:
-            p_max = st.number_input(ct("setup.s.prayer_max"), 5, 60, int(s.get("prayer_max_min", 20)))
-        with d:
-            p_offset = st.number_input(ct("setup.s.prayer_offset"), -60, 60, int(s.get("prayer_offset_min", 0)))
+        st.subheader(ct("setup.s.videos"), anchor=False)
+        keep = st.number_input(ct("setup.s.clip_keep"), 1, 365, int(s.get("clip_keep_days", 30)),
+                               help=ct("setup.s.clip_keep.help"))
         if st.form_submit_button(ct("setup.s.save"), icon=":material/save:", type="primary"):
             store.save_settings({"target_fps": fps, "channel": channel, "desk_conf": conf, "anchor": anchor,
                                  "sit_window_s": float(window), "sit_ratio": ratio / 100, "away_grace_s": grace * 60.0,
-                                 "gap_s": float(gap), "prayer_credit": credit, "prayer_window_min": int(p_window),
-                                 "prayer_max_min": int(p_max), "prayer_offset_min": int(p_offset)})
+                                 "gap_s": float(gap), "clip_keep_days": int(keep)})
             st.toast(ct("setup.saved"), icon=":material/check_circle:")
     st.caption(f"{ct('live.model')}: {s.get('model')} · imgsz {s.get('imgsz')}")
-
-
-# --------------------------------------------------------------------------- prayer times
-
-
-def _prayer() -> None:
-    zone = cu.tz()
-    st.caption(ct("setup.prayer.caption"))
-    offset = float(store.settings().get("prayer_offset_min", 0))
-    today = datetime.now(zone).date()
-    rows = []
-    for i in range(7):
-        day = today + timedelta(days=i)
-        times = prayer.times_for(day, zone, offset)
-        row = {ct("col.date"): tu.fmt_day(day)}
-        row.update({ct(f"prayer.{name}"): times[name].strftime("%H:%M") for name in prayer.NAMES})
-        rows.append(row)
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")

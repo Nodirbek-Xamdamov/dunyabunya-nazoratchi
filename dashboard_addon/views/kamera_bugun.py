@@ -1,6 +1,6 @@
-"""«Yangi kamera» → Bugun: one day per employee (arrival, last seen, time at the desk, prayer time added to the
-work time, breaks, longest sitting, current state), the day timeline, minutes per hour, data quality and the
-intervals. Any day can be picked; test clips can be chosen as the source while the system is being checked."""
+"""«Yangi kamera» → Bugun: one day per employee - when they came, when they left, how long they were outside and how
+many times they went out - then the outings of one chosen employee with the 5-second video of every arrival and
+departure. Any day can be picked; test clips can be chosen as the source while the system is being checked."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from ui import components as c
 def render() -> None:
     zone = cu.tz()
     cu.header("title.today")
-    settings = store.settings()
     employees = store.employees()
     if not any(len(d["zone"]) >= 3 for d in store.desks()):
         st.info(ct("today.no_desks"), icon=":material/info:")
@@ -38,26 +37,21 @@ def render() -> None:
     start_ts, end_ts = report.day_bounds(day, zone)
     intervals = store.intervals(start_ts, end_ts, source)
     cov = store.coverage(start_ts, end_ts, source)
-    rows, gaps, share = report.day_report(employees, intervals, cov, day, zone, settings, now, clip=clip)
+    rows, gaps, _share = report.day_report(employees, intervals, cov, day, zone, now, clip=clip)
     live_today = not clip and day == today
     status = store.status() if live_today else {}
     states = cu.desk_states(status, now) if live_today else None
-    window = report.work_window(employees, day, zone) if not clip else (
-        (float(cov["minute_ts"].min()), float(cov["minute_ts"].max()) + 60) if len(cov) else None)
 
-    cols = st.columns(4)
+    cols = st.columns(3)
     with cols[0]:
         if states is not None:
             present = sum(1 for text in states.values() if text == ct("state.sitting"))
             c.kpi(ct("kpi.present"), f"{present} / {len(rows)}")
         else:
-            c.kpi(ct("col.employee"), str(len(rows)))
+            c.kpi(ct("kpi.came"), f"{sum(1 for r in rows if r.first is not None)} / {len(rows)}")
     with cols[1]:
-        c.kpi(ct("kpi.sat_total"), report.hhmm(sum(r.sat_s for r in rows)))
+        c.kpi(ct("kpi.outside_total"), report.hhmm(sum(r.outside_s for r in rows)))
     with cols[2]:
-        c.kpi(ct("kpi.coverage"), "—" if share is None else f"{share * 100:.0f}%".replace(".", ","),
-              help=ct("kpi.coverage.help"))
-    with cols[3]:
         if live_today:
             _level, text = cu.service_state(status, now)
             c.kpi(ct("kpi.service"), text)
@@ -69,43 +63,26 @@ def render() -> None:
     if not rows:
         cu.empty(ct("today.empty"))
         return
-    st.dataframe(cu.day_table(rows, zone, states, with_required=not clip), hide_index=True, width="stretch")
-
-    c.section(ct("sec.timeline"), ct("sec.timeline.caption"))
-    fig = cu.timeline(rows, gaps, day, zone, window, now)
-    if fig is None:
-        cu.empty(ct("today.empty"))
-    else:
-        c.plot(fig, key="cam-timeline")
-
-    c.section(ct("sec.hours"), ct("sec.hours.caption"))
-    first_hour = datetime.fromtimestamp(window[0], zone).hour if window else 8
-    last_hour = (datetime.fromtimestamp(window[1] - 1, zone).hour if window else 19)
-    seen_hours = [h for r in rows for h in r.hours]
-    if seen_hours:
-        first_hour, last_hour = min(first_hour, min(seen_hours)), max(last_hour, max(seen_hours))
-    table, config = cu.hours_table(rows, first_hour, last_hour)
-    st.dataframe(table, hide_index=True, width="stretch", column_config=config)
-
-    c.section(ct("sec.quality"))
+    summary = cu.day_table(rows, zone, states)
+    st.dataframe(summary, hide_index=True, width="stretch")
     if gaps:
         items = ", ".join(f"{report.clock(s, zone)}–{report.clock(e, zone)}" for s, e in gaps)
         st.warning(ct("quality.gaps", items=items), icon=":material/warning:")
-    elif window:
-        st.success(ct("quality.ok"), icon=":material/check_circle:")
-    if live_today:
-        st.caption(ct("quality.future", time=report.clock(now, zone)))
 
-    with st.expander(ct("sec.intervals")):
-        frame = cu.intervals_table(intervals, zone)
-        if frame.empty:
-            st.caption(ct("today.empty"))
-        else:
-            st.dataframe(frame, hide_index=True, width="stretch")
-        summary = cu.day_table(rows, zone, None, with_required=not clip)
-        summary.insert(0, ct("col.date"), day.isoformat())
-        st.download_button(ct("export"), workbook({ct("export.sheet.summary"): summary,
-                                                   ct("export.sheet.intervals"): frame}),
-                           file_name=f"kamera_{day.isoformat()}.xlsx", icon=":material/table_view:",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           on_click="ignore", key="cam-today-xlsx")
+    c.section(ct("sec.person"), ct("sec.person.caption"))
+    names = {r.employee_id: r.employee for r in rows}
+    chosen = st.selectbox(ct("col.employee"), list(names), format_func=names.get, key=f"cam_person_{source}")
+    row = next(r for r in rows if r.employee_id == chosen)
+    outings = cu.outings_table([row], zone, with_employee=False)
+    if outings.empty:
+        st.caption(ct("person.no_outings"))
+    else:
+        st.dataframe(outings, hide_index=True, width="stretch")
+    cu.show_clips(row, store.clips(start_ts, end_ts, source), zone)
+
+    summary.insert(0, ct("col.date"), day.isoformat())
+    st.download_button(ct("export"), workbook({ct("export.sheet.summary"): summary,
+                                               ct("export.sheet.outings"): cu.outings_table(rows, zone)}),
+                       file_name=f"kamera_{day.isoformat()}.xlsx", icon=":material/table_view:",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       on_click="ignore", key="cam-today-xlsx")

@@ -4,7 +4,24 @@ Vazifa: bitta kamera orqali har bir hodimning stol oldida o'tirgan vaqti (keldi,
 Natija mavjud CEO panelidagi yangi "Yangi kamera" bo'limida ko'rinadi.
 Suhbat uzilsa, ish shu fayldan davom ettiriladi.
 
-Oxirgi yangilanish: 2026-10-21 11:40 (Toshkent)
+Oxirgi yangilanish: 2026-10-29 (Toshkent)
+
+## 2026-10-29: vazifa toraytirildi
+
+Foydalanuvchi: faqat hodim xonaga nechida keldi, nechida ketdi, qancha vaqt tashqarida bo'ldi - jadval ko'rinishida;
+har bir chiqish va kirishning 5 soniyalik kadrlari; hodimlar aralashmasin, 1 hodim = doim 1 ID (oldin 100-150 ta "hodim" chiqqan).
+
+Qilindi:
+- Hodim faqat o'z stoli orqali aniqlanadi (`cam_desks.employee_id`). ByteTrack ID lari faqat "yurib o'tyaptimi" tekshiruvida
+  ishlatiladi, bazaga ham, ekranga ham chiqmaydi. Bir hodim faqat bitta stolga biriktiriladi (`store.save_desk` rad etadi),
+  "Hodimlar" jadvalida bir xil ism ikki marta saqlanmaydi.
+- `camsvc\clips.py`: har bir kelish (interval boshi, [-3 s, +2 s]) va ketish (interval oxiri "away", [-2 s, +3 s]) uchun
+  5 soniyalik H.264 video, `data\clips\<manba>\YYYY-MM-DD\<hodim id>_<HH-MM-SS>_<in|out>.mp4`, jadval `cam_clips`.
+  ffmpeg yo'q bo'lsa bitta kadr .jpg. `clip_keep_days` (30) dan eskilari o'chadi.
+- "Bugun": Hodim | Keldi | Ketdi | Tashqarida | Necha marta chiqdi (+ Hozir), keyin tanlangan hodimning chiqishlari va videolari.
+  "Kunlar": har kun va hodim uchun shu jadval + Excel. Namoz, kerakli soat, soatlar jadvali, kun chizig'i olib tashlandi
+  (`camera\prayer.py` o'chirildi, `install.py` uni panel papkasidan ham o'chiradi).
+- Tashqarida = ikki interval orasidagi vaqt, kamera ishlamagan daqiqalar ayirib. `away_grace_s` (10 daq) dan qisqa yo'qlik chiqish emas.
 
 ## Bosqichlar
 

@@ -4,7 +4,8 @@
 
 Frames are taken every 1/fps seconds of video; each frame gets the real time it was recorded
 (clip start from the .json next to the clip + position in the video). Results go to camera.db with
-source "clip:<file name>"; an earlier run of the same clip is replaced. Desks and settings are the
+source "clip:<file name>", the 5-second arrival/departure videos to data\\clips\\clip_<file name>\\;
+an earlier run of the same clip is replaced. Desks and settings are the
 ones saved in the dashboard (target_fps can be overridden with --fps).
 """
 
@@ -13,14 +14,17 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from camsvc import runtime  # noqa: E402  (must come before ultralytics)
 from camsvc import db  # noqa: E402
+from camsvc.clips import CLIPS_DIR, ClipRecorder, source_dir  # noqa: E402
 from camsvc.pipeline import Pipeline  # noqa: E402
 
 import cv2  # noqa: E402
@@ -52,8 +56,11 @@ def main() -> int:
     with conn:
         conn.execute("DELETE FROM cam_intervals WHERE source = ?", (source,))
         conn.execute("DELETE FROM cam_coverage WHERE source = ?", (source,))
+        conn.execute("DELETE FROM cam_clips WHERE source = ?", (source,))
+    shutil.rmtree(CLIPS_DIR / source_dir(source), ignore_errors=True)
     start_ts = clip_start(args.clip)
-    pipeline = Pipeline(conn, settings, desks, source=source)
+    recorder = ClipRecorder(conn, source, tz=ZoneInfo(settings.get("timezone", "Asia/Tashkent")))
+    pipeline = Pipeline(conn, settings, desks, source=source, recorder=recorder)
     cap = cv2.VideoCapture(str(args.clip), cv2.CAP_FFMPEG)
     period_ms = 1000.0 / float(settings["target_fps"])
     next_ms = None
@@ -78,14 +85,16 @@ def main() -> int:
         per_minute[minute] = per_minute.get(minute, 0) + 1
     pipeline.stop(close=True)
     cap.release()
+    recorder.close(timeout=300)
     fps = float(settings["target_fps"])
     for minute, count in per_minute.items():
         seconds = min(60.0, start_ts + pos / 1000 - minute, minute + 60 - start_ts)
         db.add_coverage(conn, source, minute, round(max(0.0, seconds) * fps), count, 0, max(0.0, seconds))
     elapsed = time.monotonic() - started
     rows = conn.execute("SELECT COUNT(*), SUM(end_ts - start_ts) FROM cam_intervals WHERE source = ?", (source,)).fetchone()
+    videos = conn.execute("SELECT COUNT(*) FROM cam_clips WHERE source = ?", (source,)).fetchone()[0]
     print(f"{args.clip.name}: video {pos / 60000:.1f} daq, {processed} kadr, {elapsed:.0f} s "
-          f"({pos / 1000 / max(elapsed, 1e-6):.1f}x real vaqtdan tez); intervallar {rows[0]}, jami {(rows[1] or 0) / 60:.1f} daq")
+          f"({pos / 1000 / max(elapsed, 1e-6):.1f}x real vaqtdan tez); intervallar {rows[0]}, jami {(rows[1] or 0) / 60:.1f} daq, videolar {videos}")
     return 0
 
 

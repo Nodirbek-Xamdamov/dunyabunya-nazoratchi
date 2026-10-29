@@ -1,8 +1,10 @@
 """Frame -> people -> desks -> intervals in camera.db. Shared by the live service and clip replays.
 
 The model only looks at the part of the frame around the desk zones (plus `roi_margin`); with no
-zones it looks at the whole frame. ByteTrack links the frames of one stream (persist=True); the
-desk logic itself lives in zones.py and presence.py.
+zones it looks at the whole frame. ByteTrack links the frames of one stream (persist=True); its track IDs
+are used only inside zones.py to tell a walking person from a seated one and are never stored or shown.
+Who a person is comes only from the desk: each desk has one fixed employee (cam_desks.employee_id).
+The desk logic itself lives in zones.py and presence.py; the 5-second arrival/departure videos in clips.py.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import cv2
 import numpy as np
 
 from camsvc import db, runtime
+from camsvc.clips import ClipRecorder
 from camsvc.presence import Closed, DeskPresence, Opened, PresenceParams, Seen
 from camsvc.zones import DeskMatcher, Detection, centroid, roi_for
 
@@ -37,10 +40,11 @@ def hhmm(seconds: float) -> str:
 
 
 class Pipeline:
-    def __init__(self, conn, settings: dict, desks: list[dict], *, source: str = "live"):
+    def __init__(self, conn, settings: dict, desks: list[dict], *, source: str = "live",
+                 recorder: ClipRecorder | None = None):
         from ultralytics import YOLO
 
-        self.conn, self.settings, self.source = conn, settings, source
+        self.conn, self.settings, self.source, self.recorder = conn, settings, source, recorder
         self.desks = {d["id"]: d for d in desks if len(d.get("zone") or []) >= 3}
         self.model = YOLO(str(runtime.MODELS_DIR / settings["model"]))
         self.matcher = DeskMatcher(list(self.desks.values()), desk_conf=float(settings["desk_conf"]),
@@ -81,9 +85,14 @@ class Pipeline:
             for (x1, y1, x2, y2), conf, tid in zip(boxes.xyxy.tolist(), boxes.conf.tolist(), ids):
                 detections.append(Detection((x1 + x0, y1 + y0, x2 + x0, y2 + y0), conf, tid))
         matched = self.matcher.match(t, detections, width, height, roi)
+        if self.recorder is not None:
+            self.recorder.add(t, image)
         for desk_id, det in matched.items():
-            for event in self.presence[desk_id].update(t, det is not None):
+            machine = self.presence[desk_id]
+            for event in machine.update(t, det is not None):
                 self._store(desk_id, event)
+            if self.recorder is not None and machine.sitting and det is None:
+                self.recorder.watch(desk_id, machine.last_seen, t)
         self.last = {"t": t, "roi": roi, "detections": detections, "matched": matched, "infer_ms": infer_ms}
         return self.last
 
@@ -116,15 +125,19 @@ class Pipeline:
         return states
 
     def _store(self, desk_id: int, event) -> None:
+        employee = self.desks[desk_id].get("employee_id")
         if isinstance(event, Opened):
-            employee = self.desks[desk_id].get("employee_id")
             self.interval_ids[desk_id] = db.open_interval(self.conn, desk_id, employee, event.start, self.source)
+            if self.recorder is not None:
+                self.recorder.arrival(desk_id, employee, self.interval_ids[desk_id], event.start)
         elif isinstance(event, Seen):
             if (interval := self.interval_ids.get(desk_id)) is not None:
                 db.touch_interval(self.conn, interval, event.last_seen)
         elif isinstance(event, Closed):
             if (interval := self.interval_ids.pop(desk_id, None)) is not None:
                 db.close_interval(self.conn, interval, event.end, event.reason)
+                if self.recorder is not None and event.reason == "away":  # not a camera outage or the clip's end
+                    self.recorder.departure(desk_id, employee, interval, event.end)
 
 
 def draw(image: np.ndarray, pipeline: Pipeline, t: float, tz=None) -> np.ndarray:

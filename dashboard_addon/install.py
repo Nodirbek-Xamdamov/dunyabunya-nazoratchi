@@ -20,6 +20,7 @@ ADDON = Path(__file__).resolve().parent
 FILES = [*(f"camera/{p.name}" for p in sorted((ADDON / "camera").glob("*.py"))),
          *(f"views/{p.name}" for p in sorted((ADDON / "views").glob("kamera*.py"))),
          "tests/test_camera.py"]
+OBSOLETE = ["camera/prayer.py"]  # files of earlier versions, removed from the dashboard on install
 
 IMPORT_ANCHOR = "from views import agents, categories, groups, overview, own, reports, response, search, staff, system, trends  # noqa: E402\n"
 IMPORT_LINE = "from views import kamera  # noqa: E402  «Yangi kamera» section (camera desk time), see views/kamera.py\n"
@@ -63,7 +64,7 @@ def main() -> int:
     newline = "\r\n" if b"\r\n" in app.read_bytes() else "\n"  # written back with the file's own line endings
     if args.uninstall:
         app.write_text(unpatched(text), encoding="utf-8", newline=newline)
-        for name in FILES:
+        for name in FILES + OBSOLETE:
             (args.dashboard / name).unlink(missing_ok=True)
         print(f"removed: app.py patch and {len(FILES)} files")
         return 0
@@ -75,6 +76,8 @@ def main() -> int:
         target = args.dashboard / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ADDON / name, target)
+    for name in OBSOLETE:
+        (args.dashboard / name).unlink(missing_ok=True)
     if new_text != text:
         app.write_text(new_text, encoding="utf-8", newline=newline)
     print(f"installed: {len(FILES)} files, app.py {'patched' if new_text != text else 'already patched'}")
