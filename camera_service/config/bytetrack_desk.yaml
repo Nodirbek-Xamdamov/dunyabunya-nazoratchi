@@ -1,0 +1,11 @@
+# ByteTrack for desk presence: Ultralytics bytetrack.yaml defaults (8.4.183), except track_buffer.
+# The model runs at about 5 frames/s, so the default 30 frames would forget a hidden person after
+# 6 s; 150 frames keeps the same ID through about 30 s of occlusion (monitor, someone walking past).
+
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 150
+match_thresh: 0.8
+fuse_score: True

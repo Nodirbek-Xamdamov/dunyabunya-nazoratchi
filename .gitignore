@@ -1,0 +1,23 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# video, frames and data never go to git
+test_clips/
+review/
+**/data/
+**/logs/
+**/backups/
+
+# environment, downloaded wheels and model weights
+**/.venv/
+**/wheels/
+__pycache__/
+*.pyc
+*.pt
+*.onnx
+*.engine
+
+# local copy of the dashboard for development and tests
+dev/
