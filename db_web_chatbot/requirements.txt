@@ -1,7 +1,0 @@
-# requirements.txt
-fastapi==0.141.1
-uvicorn==0.52.4
-openai==3.8.0
-pydantic-settings==2.15.0
-pydantic==2.13.5
-httpx2==2.12.0
