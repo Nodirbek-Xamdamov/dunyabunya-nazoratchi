@@ -1,13 +1,13 @@
 """Xodimlar kirdi-chiqdi paneli. Jonli video yo'q: jadval va kirish/chiqishdagi 5 soniyalik videolar.
 
 Ma'lumotni fonda ishlaydigan xizmat yozadi (python -m nazorat.xizmat); bu sahifa o'qiydi va
-odamlarning turini (xodim / mehmon) belgilaydi. Jadvaldagi odamni bossangiz — uning shu kungi videolari.
+odamlarning turini (xodim / mehmon) belgilaydi. Qator oxiridagi «⋮» -> «Kadrlarni ko'rish» — shu odamning
+o'sha kungi videolari (?hodim=ID&sana=YYYY-MM-DD).
 """
 import json
 import time
 from datetime import date, datetime
 
-import pandas as pd
 import streamlit as st
 
 from nazorat import config, db
@@ -38,9 +38,16 @@ def nomi(hid):
     return f"#{hid} {n}" if n else f"Hodim {hid}"
 
 
+qp = st.query_params
+try:
+    tanlangan = int(qp["hodim"]) if "hodim" in qp else None
+    qp_kun = datetime.strptime(qp["sana"], "%Y-%m-%d").date() if "sana" in qp else None
+except ValueError:
+    tanlangan, qp_kun = None, None
+
 # ---------------------------------------------------------------- yon panel
 st.sidebar.header("Sozlamalar")
-kun = st.sidebar.date_input("Sana", value=date.today(), format="DD.MM.YYYY")
+kun = st.sidebar.date_input("Sana", value=qp_kun or date.today(), format="DD.MM.YYYY")
 kun_s = kun.strftime("%Y-%m-%d")
 
 holat, holat_ts = db.get_holat(con, "xizmat")
@@ -65,60 +72,86 @@ ev_by = {}
 for e in events:
     ev_by.setdefault(e["hodim_id"], []).append(e)
 
-
-def jadval(ids, key):
-    """Jadval; bosilgan qatordagi odamning raqamini qaytaradi."""
-    q = []
-    for hid in ids:
-        k = hisob[hid]
-        q.append({
-            "Hodim": nomi(hid),
-            "Keldi": hm(k.keldi),
-            "Ketdi": hm(k.ketdi) if k.ketdi else "hali xonada",
-            "Chiqib ketishlar": len(k.chiqishlar),
-            "Tashqarida": soat_daqiqa(k.tashqarida),
-            "Umumiy (keldi→ketdi)": soat_daqiqa(k.umumiy),
-            "Xonada": soat_daqiqa(k.xonada),
-        })
-    tanlov = st.dataframe(pd.DataFrame(q), use_container_width=True, hide_index=True,
-                          on_select="rerun", selection_mode="single-row", key=key)
-    qatorlar = tanlov.selection.rows
-    return ids[qatorlar[0]] if qatorlar else None
+USTUNLAR = ["Hodim", "Keldi", "Ketdi", "Chiqib ketishlar", "Tashqarida", "Umumiy (keldi→ketdi)", "Xonada", ""]
+KENGLIK = [2, 1, 1.2, 1.1, 1.1, 1.4, 1.2, 0.5]
 
 
-def videolar(hid):
-    """Odamning shu kungi barcha kirish/chiqish videolari, vaqt tartibida."""
+def korish(hid):
+    st.query_params.from_dict({"hodim": str(hid), "sana": kun_s})
+
+
+def jadval(ids, key, amallar=False):
+    """Jadval; har qator oxirida «⋮» menyusi: «Kadrlarni ko'rish» (va noma'lumlar uchun belgilash)."""
+    with st.container(border=True):
+        for c, n in zip(st.columns(KENGLIK), USTUNLAR):
+            c.markdown(f"**{n}**")
+        for hid in ids:
+            k = hisob[hid]
+            qator = st.columns(KENGLIK, vertical_alignment="center")
+            for c, v in zip(qator, [nomi(hid), hm(k.keldi), hm(k.ketdi) if k.ketdi else "hali xonada",
+                                    len(k.chiqishlar), soat_daqiqa(k.tashqarida), soat_daqiqa(k.umumiy),
+                                    soat_daqiqa(k.xonada)]):
+                c.write(v)
+            with qator[-1].popover("⋮"):
+                st.button("Kadrlarni ko'rish", key=f"{key}_v_{hid}", icon=":material/movie:",
+                          on_click=korish, args=(hid,), use_container_width=True)
+                if amallar:
+                    if st.button("Xodim deb belgilash", key=f"{key}_x_{hid}", use_container_width=True):
+                        db.set_tur(con, hid, "xodim")
+                        st.rerun()
+                    if st.button("Mehmon deb belgilash", key=f"{key}_m_{hid}", use_container_width=True,
+                                 help="Boshqa xonadan kelgan — xodimlar jadvaliga tushmaydi"):
+                        db.set_tur(con, hid, "mehmon")
+                        st.rerun()
+                    if st.button("Olib tashlash", key=f"{key}_o_{hid}", use_container_width=True,
+                                 help="Odam emas yoki xato aniqlangan"):
+                        db.hide(con, hid)
+                        st.rerun()
+
+
+def videolar_sahifasi(hid):
+    """Faqat bitta odamning tanlangan kundagi kirish/chiqish videolari."""
+    if st.button("Orqaga", icon=":material/arrow_back:"):
+        st.query_params.clear()
+        st.rerun()
+    st.title(f"{nomi(hid)} — {kun.strftime('%d.%m.%Y')} videolari")
+    if hid not in hisob:
+        st.info("Bu kunda bu odamning kirish-chiqishi yo'q.")
+        return
     k = hisob[hid]
-    ketdi_ts = k.ketdi
-    keldi_ts = k.keldi
+    st.markdown(f"Keldi **{hms(k.keldi)}** · {'ketdi **' + hms(k.ketdi) + '**' if k.ketdi else 'hali xonada'} · "
+                f"umumiy {soat_daqiqa(k.umumiy)} · tashqarida {soat_daqiqa(k.tashqarida)} · "
+                f"**xonada {soat_daqiqa(k.xonada)}**")
     roy = []
     for e in ev_by.get(hid, []):
         if e["tur"] == "kirish":
-            yorliq = "Keldi" if abs(e["ts"] - keldi_ts) < 0.5 else "Qaytib kirdi"
+            yorliq = "Keldi" if abs(e["ts"] - k.keldi) < 0.5 else "Qaytib kirdi"
         else:
-            yorliq = "Ketdi" if ketdi_ts and abs(e["ts"] - ketdi_ts) < 0.5 else "Chiqdi"
+            yorliq = "Ketdi" if k.ketdi and abs(e["ts"] - k.ketdi) < 0.5 else "Chiqdi"
         roy.append((yorliq, e))
-    st.markdown(f"**{nomi(hid)}** — keldi {hms(k.keldi)}, "
-                f"{'ketdi ' + hms(k.ketdi) if k.ketdi else 'hali xonada'} · umumiy {soat_daqiqa(k.umumiy)} · "
-                f"tashqarida {soat_daqiqa(k.tashqarida)} · **xonada {soat_daqiqa(k.xonada)}**")
     bor = [(y, e) for y, e in roy if e["klip"] and (config.CLIPS / e["klip"]).exists()]
     if not bor:
-        st.caption("Bu kunda video yo'q.")
+        st.info("Bu kunda video yo'q.")
         return
-    ustun = st.columns(4)
+    ustun = st.columns(3)
     for i, (yorliq, e) in enumerate(bor):
-        with ustun[i % 4]:
-            st.caption(f"{yorliq} · {hms(e['ts'])}")
+        with ustun[i % 3]:
+            st.markdown(f"**{yorliq}** · {hms(e['ts'])}")
             st.video(str(config.CLIPS / e["klip"]))
     if len(bor) < len(roy):
         st.caption(f"{len(roy) - len(bor)} ta hodisaning videosi yo'q (xizmat qayta ishga tushganda yoki "
                    f"{config.KLIP_SAQLASH_KUN} kundan eski).")
 
 
-# ---------------------------------------------------------------- xodimlar
-st.title("Xodimlar: kirdi-chiqdi va xonadagi vaqt")
 if ogohlantirish:
     st.error(ogohlantirish, icon="🚨")
+
+if tanlangan is not None:
+    videolar_sahifasi(tanlangan)
+    st.stop()
+
+# ---------------------------------------------------------------- xodimlar
+st.title("Xodimlar: kirdi-chiqdi va xonadagi vaqt")
 tartib = sorted(hisob, key=lambda i: hisob[i].keldi)
 xodimlar = [i for i in tartib if odamlar[i]["tur"] == "xodim"]
 mehmonlar = [i for i in tartib if odamlar[i]["tur"] == "mehmon"]
@@ -126,51 +159,21 @@ nomalumlar = [i for i in tartib if odamlar[i]["tur"] == "nomalum"]
 
 st.subheader("Xonaning xodimlari")
 if xodimlar:
-    st.caption("Xodimning qatorini bosing — shu kun kelgan, chiqib-kirgan va ketgan paytdagi 5 soniyalik videolar ochiladi.")
-    hid = jadval(xodimlar, "j_xodim")
-    if hid is not None:
-        videolar(hid)
+    jadval(xodimlar, "j_xodim")
 else:
     st.info("Bu kunda xodim yozuvi yo'q.")
-st.caption(f"Xodim — stolida doimiy o'tiradigan odam: bir kunda joyida {config.XODIM_OTIRISH_S // 60} daqiqadan "
-           "ko'p o'tirgan odam avtomatik xodim bo'ladi. Farrosh, qorovul, boshqa xonadan kelganlar xodim bo'lmaydi. "
-           f"Videolar {config.KLIP_SAQLASH_KUN} kun saqlanadi.")
+st.caption("Qator oxiridagi «⋮» → «Kadrlarni ko'rish»: shu kun kelgan, chiqib-kirgan va ketgan paytdagi 5 soniyalik "
+           f"videolar. Xodim — stolida doimiy o'tiradigan odam (bir kunda {config.XODIM_OTIRISH_S // 60} daqiqadan "
+           f"ko'p); farrosh, qorovul, boshqa xonadan kelganlar xodim bo'lmaydi. Videolar {config.KLIP_SAQLASH_KUN} "
+           "kun saqlanadi.")
 
-# ---------------------------------------------------------------- boshqa kirganlar
 if nomalumlar:
     st.subheader(f"Boshqa kirganlar — xodim emas ({len(nomalumlar)})")
-    st.caption("Kirib-chiqib yurganlar (farrosh, qorovul, boshqa xonadan kelganlar). Qatorini bossangiz — "
-               "videolari va uni belgilash tugmalari chiqadi.")
-    hid = jadval(nomalumlar, "j_nomalum")
-    if hid is not None:
-        videolar(hid)
-        ism = st.text_input("Ismi", key=f"ism_{hid}", placeholder="Ismi (ixtiyoriy)")
-        a, b, c, d1, d2 = st.columns([1, 1, 1, 2, 1])
-        if a.button("Xodim", key=f"x_{hid}", use_container_width=True, type="primary"):
-            db.set_tur(con, hid, "xodim", ism or None)
-            st.rerun()
-        if b.button("Mehmon", key=f"m_{hid}", use_container_width=True,
-                    help="Boshqa xonadan kelgan — xodimlar jadvaliga tushmaydi"):
-            db.set_tur(con, hid, "mehmon", ism or None)
-            st.rerun()
-        if c.button("Olib tashlash", key=f"o_{hid}", use_container_width=True,
-                    help="Odam emas yoki xato aniqlangan"):
-            db.hide(con, hid)
-            st.rerun()
-        boshqalar = [i for i in odamlar if i != hid and odamlar[i]["tur"] != "nomalum"]
-        if boshqalar:
-            nishon = d1.selectbox("Bu aslida", boshqalar, format_func=nomi, key=f"b_{hid}",
-                                  label_visibility="collapsed")
-            if d2.button("Shu odam", key=f"bb_{hid}", use_container_width=True):
-                db.merge(con, hid, nishon)
-                st.rerun()
+    jadval(nomalumlar, "j_nomalum", amallar=True)
 
-# ---------------------------------------------------------------- mehmonlar
 if mehmonlar:
     st.subheader("Boshqa xonadan kelganlar (mehmonlar)")
-    hid = jadval(mehmonlar, "j_mehmon")
-    if hid is not None:
-        videolar(hid)
+    jadval(mehmonlar, "j_mehmon")
 
 # ---------------------------------------------------------------- boshqarish
 with st.expander("Odamlarni boshqarish (ism, tur, birlashtirish)"):
