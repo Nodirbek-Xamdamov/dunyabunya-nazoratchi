@@ -21,3 +21,5 @@ __pycache__/
 
 # local copy of the dashboard for development and tests
 dev/
+*.pth
+*.lnk
